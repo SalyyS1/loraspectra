@@ -818,7 +818,9 @@ pub fn inspect_adapter_architecture(
     alphas: &BTreeMap<String, f64>,
 ) -> AdapterArchitectureInfo {
     let first_a = layers.first().map(|l| l.a_key.as_str()).unwrap_or("");
-    let naming_format = if first_a.ends_with(".lora_A.weight")
+    let naming_format = if first_a.starts_with("lycoris_") {
+        "SimpleTuner / LyCORIS"
+    } else if first_a.ends_with(".lora_A.weight")
         || first_a.ends_with(".lora_A.default.weight")
     {
         "HuggingFace PEFT"
@@ -864,7 +866,12 @@ pub fn inspect_adapter_architecture(
     let max_dim = max_d_in.max(max_d_out);
 
     let inferred_architecture = if is_diffusion {
-        if layers
+        if layers.iter().any(|l| {
+            l.base_name.contains("double_stream_modulation")
+                || l.base_name.contains("single_stream_modulation")
+        }) {
+            "Flux.2 DiT (Flow Transformer)"
+        } else if layers
             .iter()
             .any(|l| l.base_name.contains("double_blocks") || l.base_name.contains("single_blocks"))
         {
