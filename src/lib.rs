@@ -46,10 +46,14 @@ mod tests {
     use crate::linalg::{
         jacobi_svd, matmul, qr_core_singular_values, thin_qr_columns,
     };
-    use crate::merge::{analyze_layer_interference, merge_layer, MergeStrategy};
+    use crate::merge::{
+        analyze_layer_interference, merge_adapters_with_block_weights, merge_layer,
+        parse_layer_weights, MergeStrategy,
+    };
     use crate::safetensors::{
         bf16_to_f32, extract_lora_layers, f16_to_f32, f32_to_bf16, f32_to_f16,
-        layers_to_tensor_map, read_safetensors, write_safetensors, DType, LoraLayer, Tensor2D,
+        layers_to_tensor_map, read_safetensors, write_peft_rank_pattern_config, write_safetensors,
+        DType, LoraLayer, Tensor2D,
     };
 
     fn random_matrix(rows: usize, cols: usize, rng: &mut Rng64, dtype: DType) -> Tensor2D {
@@ -346,5 +350,156 @@ mod tests {
             "OrthoSvd merge should preserve Task 1 mode 0 with near-zero error, got {}",
             err_ortho
         );
+    }
+
+    #[test]
+    fn test_marchenko_pastur_automatic_noise_floor_recovery() {
+        let mut rng = Rng64::new(31415);
+        let d = 128;
+        let r = 16;
+        let true_signal_k = 4;
+
+        let raw_u = random_matrix(d, r, &mut rng, DType::F32);
+        let (u_cols, _) = thin_qr_columns(&raw_u);
+        let raw_v = random_matrix(d, r, &mut rng, DType::F32);
+        let (v_cols, _) = thin_qr_columns(&raw_v);
+
+        // Modes 0..4 have strong signal singular values (8.0, 6.0, 5.0, 4.0);
+        // modes 4..16 are stochastic SGD noise floor (~0.15).
+        let mut b = Tensor2D::zeros(d, r, DType::F32);
+        let mut a = Tensor2D::zeros(r, d, DType::F32);
+        for j in 0..r {
+            let sigma = if j < true_signal_k {
+                8.0 - (j as f64) * 1.2
+            } else {
+                0.15 + 0.02 * rng.next_f64()
+            };
+            let s_sqrt = sigma.sqrt();
+            for row in 0..d {
+                b.set(row, j, u_cols[j][row] * s_sqrt);
+                a.set(j, row, v_cols[j][row] * s_sqrt);
+            }
+        }
+
+        let layer = LoraLayer {
+            base_name: "model.layers.0.mlp.gate_proj".to_string(),
+            a_key: "model.layers.0.mlp.gate_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.gate_proj.lora_B.weight".to_string(),
+            a,
+            b,
+        };
+
+        let rep = audit_layer(&layer);
+        assert_eq!(rep.rank_marchenko_pastur, true_signal_k);
+
+        let (compressed, metric) = compress_layer(
+            &layer,
+            CompressionPolicy::MarchenkoPastur {
+                min_rank: 1,
+                max_rank: 64,
+            },
+        );
+        assert_eq!(compressed.rank(), true_signal_k);
+        assert_eq!(metric.compressed_rank, true_signal_k);
+        assert!(metric.retained_energy_ratio > 0.99);
+    }
+
+    #[test]
+    fn test_diffusers_and_onetrainer_keys_and_peft_rank_pattern_export() {
+        let mut rng = Rng64::new(8080);
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            "unet.down_blocks.0.attentions.0.to_q.lora.down.weight".to_string(),
+            random_matrix(4, 32, &mut rng, DType::F16),
+        );
+        map.insert(
+            "unet.down_blocks.0.attentions.0.to_q.lora.up.weight".to_string(),
+            random_matrix(32, 4, &mut rng, DType::F16),
+        );
+        map.insert(
+            "transformer.blocks.0.attn.to_k_lora.down.weight".to_string(),
+            random_matrix(8, 32, &mut rng, DType::F16),
+        );
+        map.insert(
+            "transformer.blocks.0.attn.to_k_lora.up.weight".to_string(),
+            random_matrix(32, 8, &mut rng, DType::F16),
+        );
+
+        let layers = extract_lora_layers(&map).expect("extract diffusers/onetrainer layers");
+        assert_eq!(layers.len(), 2);
+
+        let mut rank_pattern = std::collections::BTreeMap::new();
+        rank_pattern.insert("base_model.model.layers.0.self_attn.q_proj".to_string(), 4);
+        rank_pattern.insert("base_model.model.layers.0.mlp.down_proj".to_string(), 12);
+
+        let cfg_path = std::env::temp_dir().join("test_peft_adapter_config.json");
+        write_peft_rank_pattern_config(&cfg_path, &rank_pattern, 16).expect("write peft config");
+        let content = std::fs::read_to_string(&cfg_path).expect("read peft config");
+        assert!(content.contains("\"rank_pattern\""));
+        assert!(content.contains("\"alpha_pattern\""));
+        assert!(content.contains("\"layers.0.self_attn.q_proj\": 4"));
+        assert!(content.contains("\"layers.0.mlp.down_proj\": 12"));
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    #[test]
+    fn test_layer_block_weighted_ortho_svd_merge() {
+        let mut rng = Rng64::new(9090);
+        let d = 32;
+        let r = 4;
+
+        let l1_attn = LoraLayer {
+            base_name: "layers.0.self_attn.q_proj".to_string(),
+            a_key: "layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+        let l1_mlp = LoraLayer {
+            base_name: "layers.0.mlp.up_proj".to_string(),
+            a_key: "layers.0.mlp.up_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.mlp.up_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+
+        let l2_attn = LoraLayer {
+            base_name: "layers.0.self_attn.q_proj".to_string(),
+            a_key: "layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+        let l2_mlp = LoraLayer {
+            base_name: "layers.0.mlp.up_proj".to_string(),
+            a_key: "layers.0.mlp.up_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.mlp.up_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+
+        let rules = parse_layer_weights("self_attn=1.0:0.0,mlp=0.0:1.0").expect("parse rules");
+        let merged = merge_adapters_with_block_weights(
+            &[l1_attn.clone(), l1_mlp.clone()],
+            &[l2_attn.clone(), l2_mlp.clone()],
+            MergeStrategy::OrthoSvd {
+                w1: 0.5,
+                w2: 0.5,
+                target_rank: r,
+            },
+            &rules,
+        )
+        .expect("block merge");
+
+        let dw_attn_orig = matmul(&l1_attn.b, &l1_attn.a);
+        let dw_attn_merged = matmul(&merged[0].b, &merged[0].a);
+        let err_attn: f64 = dw_attn_orig
+            .data
+            .iter()
+            .zip(dw_attn_merged.data.iter())
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(err_attn < 1e-10, "attn should match adapter 1, err={}", err_attn);
     }
 }

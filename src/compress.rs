@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::audit::estimate_marchenko_pastur_rank;
 use crate::linalg::{
     multiply_q_cols_by_small, jacobi_svd, matmul, svd_to_lora_factors, thin_qr_columns, transpose,
     SvdDecomposition,
@@ -14,6 +15,12 @@ pub enum CompressionPolicy {
     /// that preserves at least `target_energy` (e.g. `0.99` = 99% of Frobenius norm squared).
     AdaptiveEnergy {
         target_energy: f64,
+        min_rank: usize,
+        max_rank: usize,
+    },
+    /// Automatically prune stochastic SGD noise singular values using the Gavish-Donoho (2014)
+    /// Marchenko-Pastur optimal hard threshold with zero manual hyperparameter tuning.
+    MarchenkoPastur {
         min_rank: usize,
         max_rank: usize,
     },
@@ -77,6 +84,11 @@ pub fn compress_layer(
                 }
                 chosen.max(min_rank).min(max_rank).min(orig_r).max(1)
             }
+        }
+        CompressionPolicy::MarchenkoPastur { min_rank, max_rank } => {
+            let (mp_k, _) =
+                estimate_marchenko_pastur_rank(&core_svd.sigma, layer.d_out(), layer.d_in());
+            mp_k.max(min_rank).min(max_rank).min(orig_r).max(1)
         }
     };
 

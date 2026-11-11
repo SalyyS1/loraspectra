@@ -24,6 +24,73 @@ pub enum MergeStrategy {
     },
 }
 
+impl MergeStrategy {
+    pub fn with_weights(self, w1: f64, w2: f64) -> Self {
+        match self {
+            MergeStrategy::Linear { target_rank, .. } => MergeStrategy::Linear {
+                w1,
+                w2,
+                target_rank,
+            },
+            MergeStrategy::Ties {
+                density,
+                target_rank,
+                ..
+            } => MergeStrategy::Ties {
+                w1,
+                w2,
+                density,
+                target_rank,
+            },
+            MergeStrategy::OrthoSvd { target_rank, .. } => MergeStrategy::OrthoSvd {
+                w1,
+                w2,
+                target_rank,
+            },
+        }
+    }
+}
+
+/// Per-block weight override rule (e.g. `attn=1.0:0.2` or `mlp=0.2:1.0`) for fine-grained
+/// Layer-Block Weighting (LBW) during LoRA merging.
+#[derive(Debug, Clone)]
+pub struct BlockWeightRule {
+    pub pattern: String,
+    pub w1: f64,
+    pub w2: f64,
+}
+
+/// Parse a comma-separated layer-block weight specification such as `"attn=1.0:0.2,mlp=0.2:1.0"`.
+pub fn parse_layer_weights(spec: &str) -> Result<Vec<BlockWeightRule>, String> {
+    let mut rules = Vec::new();
+    for part in spec.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (pat, weights_str) = trimmed
+            .split_once('=')
+            .ok_or_else(|| format!("Invalid layer-weight rule '{}': expected pattern=w1:w2", trimmed))?;
+        let (w1_s, w2_s) = weights_str
+            .split_once(':')
+            .ok_or_else(|| format!("Invalid weight pair '{}' in '{}': expected w1:w2", weights_str, trimmed))?;
+        let w1: f64 = w1_s
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid float '{}' in rule '{}'", w1_s, trimmed))?;
+        let w2: f64 = w2_s
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid float '{}' in rule '{}'", w2_s, trimmed))?;
+        rules.push(BlockWeightRule {
+            pattern: pat.trim().to_string(),
+            w1,
+            w2,
+        });
+    }
+    Ok(rules)
+}
+
 #[derive(Debug, Clone)]
 pub struct LayerInterferenceReport {
     pub base_name: String,
@@ -347,6 +414,15 @@ pub fn merge_adapters(
     layers2: &[LoraLayer],
     strategy: MergeStrategy,
 ) -> Result<Vec<LoraLayer>, String> {
+    merge_adapters_with_block_weights(layers1, layers2, strategy, &[])
+}
+
+pub fn merge_adapters_with_block_weights(
+    layers1: &[LoraLayer],
+    layers2: &[LoraLayer],
+    base_strategy: MergeStrategy,
+    rules: &[BlockWeightRule],
+) -> Result<Vec<LoraLayer>, String> {
     if layers1.len() != layers2.len() {
         return Err(format!(
             "Adapter layer count mismatch: {} vs {}",
@@ -367,7 +443,13 @@ pub fn merge_adapters(
                 l2.d_in()
             ));
         }
-        merged.push(merge_layer(l1, l2, strategy));
+        let mut layer_strategy = base_strategy;
+        for rule in rules {
+            if l1.base_name.contains(&rule.pattern) {
+                layer_strategy = base_strategy.with_weights(rule.w1, rule.w2);
+            }
+        }
+        merged.push(merge_layer(l1, l2, layer_strategy));
     }
     Ok(merged)
 }

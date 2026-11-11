@@ -10,18 +10,33 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
 
 ## Core Capabilities
 
-1. **Spectral Rank-Collapse & Layer Energy Audit (`loraspectra audit`)**
-   - Computes exact singular value spectra $\sigma_1 \ge \sigma_2 \ge \dots \ge \sigma_r$ for every `(lora_A, lora_B)` pair in a `.safetensors` archive.
-   - Reports Spectral Norm ($\|\Delta W\|_2 = \sigma_1$), Frobenius Norm ($\|\Delta W\|_F$), Stable Rank ($r_{\text{stable}} = \|\Delta W\|_F^2 / \sigma_1^2$), von Neumann Spectral Entropy Effective Rank ($r_{\text{eff}} = \exp(-\sum_i p_i \ln p_i)$), and cumulative energy ranks ($k_{90\%}, k_{95\%}, k_{99\%}$).
+1. **Spectral Rank-Collapse, Entropy & Marchenko-Pastur Audit (`loraspectra audit`)**
+   - Computes exact singular value spectra $\sigma_1 \ge \sigma_2 \ge \dots \ge \sigma_r$ for every `(lora_A, lora_B)` pair in a `.safetensors` archive across HuggingFace PEFT, Kohya/ComfyUI, Diffusers, and OneTrainer naming conventions.
+   - Reports Spectral Norm ($\|\Delta W\|_2 = \sigma_1$), Frobenius Norm ($\|\Delta W\|_F$), Stable Rank ($r_{\text{stable}} = \|\Delta W\|_F^2 / \sigma_1^2$), von Neumann Spectral Entropy Effective Rank ($r_{\text{eff}} = \exp(-\sum_i p_i \ln p_i)$), cumulative energy ranks ($k_{90\%}, k_{95\%}, k_{99\%}$), and the **Gavish-Donoho (2014) Marchenko-Pastur optimal hard-threshold signal rank (`K_MP`)**.
    - Flags `RANK_COLLAPSED` ($r_{\text{eff}} < 2.0$ or $k_{99\%}/r \le 0.15$), `OVER_PARAMETERIZED` ($k_{99\%}/r \le 0.55$), `DEAD_LAYER`, and `OPTIMAL` projections.
 
-2. **Eckart-Young-Mirsky Dynamic Rank Compression (`loraspectra compress`)**
+2. **Eckart-Young-Mirsky & Marchenko-Pastur Dynamic Rank Compression (`loraspectra compress`)**
    - Applies optimal rank-$k$ SVD truncation $B_k = U_{:,:k}\Sigma_{:k,:k}^{1/2}$, $A_k = \Sigma_{:k,:k}^{1/2} V_{:,:k}^T$, minimizing both Frobenius reconstruction error $\|\Delta W - \Delta W_k\|_F = \sqrt{\sum_{i>k}\sigma_i^2}$ and spectral error $\|\Delta W - \Delta W_k\|_2 = \sigma_{k+1}$.
-   - Supports **Adaptive Per-Layer Energy Allocation** (`--energy 0.99`), automatically assigning higher rank to high-entropy MLP/value projections (`down_proj`, `up_proj`, `v_proj`) and lower rank to low-entropy query/key projections (`q_proj`, `k_proj`).
+   - Supports **Adaptive Per-Layer Energy Allocation** (`--energy 0.99`), **Fixed Rank** (`--rank K`), and **Hyperparameter-Free Marchenko-Pastur Denoising** (`--mp-denoise`), which automatically separates true signal singular values from stochastic SGD tail noise using $\tau^* = \omega(\beta) \cdot \sigma_{\text{tail\_med}}$.
+   - Emits a HuggingFace PEFT-compatible `adapter_config.json` with per-layer `rank_pattern` and `alpha_pattern` via `--peft-config adapter_config.json`, allowing `PeftModel.from_pretrained` to load heterogeneous-rank compressed LoRAs directly.
 
-3. **Principal Subspace Interference Analysis & Orthogonal SVD Merge (`loraspectra interference` / `loraspectra merge`)**
+3. **Principal Subspace Interference Analysis & Layer-Block Weighted Orthogonal SVD Merge (`loraspectra interference` / `loraspectra merge`)**
    - Measures principal subspace cosines ($\sigma_{\max}(U_1^T U_2)$, $\sigma_{\max}(V_1^T V_2)$), Grassmannian overlap, and exact Frobenius inner product cosine $\langle \Delta W_1, \Delta W_2 \rangle_F / (\|\Delta W_1\|_F \|\Delta W_2\|_F)$ in $O(r^3)$ core time.
    - Implements **Orthogonal Subspace Projection Merge (`--mode ortho-svd`)**, projecting conflicting right-singular directions of the secondary adapter orthogonal to the dominant principal subspace of the primary adapter before re-factorizing via QR-Core SVD.
+   - Supports **Layer-Block Weighting (`--layer-weights "attn=1.0:0.2,mlp=0.2:1.0"`)**, allowing per-subsystem weight ratios (e.g., attention vs MLP or UNet/Flux blocks) to prevent concept bleed when combining style and reasoning adapters.
+
+---
+
+## Comparison with Existing Tools
+
+| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v0.2.0`) |
+| :--- | :---: | :---: | :---: | :---: |
+| **SVD Algorithm & Complexity** | Dense $O(d^3)$ (`torch.linalg.svd(B @ A)`) | Dense / Low-rank approx | Dense $O(d^3)$ on delta weights | **Exact QR-Core SVD $O(r^2 d + r^3)$ (`1,050x–2,680x` faster)** |
+| **Runtime Dependencies** | Python + PyTorch + CUDA (`~4 GB`) | Python + PyTorch + Transformers | Python + PyTorch (`~4 GB`) | **Zero-dependency native Rust binary (`< 1 MB`)** |
+| **Spectral Entropy & Rank-Collapse Audit** | No | No | No | **Yes (`r_eff`, `r_stable`, `K_99%`, `K_MP`)** |
+| **Marchenko-Pastur Automatic SGD Denoising** | No | No | No | **Yes (`--mp-denoise`, Gavish-Donoho 2014)** |
+| **PEFT `rank_pattern` / `alpha_pattern` Export** | No | Manual only | No | **Yes (`--peft-config adapter_config.json`)** |
+| **Orthogonal Subspace De-Conflicted Merge** | No (Linear / SV_ratio only) | No (Linear / TIES / DARE) | No (Dense SVD truncation) | **Yes (`--mode ortho-svd` + `--layer-weights`)** |
 
 ---
 
@@ -97,34 +112,38 @@ cargo build --release
 
 Output:
 ```text
-LAYER                                        RANK    R_EFF R_STABLE   K_99%   NORM_F STATUS
--------------------------------------------------------------------------------------------------------
-model.layers.0.self_attn.q_proj                64     4.12     2.41       5   1.2841 RANK_COLLAPSED
-model.layers.0.self_attn.k_proj                64     3.68     2.19       4   1.1904 RANK_COLLAPSED
-model.layers.0.self_attn.v_proj                64    14.82     6.94      14   1.8412 OVER_PARAMETERIZED
-model.layers.0.mlp.down_proj                   64    19.45     8.72      18   2.1038 OVER_PARAMETERIZED
--------------------------------------------------------------------------------------------------------
-Summary: 28 layers | Mean rank 64.0 -> k_99% 9.7 (r_eff 11.77) | Potential size reduction at 99% energy: -83.8%
+LAYER                                        RANK    R_EFF R_STABLE   K_99%   K_MP   NORM_F STATUS
+--------------------------------------------------------------------------------------------------------------
+model.layers.0.self_attn.q_proj                64     4.12     2.41       5      4   1.2841 RANK_COLLAPSED
+model.layers.0.self_attn.k_proj                64     3.68     2.19       4      4   1.1904 RANK_COLLAPSED
+model.layers.0.self_attn.v_proj                64    14.82     6.94      14     12   1.8412 OVER_PARAMETERIZED
+model.layers.0.mlp.down_proj                   64    19.45     8.72      18     16   2.1038 OVER_PARAMETERIZED
+--------------------------------------------------------------------------------------------------------------
+Summary: 28 layers | Mean rank 64.0 -> k_99% 9.7 / k_MP 8.6 (r_eff 11.77) | Potential size reduction at 99% energy: -83.8%
 ```
 
-### 2. Compress a LoRA Adapter via Eckart-Young Adaptive Energy Allocation
+### 2. Compress a LoRA Adapter via Eckart-Young Energy or Marchenko-Pastur Denoising
 
 ```bash
-# Retain 99.0% Frobenius spectral energy per layer (dynamic rank per projection)
-./target/release/loraspectra compress adapter_model.safetensors adapter_slim.safetensors --energy 0.99
+# Retain 99.0% Frobenius spectral energy per layer and export PEFT rank_pattern config
+./target/release/loraspectra compress adapter_model.safetensors adapter_slim.safetensors --energy 0.99 --peft-config adapter_config.json
+
+# Automatically prune stochastic SGD tail noise using Gavish-Donoho (2014) Marchenko-Pastur threshold
+./target/release/loraspectra compress adapter_model.safetensors adapter_denoised.safetensors --mp-denoise --peft-config adapter_config.json
 
 # Or truncate uniformly to fixed rank 16
 ./target/release/loraspectra compress adapter_model.safetensors adapter_r16.safetensors --rank 16
 ```
 
-### 3. Measure Subspace Conflict & Merge Two Adapters via `ortho-svd`
+### 3. Measure Subspace Conflict & Merge Two Adapters via `ortho-svd` with Layer-Block Weighting
 
 ```bash
 # Inspect layerwise subspace cosines and Frobenius conflict before merging
 ./target/release/loraspectra interference code_lora.safetensors math_lora.safetensors
 
-# Merge with orthogonal subspace projection
-./target/release/loraspectra merge code_lora.safetensors math_lora.safetensors merged_lora.safetensors --mode ortho-svd --rank 32
+# Merge with orthogonal subspace projection and custom per-block Attention vs MLP weights
+./target/release/loraspectra merge code_lora.safetensors math_lora.safetensors merged_lora.safetensors \
+  --mode ortho-svd --rank 32 --layer-weights "self_attn=1.0:0.3,mlp=0.4:1.0"
 ```
 
 ### Run Unit Tests and Reproducible Benchmarks

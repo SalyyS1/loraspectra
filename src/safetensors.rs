@@ -531,7 +531,8 @@ pub fn write_safetensors(path: &Path, tensors: &BTreeMap<String, Tensor2D>) -> i
     Ok(buf.len())
 }
 
-/// Pair `.safetensors` keys into matched `(lora_A, lora_B)` layers.
+/// Pair `.safetensors` keys into matched `(lora_A, lora_B)` layers across PEFT, Kohya/ComfyUI,
+/// HuggingFace Diffusers, and OneTrainer naming conventions.
 pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<LoraLayer>, String> {
     let mut a_map: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
     let mut b_map: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
@@ -541,12 +542,18 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
             .strip_suffix(".lora_A.weight")
             .or_else(|| key.strip_suffix(".lora_A.default.weight"))
             .or_else(|| key.strip_suffix(".lora_down.weight"))
+            .or_else(|| key.strip_suffix(".lora.down.weight"))
+            .or_else(|| key.strip_suffix(".lora_linear_layer.down.weight"))
+            .or_else(|| key.strip_suffix("_lora.down.weight"))
         {
             a_map.insert(base.to_string(), (key.clone(), tensor.clone()));
         } else if let Some(base) = key
             .strip_suffix(".lora_B.weight")
             .or_else(|| key.strip_suffix(".lora_B.default.weight"))
             .or_else(|| key.strip_suffix(".lora_up.weight"))
+            .or_else(|| key.strip_suffix(".lora.up.weight"))
+            .or_else(|| key.strip_suffix(".lora_linear_layer.up.weight"))
+            .or_else(|| key.strip_suffix("_lora.up.weight"))
         {
             b_map.insert(base.to_string(), (key.clone(), tensor.clone()));
         }
@@ -581,4 +588,28 @@ pub fn layers_to_tensor_map(layers: &[LoraLayer]) -> BTreeMap<String, Tensor2D> 
         map.insert(layer.b_key.clone(), layer.b.clone());
     }
     map
+}
+
+/// Write a HuggingFace PEFT-compatible `adapter_config.json` containing `rank_pattern` and
+/// `alpha_pattern` for dynamically compressed heterogeneous-rank LoRA adapters (fixes PEFT #3737).
+pub fn write_peft_rank_pattern_config(
+    path: &Path,
+    rank_pattern: &BTreeMap<String, usize>,
+    default_rank: usize,
+) -> io::Result<()> {
+    let mut entries = Vec::with_capacity(rank_pattern.len());
+    for (name, &r) in rank_pattern {
+        let clean_name = name
+            .strip_prefix("base_model.model.")
+            .unwrap_or(name.as_str());
+        entries.push(format!("    \"{}\": {}", clean_name, r));
+    }
+    let pattern_body = entries.join(",\n");
+    let json = format!(
+        "{{\n  \"peft_type\": \"LORA\",\n  \"r\": {},\n  \"lora_alpha\": {},\n  \"rank_pattern\": {{\n{}\n  }},\n  \"alpha_pattern\": {{\n{}\n  }}\n}}\n",
+        default_rank, default_rank, pattern_body, pattern_body
+    );
+    let mut file = fs::File::create(path)?;
+    file.write_all(json.as_bytes())?;
+    Ok(())
 }
