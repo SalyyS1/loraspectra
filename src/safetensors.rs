@@ -424,11 +424,15 @@ pub fn read_safetensors(path: &Path) -> Result<BTreeMap<String, Tensor2D>, Strin
 
     let mut out = BTreeMap::new();
     for (name, entry) in entries {
-        if entry.shape.len() != 2 {
+        let (rows, cols) = if entry.shape.len() == 2 {
+            (entry.shape[0], entry.shape[1])
+        } else if (entry.shape.is_empty() || (entry.shape.len() == 1 && entry.shape[0] == 1))
+            && name.ends_with(".alpha")
+        {
+            (1, 1)
+        } else {
             continue;
-        }
-        let rows = entry.shape[0];
-        let cols = entry.shape[1];
+        };
         let numel = rows * cols;
         let expected_bytes = numel * entry.dtype.byte_size();
         if entry.end < entry.start || entry.end > body.len() || (entry.end - entry.start) != expected_bytes {
@@ -482,15 +486,25 @@ pub fn write_safetensors(path: &Path, tensors: &BTreeMap<String, Tensor2D>) -> i
         let start = current_offset;
         let end = start + byte_len;
         current_offset = end;
-        header_parts.push(format!(
-            "\"{}\":{{\"dtype\":\"{}\",\"shape\":[{},{}],\"data_offsets\":[{},{}]}}",
-            name,
-            tensor.dtype.as_str(),
-            tensor.rows,
-            tensor.cols,
-            start,
-            end
-        ));
+        if name.ends_with(".alpha") && tensor.rows == 1 && tensor.cols == 1 {
+            header_parts.push(format!(
+                "\"{}\":{{\"dtype\":\"{}\",\"shape\":[],\"data_offsets\":[{},{}]}}",
+                name,
+                tensor.dtype.as_str(),
+                start,
+                end
+            ));
+        } else {
+            header_parts.push(format!(
+                "\"{}\":{{\"dtype\":\"{}\",\"shape\":[{},{}],\"data_offsets\":[{},{}]}}",
+                name,
+                tensor.dtype.as_str(),
+                tensor.rows,
+                tensor.cols,
+                start,
+                end
+            ));
+        }
     }
 
     let mut header_json = format!("{{{}}}", header_parts.join(","));
@@ -620,4 +634,183 @@ pub fn write_peft_rank_pattern_config(
     let mut file = fs::File::create(path)?;
     file.write_all(json.as_bytes())?;
     Ok(())
+}
+
+/// Extract per-layer `.alpha` scalar values (`<base_name>.alpha`) from a `.safetensors` tensor map.
+pub fn extract_lora_alphas(tensors: &BTreeMap<String, Tensor2D>) -> BTreeMap<String, f64> {
+    let mut alphas = BTreeMap::new();
+    for (key, tensor) in tensors {
+        if let Some(base) = key.strip_suffix(".alpha") {
+            if let Some(&val) = tensor.data.first() {
+                alphas.insert(base.to_string(), val);
+            }
+        }
+    }
+    alphas
+}
+
+/// Fold per-layer LoRA scaling (`alpha / r` for standard LoRA, or `alpha / sqrt(r)` for rsLoRA)
+/// directly into the low-rank factors `(B, A)` via `sqrt(scale)`, normalizing the effective
+/// scale factor to `1.0` (`alpha = r`).
+///
+/// This solves heterogeneous `rank_pattern` and `rsLoRA` mis-scaling bugs in downstream inference
+/// engines such as `vLLM` (#59799), `llama.cpp` (#31879), `Soup` (#2326), and `InvokeAI` (#10019).
+pub fn bake_adapter_scaling(
+    layers: &mut [LoraLayer],
+    alphas: &BTreeMap<String, f64>,
+    default_alpha: Option<f64>,
+    rslora: bool,
+) {
+    for layer in layers {
+        let r = layer.rank().max(1) as f64;
+        let alpha = alphas
+            .get(&layer.base_name)
+            .copied()
+            .or(default_alpha)
+            .unwrap_or(r);
+        let denom = if rslora { r.sqrt() } else { r };
+        let scale = alpha / denom;
+        if (scale - 1.0).abs() > 1e-12 {
+            let mag_sqrt = scale.abs().sqrt();
+            let sign = if scale < 0.0 { -1.0 } else { 1.0 };
+            for v in &mut layer.b.data {
+                *v *= sign * mag_sqrt;
+            }
+            for v in &mut layer.a.data {
+                *v *= mag_sqrt;
+            }
+        }
+    }
+}
+
+/// Insert normalized `.alpha` scalar tensors (`alpha = rank`) into an output tensor map for
+/// Kohya/ComfyUI/InvokeAI checkpoints that require explicit `.alpha` keys.
+pub fn insert_unit_alpha_tensors(
+    map: &mut BTreeMap<String, Tensor2D>,
+    layers: &[LoraLayer],
+) {
+    for layer in layers {
+        let alpha_key = format!("{}.alpha", layer.base_name);
+        map.insert(
+            alpha_key,
+            Tensor2D {
+                rows: 1,
+                cols: 1,
+                dtype: layer.a.dtype,
+                data: vec![layer.rank() as f64],
+            },
+        );
+    }
+}
+
+/// Summary of an unknown LoRA `.safetensors` checkpoint reverse-engineered from its tensor keys and shapes.
+#[derive(Debug, Clone)]
+pub struct AdapterArchitectureInfo {
+    pub naming_format: &'static str,
+    pub inferred_architecture: &'static str,
+    pub layer_count: usize,
+    pub min_rank: usize,
+    pub max_rank: usize,
+    pub is_heterogeneous_rank: bool,
+    pub max_d_in: usize,
+    pub max_d_out: usize,
+    pub total_parameters: usize,
+    pub total_bytes: usize,
+    pub primary_dtype: DType,
+    pub alpha_tensor_count: usize,
+}
+
+/// Reverse-engineer the naming format, base model family, rank distribution, and parameter budget
+/// of a LoRA `.safetensors` file without requiring `adapter_config.json` (fixes rea #3665).
+pub fn inspect_adapter_architecture(
+    layers: &[LoraLayer],
+    alphas: &BTreeMap<String, f64>,
+) -> AdapterArchitectureInfo {
+    let first_a = layers.first().map(|l| l.a_key.as_str()).unwrap_or("");
+    let naming_format = if first_a.ends_with(".lora_A.weight")
+        || first_a.ends_with(".lora_A.default.weight")
+    {
+        "HuggingFace PEFT"
+    } else if first_a.ends_with(".lora_down.weight") {
+        "Kohya-ss / ComfyUI"
+    } else if first_a.ends_with(".lora.down.weight")
+        || first_a.ends_with(".lora_linear_layer.down.weight")
+    {
+        "HuggingFace Diffusers"
+    } else if first_a.ends_with("_lora.down.weight") {
+        "OneTrainer"
+    } else {
+        "Custom LoRA"
+    };
+
+    let mut min_rank = usize::MAX;
+    let mut max_rank = 0usize;
+    let mut max_d_in = 0usize;
+    let mut max_d_out = 0usize;
+    let mut total_parameters = 0usize;
+    let mut total_bytes = 0usize;
+
+    for l in layers {
+        let r = l.rank();
+        min_rank = min_rank.min(r);
+        max_rank = max_rank.max(r);
+        max_d_in = max_d_in.max(l.d_in());
+        max_d_out = max_d_out.max(l.d_out());
+        total_parameters += l.a.data.len() + l.b.data.len();
+        total_bytes += l.raw_byte_size();
+    }
+    if layers.is_empty() {
+        min_rank = 0;
+    }
+
+    let is_diffusion = layers.iter().any(|l| {
+        l.base_name.contains("unet")
+            || l.base_name.contains("double_blocks")
+            || l.base_name.contains("single_blocks")
+            || l.base_name.contains("down_blocks")
+            || l.base_name.contains("transformer_blocks")
+    });
+    let max_dim = max_d_in.max(max_d_out);
+
+    let inferred_architecture = if is_diffusion {
+        if layers
+            .iter()
+            .any(|l| l.base_name.contains("double_blocks") || l.base_name.contains("single_blocks"))
+        {
+            "Flux.1 DiT (12B Flow Transformer)"
+        } else if max_dim >= 2048 {
+            "Stable Diffusion XL (SDXL UNet / Text Encoder)"
+        } else {
+            "Stable Diffusion 1.5 / 2.x UNet"
+        }
+    } else if max_dim >= 16384 {
+        "Llama-3-70B / Qwen2.5-72B class LLM"
+    } else if max_dim >= 13824 {
+        "Llama-2-13B / Qwen2.5-14B class LLM"
+    } else if max_dim >= 11008 || max_d_in == 4096 {
+        "Llama-3-8B / Mistral-7B class LLM"
+    } else if max_d_in == 3584 {
+        "Qwen2.5-7B / Gemma-2-9B class LLM"
+    } else if max_d_in >= 2048 {
+        "Llama-3.2-1B-3B / Phi-3 / Qwen2.5-3B class LLM"
+    } else {
+        "Compact Transformer / Custom Model"
+    };
+
+    let primary_dtype = layers.first().map(|l| l.a.dtype).unwrap_or(DType::F16);
+
+    AdapterArchitectureInfo {
+        naming_format,
+        inferred_architecture,
+        layer_count: layers.len(),
+        min_rank,
+        max_rank,
+        is_heterogeneous_rank: min_rank != max_rank,
+        max_d_in,
+        max_d_out,
+        total_parameters,
+        total_bytes,
+        primary_dtype,
+        alpha_tensor_count: alphas.len(),
+    }
 }

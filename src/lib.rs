@@ -48,12 +48,13 @@ mod tests {
     };
     use crate::merge::{
         analyze_layer_interference, merge_adapters_with_block_weights, merge_adapters_with_options,
-        merge_layer, parse_layer_weights, MergeStrategy,
+        merge_layer, merge_multiple_adapters, parse_layer_weights, MergeStrategy,
     };
     use crate::safetensors::{
-        bf16_to_f32, cast_layers_dtype, extract_lora_layers, f16_to_f32, f32_to_bf16, f32_to_f16,
-        layers_to_tensor_map, read_safetensors, write_peft_rank_pattern_config, write_safetensors,
-        DType, LoraLayer, Tensor2D,
+        bake_adapter_scaling, bf16_to_f32, cast_layers_dtype, extract_lora_alphas,
+        extract_lora_layers, f16_to_f32, f32_to_bf16, f32_to_f16, insert_unit_alpha_tensors,
+        inspect_adapter_architecture, layers_to_tensor_map, read_safetensors,
+        write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, Tensor2D,
     };
 
     fn random_matrix(rows: usize, cols: usize, rng: &mut Rng64, dtype: DType) -> Tensor2D {
@@ -570,5 +571,137 @@ mod tests {
         cast_layers_dtype(&mut merged, DType::from_name("bf16").unwrap());
         let bytes_bf16: usize = merged.iter().map(|l| l.raw_byte_size()).sum();
         assert_eq!(bytes_bf16 * 2, bytes_f32);
+    }
+
+    #[test]
+    fn test_alpha_scalar_safetensors_and_rslora_scale_baking() {
+        let mut rng = Rng64::new(6060);
+        let d = 32;
+        let r = 16;
+        let layer = LoraLayer {
+            base_name: "lora_unet_down_blocks_0_attentions_0_proj_in".to_string(),
+            a_key: "lora_unet_down_blocks_0_attentions_0_proj_in.lora_down.weight".to_string(),
+            b_key: "lora_unet_down_blocks_0_attentions_0_proj_in.lora_up.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+
+        let orig_dw = matmul(&layer.b, &layer.a);
+        let mut map = layers_to_tensor_map(&[layer]);
+        map.insert(
+            "lora_unet_down_blocks_0_attentions_0_proj_in.alpha".to_string(),
+            Tensor2D {
+                rows: 1,
+                cols: 1,
+                dtype: DType::F32,
+                data: vec![8.0],
+            },
+        );
+
+        let tmp_path = std::env::temp_dir().join("test_kohya_alpha.safetensors");
+        write_safetensors(&tmp_path, &map).expect("write alpha safetensors");
+        let loaded_map = read_safetensors(&tmp_path).expect("read alpha safetensors");
+        let alphas = extract_lora_alphas(&loaded_map);
+        assert_eq!(
+            alphas.get("lora_unet_down_blocks_0_attentions_0_proj_in"),
+            Some(&8.0)
+        );
+
+        // 1. Standard LoRA scale baking: scale = alpha / r = 8.0 / 16.0 = 0.5
+        let mut layers_std = extract_lora_layers(&loaded_map).expect("extract layers");
+        bake_adapter_scaling(&mut layers_std, &alphas, None, false);
+        let std_dw = matmul(&layers_std[0].b, &layers_std[0].a);
+        for (&orig, &baked) in orig_dw.data.iter().zip(std_dw.data.iter()) {
+            assert!((baked - orig * 0.5).abs() < 1e-6);
+        }
+
+        // 2. rsLoRA scale baking: scale = alpha / sqrt(r) = 8.0 / 4.0 = 2.0
+        let mut layers_rs = extract_lora_layers(&loaded_map).expect("extract layers");
+        bake_adapter_scaling(&mut layers_rs, &alphas, None, true);
+        let rs_dw = matmul(&layers_rs[0].b, &layers_rs[0].a);
+        for (&orig, &baked) in orig_dw.data.iter().zip(rs_dw.data.iter()) {
+            assert!((baked - orig * 2.0).abs() < 1e-6);
+        }
+
+        let mut out_map = layers_to_tensor_map(&layers_rs);
+        insert_unit_alpha_tensors(&mut out_map, &layers_rs);
+        assert_eq!(
+            out_map["lora_unet_down_blocks_0_attentions_0_proj_in.alpha"].data[0],
+            16.0
+        );
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    #[test]
+    fn test_multi_adapter_3way_ortho_svd_merge() {
+        let mut rng = Rng64::new(7070);
+        let d = 48;
+        let r = 4;
+
+        let make_adapter = |rng: &mut Rng64| -> Vec<LoraLayer> {
+            vec![LoraLayer {
+                base_name: "model.layers.0.self_attn.q_proj".to_string(),
+                a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+                a: random_matrix(r, d, rng, DType::F32),
+                b: random_matrix(d, r, rng, DType::F32),
+            }]
+        };
+
+        let a1 = make_adapter(&mut rng);
+        let a2 = make_adapter(&mut rng);
+        let a3 = make_adapter(&mut rng);
+
+        let max_s1 = [
+            qr_core_singular_values(&a1[0].b, &a1[0].a)[0],
+            qr_core_singular_values(&a2[0].b, &a2[0].a)[0],
+            qr_core_singular_values(&a3[0].b, &a3[0].a)[0],
+        ]
+        .into_iter()
+        .fold(0.0_f64, f64::max);
+
+        let merged = merge_multiple_adapters(
+            &[a1, a2, a3],
+            &[1.0, 1.0, 1.0],
+            "ortho-svd",
+            8,
+            &[],
+            true,
+        )
+        .expect("3-way ortho-svd merge");
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].rank(), 8);
+        let merged_s1 = qr_core_singular_values(&merged[0].b, &merged[0].a)[0];
+        assert!(merged_s1 <= max_s1 + 1e-9);
+    }
+
+    #[test]
+    fn test_inspect_adapter_architecture_reverse_engineering() {
+        let mut rng = Rng64::new(8181);
+        let flux_layer = LoraLayer {
+            base_name: "transformer.double_blocks.0.img_attn.proj".to_string(),
+            a_key: "transformer.double_blocks.0.img_attn.proj.lora_down.weight".to_string(),
+            b_key: "transformer.double_blocks.0.img_attn.proj.lora_up.weight".to_string(),
+            a: random_matrix(4, 128, &mut rng, DType::BF16),
+            b: random_matrix(128, 4, &mut rng, DType::BF16),
+        };
+        let flux_layer2 = LoraLayer {
+            base_name: "transformer.single_blocks.0.linear1".to_string(),
+            a_key: "transformer.single_blocks.0.linear1.lora_down.weight".to_string(),
+            b_key: "transformer.single_blocks.0.linear1.lora_up.weight".to_string(),
+            a: random_matrix(8, 128, &mut rng, DType::BF16),
+            b: random_matrix(128, 8, &mut rng, DType::BF16),
+        };
+        let mut alphas = std::collections::BTreeMap::new();
+        alphas.insert("transformer.double_blocks.0.img_attn.proj".to_string(), 4.0);
+
+        let info = inspect_adapter_architecture(&[flux_layer, flux_layer2], &alphas);
+        assert_eq!(info.naming_format, "Kohya-ss / ComfyUI");
+        assert_eq!(info.inferred_architecture, "Flux.1 DiT (12B Flow Transformer)");
+        assert_eq!(info.min_rank, 4);
+        assert_eq!(info.max_rank, 8);
+        assert!(info.is_heterogeneous_rank);
+        assert_eq!(info.alpha_tensor_count, 1);
     }
 }

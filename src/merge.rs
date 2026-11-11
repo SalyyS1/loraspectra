@@ -539,3 +539,113 @@ pub fn merge_adapters_with_options(
     }
     Ok(merged)
 }
+
+/// Jointly merge `N >= 2` LoRA adapters with per-adapter weights `[w_1, w_2, ..., w_N]`.
+///
+/// Intermediate steps retain lossless rank (`r_1 + ... + r_m`) so that each subsequent adapter
+/// is orthogonalized against the exact joint dominant singular subspace of all preceding adapters
+/// before a single final Eckart-Young QR-Core SVD compression to `target_rank`.
+pub fn merge_multiple_adapters(
+    adapters: &[Vec<LoraLayer>],
+    weights: &[f64],
+    mode: &str,
+    target_rank: usize,
+    rules: &[BlockWeightRule],
+    preserve_spectral_norm: bool,
+) -> Result<Vec<LoraLayer>, String> {
+    if adapters.len() < 2 {
+        return Err("merge_multiple_adapters requires at least 2 adapters".to_string());
+    }
+    if adapters.len() != weights.len() {
+        return Err(format!(
+            "Adapter count ({}) does not match weight count ({})",
+            adapters.len(),
+            weights.len()
+        ));
+    }
+
+    // Track max singular value per layer across all N source adapters for --preserve-norm
+    let mut max_source_sigma: BTreeMap<String, f64> = BTreeMap::new();
+    if preserve_spectral_norm {
+        for adapter in adapters {
+            for layer in adapter {
+                let s1 = qr_core_singular_values(&layer.b, &layer.a)
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0);
+                let entry = max_source_sigma.entry(layer.base_name.clone()).or_insert(0.0);
+                if s1 > *entry {
+                    *entry = s1;
+                }
+            }
+        }
+    }
+
+    let make_strategy = |w1: f64, w2: f64, rank: usize| -> MergeStrategy {
+        match mode {
+            "linear" => MergeStrategy::Linear {
+                w1,
+                w2,
+                target_rank: rank,
+            },
+            "ties" => MergeStrategy::Ties {
+                w1,
+                w2,
+                density: 0.6,
+                target_rank: rank,
+            },
+            _ => MergeStrategy::OrthoSvd {
+                w1,
+                w2,
+                target_rank: rank,
+            },
+        }
+    };
+
+    let n = adapters.len();
+    let mut acc: Vec<LoraLayer> = Vec::new();
+
+    for idx in 1..n {
+        let is_last = idx == n - 1;
+        let left = if idx == 1 { &adapters[0] } else { &acc };
+        let right = &adapters[idx];
+        let w_left = if idx == 1 { weights[0] } else { 1.0 };
+        let w_right = weights[idx];
+
+        let max_r_left = left.iter().map(|l| l.rank()).max().unwrap_or(target_rank);
+        let max_r_right = right.iter().map(|l| l.rank()).max().unwrap_or(target_rank);
+        let step_rank = if is_last {
+            target_rank
+        } else {
+            (max_r_left + max_r_right).min(256)
+        };
+
+        let strategy = make_strategy(w_left, w_right, step_rank);
+        let step_rules = if idx == 1 { rules } else { &[] };
+        acc = merge_adapters_with_options(left, right, strategy, step_rules, false)?;
+    }
+
+    if preserve_spectral_norm {
+        for layer in &mut acc {
+            if let Some(&bound) = max_source_sigma.get(&layer.base_name) {
+                if bound > 1e-12 {
+                    let s_merged = qr_core_singular_values(&layer.b, &layer.a)
+                        .first()
+                        .copied()
+                        .unwrap_or(0.0);
+                    if s_merged > bound {
+                        let ratio_sqrt = (bound / s_merged).sqrt();
+                        for v in &mut layer.b.data {
+                            *v *= ratio_sqrt;
+                        }
+                        for v in &mut layer.a.data {
+                            *v *= ratio_sqrt;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(acc)
+}
