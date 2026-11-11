@@ -23,25 +23,28 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
 3. **Principal Subspace Interference Analysis, N-Adapter Joint Orthogonal SVD Merge & Scale Baking (`loraspectra interference` / `loraspectra merge` / `loraspectra info`)**
    - Measures principal subspace cosines ($\sigma_{\max}(U_1^T U_2)$, $\sigma_{\max}(V_1^T V_2)$), Grassmannian overlap, and exact Frobenius inner product cosine $\langle \Delta W_1, \Delta W_2 \rangle_F / (\|\Delta W_1\|_F \|\Delta W_2\|_F)$ in $O(r^3)$ core time.
    - Implements **N-Adapter ($N \ge 2$) Orthogonal Subspace Projection Merge (`--mode ortho-svd`)**, sequentially projecting conflicting right-singular directions of adapters $2 \dots N$ orthogonal to the joint dominant principal subspace of preceding adapters before a single final Eckart-Young QR-Core SVD compression.
-   - Supports **Layer-Block Weighting (`--layer-weights "attn=1.0:0.2,mlp=0.2:1.0"`)**, **Spectral Norm Bounding (`--preserve-norm`)**, and **`.alpha` / `rsLoRA` Scale Baking (`--bake-alpha`, `--rslora`)** — folding $\alpha/r$ or $\alpha/\sqrt{r}$ directly into $(B, A)$ so heterogeneous `rank_pattern` and `rsLoRA` adapters serve accurately on `vLLM`, `llama.cpp`, `ComfyUI`, and `InvokeAI`.
+   - Supports **Layer-Block Weighting (`--layer-weights "attn=1.0:0.2,mlp=0.2:1.0"`)**, **Spectral Norm Bounding (`--preserve-norm`)**, **DoRA `lora_magnitude_vector` / `dora_scale` 1D Tensor Preservation**, **Cross-Ecosystem Key Format Conversion (`--format peft|kohya|diffusers`)**, and **`.alpha` / `rsLoRA` Scale Baking (`--bake-alpha`, `--rslora`)** — folding $\alpha/r$ or $\alpha/\sqrt{r}$ directly into $(B, A)$ so heterogeneous `rank_pattern` and `rsLoRA` adapters serve accurately on `vLLM`, `llama.cpp`, `ComfyUI`, and `InvokeAI`.
    - Includes **`loraspectra info <adapter.safetensors>`** to reverse-engineer the naming convention (`PEFT`, `Kohya/ComfyUI`, `Diffusers`, `OneTrainer`), base model family (`Flux.1`, `SDXL`, `Llama-3`, `Qwen2.5`), rank distribution, and spectral health without requiring `adapter_config.json`.
+   - Includes **`loraspectra extract <base.safetensors> <tuned.safetensors> <output_lora.safetensors>`** to extract an optimal low-rank LoRA adapter directly from two dense `.safetensors` checkpoints ($\Delta W = W_{\text{tuned}} - W_{\text{base}}$) using Eckart-Young energy allocation (`--energy 0.99`), fixed rank (`--rank K`), or Marchenko-Pastur automatic SGD denoising (`--mp-denoise`).
 
 ---
 
 ## Comparison with Existing Tools
 
-| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v0.4.0`) |
+| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v0.5.0`) |
 | :--- | :---: | :---: | :---: | :---: |
 | **SVD Algorithm & Complexity** | Dense $O(d^3)$ (`torch.linalg.svd(B @ A)`) | Dense / Low-rank approx | Dense $O(d^3)$ on delta weights | **Exact QR-Core SVD $O(r^2 d + r^3)$ (`1,050x–2,680x` faster)** |
 | **Runtime Dependencies** | Python + PyTorch + CUDA (`~4 GB`) | Python + PyTorch + Transformers | Python + PyTorch (`~4 GB`) | **Zero-dependency native Rust binary (`< 1 MB`)** |
 | **Checkpoint Architecture Reverse-Engineering** | No | Requires `adapter_config.json` | No | **Yes (`loraspectra info`, detects PEFT/Kohya/Flux/SDXL/Llama/Qwen)** |
 | **Spectral Entropy & Rank-Collapse Audit** | No | No | No | **Yes (`r_eff`, `r_stable`, `K_99%`, `K_MP`)** |
 | **Marchenko-Pastur Automatic SGD Denoising** | No | No | No | **Yes (`--mp-denoise`, Gavish-Donoho 2014)** |
+| **Dense Base-to-Tuned LoRA Extraction (`extract`)** | Fixed rank only (`extract_lora_from_models.py`) | Experimental | `mergekit-extract-lora` (PyTorch) | **Yes (`loraspectra extract`, supports `--energy`, `--mp-denoise`, `--peft-config`)** |
 | **PEFT `rank_pattern` / `alpha_pattern` Export** | No | Manual only | No | **Yes (`--peft-config adapter_config.json`)** |
-| **`.alpha` Scalar & `rsLoRA` ($\alpha/\sqrt{r}$) Scale Baking** | `.alpha` only | Runtime only (fails in vLLM/llama.cpp) | No | **Yes (`--bake-alpha`, `--rslora`, fixes vLLM #59799 & llama.cpp #31879)** |
+| **`.alpha` Scalar, `rsLoRA` ($\alpha/\sqrt{r}$) & DoRA (`dora_scale`)** | `.alpha` only | Runtime only (fails in vLLM/llama.cpp) | No | **Yes (`--bake-alpha`, `--rslora`, DoRA 1D vectors; fixes vLLM #59799, llama.cpp #31879, InvokeAI #10019)** |
+| **Cross-Ecosystem Key Conversion (`--format`)** | Separate Python scripts | No | No | **Yes (`--format peft\|kohya\|diffusers`)** |
 | **N-Adapter ($N \ge 2$), Disjoint & Heterogeneous-Rank Merge** | Fails on shape mismatch | Fails (`PEFT #3737`) | Partial | **Yes ($N \ge 2$ adapters, Union over `base_name` + any $r_1 \ne r_2$)** |
 | **Orthogonal Subspace & Norm-Bounded Merge** | No (Linear / SV_ratio only) | No (Linear / TIES / DARE) | No (Dense SVD truncation) | **Yes (`--mode ortho-svd`, `--preserve-norm`, `--layer-weights`)** |
-| **Cross-DType Precision Casting (`F32` / `F16` / `BF16`)** | Partial | No | Yes | **Yes (`--dtype f16\|bf16\|f32` during compress/merge)** |
+| **Cross-DType Precision Casting (`F32` / `F16` / `BF16`)** | Partial | No | Yes | **Yes (`--dtype f16\|bf16\|f32` during compress/merge/extract)** |
 
 ---
 
@@ -97,7 +100,7 @@ When merging two specialized LoRA adapters whose top singular modes collide with
 ### Download Prebuilt Linux `x86_64` Binary (Zero Dependencies)
 
 ```bash
-curl -sL https://github.com/SalyyS1/loraspectra/releases/download/v0.4.0/loraspectra-v0.4.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -sL https://github.com/SalyyS1/loraspectra/releases/download/v0.5.0/loraspectra-v0.5.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 ./loraspectra info adapter_model.safetensors
 ./loraspectra audit adapter_model.safetensors
 ```
@@ -152,7 +155,11 @@ Summary: 28 layers | Mean rank 64.0 -> k_99% 9.7 / k_MP 8.6 (r_eff 11.77) | Pote
 
 # Merge 2 or more adapters with orthogonal subspace projection, spectral norm bounding, and per-block weights
 ./target/release/loraspectra merge code_lora.safetensors math_lora.safetensors sql_lora.safetensors merged_lora.safetensors \
-  --mode ortho-svd --rank 32 --weights 1.0:0.8:0.6 --preserve-norm --dtype bf16 --layer-weights "self_attn=1.0:0.3,mlp=0.4:1.0"
+  --mode ortho-svd --rank 32 --weights 1.0:0.8:0.6 --preserve-norm --dtype bf16 --format peft --layer-weights "self_attn=1.0:0.3,mlp=0.4:1.0"
+
+# Extract a low-rank LoRA adapter directly from two dense .safetensors checkpoints (W_tuned - W_base)
+./target/release/loraspectra extract base_model.safetensors fine_tuned.safetensors extracted_lora.safetensors \
+  --mp-denoise --dtype bf16 --format peft --peft-config adapter_config.json
 ```
 
 ### Run Unit Tests and Reproducible Benchmarks

@@ -42,7 +42,7 @@ impl Rng64 {
 mod tests {
     use super::*;
     use crate::audit::{audit_layer, LayerHealth};
-    use crate::compress::{compress_layer, CompressionPolicy};
+    use crate::compress::{compress_layer, extract_lora_from_dense_models, CompressionPolicy};
     use crate::linalg::{
         jacobi_svd, matmul, qr_core_singular_values, thin_qr_columns,
     };
@@ -51,10 +51,11 @@ mod tests {
         merge_layer, merge_multiple_adapters, parse_layer_weights, MergeStrategy,
     };
     use crate::safetensors::{
-        bake_adapter_scaling, bf16_to_f32, cast_layers_dtype, extract_lora_alphas,
-        extract_lora_layers, f16_to_f32, f32_to_bf16, f32_to_f16, insert_unit_alpha_tensors,
-        inspect_adapter_architecture, layers_to_tensor_map, read_safetensors,
-        write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, Tensor2D,
+        bake_adapter_scaling, bf16_to_f32, cast_layers_dtype, convert_layers_key_format,
+        extract_dora_scales, extract_lora_alphas, extract_lora_layers, f16_to_f32, f32_to_bf16,
+        f32_to_f16, insert_dora_scales, insert_unit_alpha_tensors, inspect_adapter_architecture,
+        layers_to_tensor_map, read_safetensors, write_peft_rank_pattern_config, write_safetensors,
+        DType, LoraLayer, Tensor2D,
     };
 
     fn random_matrix(rows: usize, cols: usize, rng: &mut Rng64, dtype: DType) -> Tensor2D {
@@ -703,5 +704,95 @@ mod tests {
         assert_eq!(info.max_rank, 8);
         assert!(info.is_heterogeneous_rank);
         assert_eq!(info.alpha_tensor_count, 1);
+    }
+
+    #[test]
+    fn test_dora_magnitude_vector_roundtrip_and_key_format_conversion() {
+        let mut rng = Rng64::new(9191);
+        let d_out = 32;
+        let d_in = 32;
+        let r = 4;
+
+        let mut layers = vec![LoraLayer {
+            base_name: "base_model.model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "base_model.model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "base_model.model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        }];
+
+        let mut map = layers_to_tensor_map(&layers);
+        let dora_vec = Tensor2D {
+            rows: 1,
+            cols: d_out,
+            dtype: DType::F32,
+            data: (0..d_out).map(|i| 1.0 + (i as f64) * 0.01).collect(),
+        };
+        map.insert(
+            "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector".to_string(),
+            dora_vec,
+        );
+
+        let tmp_path = std::env::temp_dir().join("test_dora_format.safetensors");
+        write_safetensors(&tmp_path, &map).expect("write dora safetensors");
+        let loaded = read_safetensors(&tmp_path).expect("read dora safetensors");
+        let dora_scales = extract_dora_scales(&loaded);
+        assert_eq!(dora_scales.len(), 1);
+        assert!(dora_scales.contains_key("base_model.model.layers.0.self_attn.q_proj"));
+
+        // Convert key format from PEFT -> Kohya -> Diffusers
+        convert_layers_key_format(&mut layers, "kohya").expect("convert to kohya");
+        assert!(layers[0].a_key.ends_with(".lora_down.weight"));
+        assert!(layers[0].b_key.ends_with(".lora_up.weight"));
+
+        let mut out_map = layers_to_tensor_map(&layers);
+        insert_dora_scales(&mut out_map, &dora_scales, Some("kohya"), None);
+        assert!(out_map.contains_key("base_model.model.layers.0.self_attn.q_proj.dora_scale"));
+
+        convert_layers_key_format(&mut layers, "diffusers").expect("convert to diffusers");
+        assert!(layers[0].a_key.ends_with(".lora.down.weight"));
+        assert!(layers[0].b_key.ends_with(".lora.up.weight"));
+
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    #[test]
+    fn test_extract_lora_from_dense_models() {
+        let mut rng = Rng64::new(9292);
+        let d_out = 48;
+        let d_in = 48;
+        let true_r = 4;
+
+        let base_w = random_matrix(d_out, d_in, &mut rng, DType::F32);
+        let true_b = random_matrix(d_out, true_r, &mut rng, DType::F32);
+        let true_a = random_matrix(true_r, d_in, &mut rng, DType::F32);
+        let true_dw = matmul(&true_b, &true_a);
+
+        let mut tuned_w = base_w.clone();
+        for i in 0..tuned_w.data.len() {
+            tuned_w.data[i] += true_dw.data[i];
+        }
+
+        let mut base_map = std::collections::BTreeMap::new();
+        let mut tuned_map = std::collections::BTreeMap::new();
+        base_map.insert("model.layers.0.self_attn.q_proj.weight".to_string(), base_w);
+        tuned_map.insert("model.layers.0.self_attn.q_proj.weight".to_string(), tuned_w);
+
+        let res = extract_lora_from_dense_models(
+            &base_map,
+            &tuned_map,
+            CompressionPolicy::FixedRank(true_r),
+            "peft",
+        )
+        .expect("extract lora from dense models");
+
+        assert_eq!(res.layers.len(), 1);
+        assert_eq!(res.layers[0].rank(), true_r);
+        assert!(res.metrics[0].relative_frobenius_error < 1e-10);
+
+        let rec_dw = matmul(&res.layers[0].b, &res.layers[0].a);
+        for (&orig, &rec) in true_dw.data.iter().zip(rec_dw.data.iter()) {
+            assert!((orig - rec).abs() < 1e-9);
+        }
     }
 }

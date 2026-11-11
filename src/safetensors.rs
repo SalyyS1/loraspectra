@@ -430,6 +430,12 @@ pub fn read_safetensors(path: &Path) -> Result<BTreeMap<String, Tensor2D>, Strin
             && name.ends_with(".alpha")
         {
             (1, 1)
+        } else if entry.shape.len() == 1
+            && (name.ends_with(".lora_magnitude_vector")
+                || name.ends_with(".lora_magnitude_vector.default.weight")
+                || name.ends_with(".dora_scale"))
+        {
+            (entry.shape[0], 1)
         } else {
             continue;
         };
@@ -491,6 +497,19 @@ pub fn write_safetensors(path: &Path, tensors: &BTreeMap<String, Tensor2D>) -> i
                 "\"{}\":{{\"dtype\":\"{}\",\"shape\":[],\"data_offsets\":[{},{}]}}",
                 name,
                 tensor.dtype.as_str(),
+                start,
+                end
+            ));
+        } else if (name.ends_with(".lora_magnitude_vector")
+            || name.ends_with(".lora_magnitude_vector.default.weight")
+            || name.ends_with(".dora_scale"))
+            && tensor.cols == 1
+        {
+            header_parts.push(format!(
+                "\"{}\":{{\"dtype\":\"{}\",\"shape\":[{}],\"data_offsets\":[{},{}]}}",
+                name,
+                tensor.dtype.as_str(),
+                tensor.rows,
                 start,
                 end
             ));
@@ -681,6 +700,78 @@ pub fn bake_adapter_scaling(
             }
         }
     }
+}
+
+/// Extract per-layer DoRA magnitude vectors (`lora_magnitude_vector` or `dora_scale`) from a `.safetensors` map.
+pub fn extract_dora_scales(
+    tensors: &BTreeMap<String, Tensor2D>,
+) -> BTreeMap<String, (String, Tensor2D)> {
+    let mut scales = BTreeMap::new();
+    for (key, tensor) in tensors {
+        if let Some(base) = key
+            .strip_suffix(".lora_magnitude_vector.default.weight")
+            .or_else(|| key.strip_suffix(".lora_magnitude_vector"))
+            .or_else(|| key.strip_suffix(".dora_scale"))
+        {
+            scales.insert(base.to_string(), (key.clone(), tensor.clone()));
+        }
+    }
+    scales
+}
+
+/// Preserve DoRA magnitude vectors (`lora_magnitude_vector` / `dora_scale`) in an output tensor map,
+/// optionally converting key suffixes and storage `DType`.
+pub fn insert_dora_scales(
+    map: &mut BTreeMap<String, Tensor2D>,
+    dora_scales: &BTreeMap<String, (String, Tensor2D)>,
+    target_format: Option<&str>,
+    target_dtype: Option<DType>,
+) {
+    for (base_name, (orig_key, tensor)) in dora_scales {
+        let mut t = tensor.clone();
+        if let Some(dt) = target_dtype {
+            t.dtype = dt;
+        }
+        let out_key = match target_format.map(|s| s.to_ascii_lowercase()) {
+            Some(ref f) if f == "peft" => format!("{}.lora_magnitude_vector", base_name),
+            Some(ref f) if f == "kohya" || f == "comfyui" || f == "diffusers" => {
+                format!("{}.dora_scale", base_name)
+            }
+            _ => orig_key.clone(),
+        };
+        map.insert(out_key, t);
+    }
+}
+
+/// Convert `a_key` and `b_key` naming conventions across HuggingFace PEFT, Kohya/ComfyUI, and Diffusers.
+pub fn convert_layers_key_format(
+    layers: &mut [LoraLayer],
+    target_format: &str,
+) -> Result<(), String> {
+    let fmt = target_format.trim().to_ascii_lowercase();
+    for layer in layers {
+        match fmt.as_str() {
+            "peft" => {
+                layer.a_key = format!("{}.lora_A.weight", layer.base_name);
+                layer.b_key = format!("{}.lora_B.weight", layer.base_name);
+            }
+            "kohya" | "comfyui" => {
+                layer.a_key = format!("{}.lora_down.weight", layer.base_name);
+                layer.b_key = format!("{}.lora_up.weight", layer.base_name);
+            }
+            "diffusers" => {
+                layer.a_key = format!("{}.lora.down.weight", layer.base_name);
+                layer.b_key = format!("{}.lora.up.weight", layer.base_name);
+            }
+            other => {
+                return Err(format!(
+                    "Unsupported --format '{}': expected peft, kohya, or diffusers",
+                    other
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Insert normalized `.alpha` scalar tensors (`alpha = rank`) into an output tensor map for

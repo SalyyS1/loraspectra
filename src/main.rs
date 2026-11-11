@@ -4,30 +4,40 @@ use std::path::Path;
 use std::process;
 
 use loraspectra::audit::audit_adapter;
-use loraspectra::compress::{compress_adapter, CompressionPolicy};
+use loraspectra::compress::{
+    compress_adapter, extract_lora_from_dense_models, CompressionPolicy,
+};
 use loraspectra::merge::{
     analyze_layer_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
 use loraspectra::safetensors::{
-    bake_adapter_scaling, cast_layers_dtype, extract_lora_alphas, extract_lora_layers,
-    insert_unit_alpha_tensors, inspect_adapter_architecture, layers_to_tensor_map,
-    read_safetensors, write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer,
+    bake_adapter_scaling, cast_layers_dtype, convert_layers_key_format, extract_dora_scales,
+    extract_lora_alphas, extract_lora_layers, insert_dora_scales, insert_unit_alpha_tensors,
+    inspect_adapter_architecture, layers_to_tensor_map, read_safetensors,
+    write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, Tensor2D,
 };
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v0.4.0 — Spectral SVD Auditor, Dynamic Rank Compressor & Orthogonal Merger for LoRA (.safetensors)
+        "loraspectra v0.5.0 — Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
 
 USAGE:
   loraspectra info <adapter.safetensors> [--json]
   loraspectra audit <adapter.safetensors> [--json]
-  loraspectra compress <input.safetensors> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
+  loraspectra compress <input.safetensors> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
+  loraspectra extract <base.safetensors> <tuned.safetensors> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a.safetensors> <adapter_b.safetensors>
-  loraspectra merge <in_1.safetensors> <in_2.safetensors> [in_3.safetensors ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--dtype f16|bf16|f32]"
+  loraspectra merge <in_1.safetensors> <in_2.safetensors> [in_3.safetensors ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]"
     );
 }
 
-fn load_layers_and_alphas_or_exit(path_str: &str) -> (Vec<LoraLayer>, BTreeMap<String, f64>) {
+fn load_layers_alphas_dora_or_exit(
+    path_str: &str,
+) -> (
+    Vec<LoraLayer>,
+    BTreeMap<String, f64>,
+    BTreeMap<String, (String, Tensor2D)>,
+) {
     let path = Path::new(path_str);
     let tensors = match read_safetensors(path) {
         Ok(t) => t,
@@ -37,8 +47,9 @@ fn load_layers_and_alphas_or_exit(path_str: &str) -> (Vec<LoraLayer>, BTreeMap<S
         }
     };
     let alphas = extract_lora_alphas(&tensors);
+    let dora_scales = extract_dora_scales(&tensors);
     match extract_lora_layers(&tensors) {
-        Ok(layers) if !layers.is_empty() => (layers, alphas),
+        Ok(layers) if !layers.is_empty() => (layers, alphas, dora_scales),
         Ok(_) => {
             eprintln!("No matched (lora_A, lora_B) 2D tensor pairs found in {}", path_str);
             process::exit(1);
@@ -48,6 +59,11 @@ fn load_layers_and_alphas_or_exit(path_str: &str) -> (Vec<LoraLayer>, BTreeMap<S
             process::exit(1);
         }
     }
+}
+
+fn load_layers_and_alphas_or_exit(path_str: &str) -> (Vec<LoraLayer>, BTreeMap<String, f64>) {
+    let (l, a, _) = load_layers_alphas_dora_or_exit(path_str);
+    (l, a)
 }
 
 fn load_layers_or_exit(path_str: &str) -> Vec<LoraLayer> {
@@ -184,6 +200,7 @@ fn main() {
             };
             let mut peft_config_path: Option<String> = None;
             let mut target_dtype: Option<DType> = None;
+            let mut target_format: Option<String> = None;
             let mut bake_alpha = false;
             let mut rslora = false;
             let mut default_alpha: Option<f64> = None;
@@ -227,6 +244,10 @@ fn main() {
                         bake_alpha = true;
                         i += 2;
                     }
+                    "--format" if i + 1 < args.len() => {
+                        target_format = Some(args[i + 1].clone());
+                        i += 2;
+                    }
                     "--peft-config" if i + 1 < args.len() => {
                         peft_config_path = Some(args[i + 1].clone());
                         i += 2;
@@ -240,12 +261,15 @@ fn main() {
                 }
             }
 
-            let (mut layers, alphas) = load_layers_and_alphas_or_exit(input_path);
+            let (mut layers, alphas, dora_scales) = load_layers_alphas_dora_or_exit(input_path);
             let default_r = layers.first().map(|l| l.rank()).unwrap_or(16);
             if bake_alpha || !alphas.is_empty() {
                 bake_adapter_scaling(&mut layers, &alphas, default_alpha, rslora);
             }
             let mut res = compress_adapter(&layers, policy);
+            if let Some(ref fmt) = target_format {
+                convert_layers_key_format(&mut res.layers, fmt).expect("Invalid --format");
+            }
             if let Some(dt) = target_dtype {
                 cast_layers_dtype(&mut res.layers, dt);
             }
@@ -253,6 +277,9 @@ fn main() {
             let mut out_map = layers_to_tensor_map(&res.layers);
             if !alphas.is_empty() {
                 insert_unit_alpha_tensors(&mut out_map, &res.layers);
+            }
+            if !dora_scales.is_empty() {
+                insert_dora_scales(&mut out_map, &dora_scales, target_format.as_deref(), target_dtype);
             }
             write_safetensors(Path::new(output_path), &out_map).expect("Failed to write output .safetensors");
 
@@ -270,6 +297,84 @@ fn main() {
                 res.total_original_bytes,
                 final_bytes,
                 reduction,
+                res.overall_retained_energy * 100.0
+            );
+        }
+        "extract" => {
+            if args.len() < 5 {
+                print_usage();
+                process::exit(1);
+            }
+            let base_path = &args[2];
+            let tuned_path = &args[3];
+            let output_path = &args[4];
+            let mut policy = CompressionPolicy::FixedRank(16);
+            let mut target_format = "peft".to_string();
+            let mut target_dtype: Option<DType> = None;
+            let mut peft_config_path: Option<String> = None;
+
+            let mut i = 5;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--rank" if i + 1 < args.len() => {
+                        let k: usize = args[i + 1].parse().expect("Invalid --rank integer");
+                        policy = CompressionPolicy::FixedRank(k);
+                        i += 2;
+                    }
+                    "--energy" if i + 1 < args.len() => {
+                        let e: f64 = args[i + 1].parse().expect("Invalid --energy float");
+                        policy = CompressionPolicy::AdaptiveEnergy {
+                            target_energy: e,
+                            min_rank: 1,
+                            max_rank: 128,
+                        };
+                        i += 2;
+                    }
+                    "--mp-denoise" => {
+                        policy = CompressionPolicy::MarchenkoPastur {
+                            min_rank: 1,
+                            max_rank: 128,
+                        };
+                        i += 1;
+                    }
+                    "--format" if i + 1 < args.len() => {
+                        target_format = args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--dtype" if i + 1 < args.len() => {
+                        target_dtype =
+                            Some(DType::from_name(&args[i + 1]).expect("Invalid --dtype (use f16, bf16, or f32)"));
+                        i += 2;
+                    }
+                    "--peft-config" if i + 1 < args.len() => {
+                        peft_config_path = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+
+            let base_tensors = read_safetensors(Path::new(base_path)).expect("Failed to read base .safetensors");
+            let tuned_tensors = read_safetensors(Path::new(tuned_path)).expect("Failed to read tuned .safetensors");
+            let mut res = extract_lora_from_dense_models(&base_tensors, &tuned_tensors, policy, &target_format)
+                .expect("LoRA extraction failed");
+            if let Some(dt) = target_dtype {
+                cast_layers_dtype(&mut res.layers, dt);
+            }
+            let out_map = layers_to_tensor_map(&res.layers);
+            let bytes = write_safetensors(Path::new(output_path), &out_map).expect("Failed to write output .safetensors");
+            if let Some(cfg_path) = &peft_config_path {
+                let default_r = res.layers.first().map(|l| l.rank()).unwrap_or(16);
+                write_peft_rank_pattern_config(Path::new(cfg_path), &res.rank_pattern, default_r)
+                    .expect("Failed to write PEFT adapter_config.json");
+            }
+            println!(
+                "Extracted {} LoRA layers from ({}, {}) -> {} ({} bytes, mean retained energy: {:.2}%)",
+                res.layers.len(),
+                base_path,
+                tuned_path,
+                output_path,
+                bytes,
                 res.overall_retained_energy * 100.0
             );
         }
@@ -311,6 +416,7 @@ fn main() {
             let mut bake_alpha = false;
             let mut rslora = false;
             let mut default_alpha: Option<f64> = None;
+            let mut target_format: Option<String> = None;
             let mut target_dtype: Option<DType> = None;
 
             let mut i = 2;
@@ -355,6 +461,10 @@ fn main() {
                         bake_alpha = true;
                         i += 2;
                     }
+                    "--format" if i + 1 < args.len() => {
+                        target_format = Some(args[i + 1].clone());
+                        i += 2;
+                    }
                     "--dtype" if i + 1 < args.len() => {
                         target_dtype =
                             Some(DType::from_name(&args[i + 1]).expect("Invalid --dtype (use f16, bf16, or f32)"));
@@ -377,10 +487,14 @@ fn main() {
 
             let mut adapters: Vec<Vec<LoraLayer>> = Vec::with_capacity(input_paths.len());
             let mut any_alphas = false;
+            let mut combined_dora: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
             for p in input_paths {
-                let (mut l, alphas) = load_layers_and_alphas_or_exit(p);
+                let (mut l, alphas, dora) = load_layers_alphas_dora_or_exit(p);
                 if !alphas.is_empty() {
                     any_alphas = true;
+                }
+                for (k, v) in dora {
+                    combined_dora.entry(k).or_insert(v);
                 }
                 if bake_alpha || !alphas.is_empty() {
                     bake_adapter_scaling(&mut l, &alphas, default_alpha, rslora);
@@ -409,12 +523,18 @@ fn main() {
             )
             .expect("Merge failed");
 
+            if let Some(ref fmt) = target_format {
+                convert_layers_key_format(&mut merged, fmt).expect("Invalid --format");
+            }
             if let Some(dt) = target_dtype {
                 cast_layers_dtype(&mut merged, dt);
             }
             let mut out_map = layers_to_tensor_map(&merged);
             if any_alphas {
                 insert_unit_alpha_tensors(&mut out_map, &merged);
+            }
+            if !combined_dora.is_empty() {
+                insert_dora_scales(&mut out_map, &combined_dora, target_format.as_deref(), target_dtype);
             }
             let bytes = write_safetensors(Path::new(&output_path), &out_map).expect("Write failed");
             println!(
