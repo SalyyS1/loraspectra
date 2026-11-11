@@ -204,10 +204,19 @@ fn main() {
             let mut bake_alpha = false;
             let mut rslora = false;
             let mut default_alpha: Option<f64> = None;
+            let mut exclude_patterns: Vec<String> = Vec::new();
 
             let mut i = 4;
             while i < args.len() {
                 match args[i].as_str() {
+                    "--exclude" if i + 1 < args.len() => {
+                        exclude_patterns = args[i + 1]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        i += 2;
+                    }
                     "--rank" if i + 1 < args.len() => {
                         let k: usize = args[i + 1].parse().expect("Invalid --rank integer");
                         policy = CompressionPolicy::FixedRank(k);
@@ -262,6 +271,9 @@ fn main() {
             }
 
             let (mut layers, alphas, dora_scales) = load_layers_alphas_dora_or_exit(input_path);
+            if !exclude_patterns.is_empty() {
+                layers.retain(|l| !exclude_patterns.iter().any(|p| l.base_name.contains(p.as_str())));
+            }
             let default_r = layers.first().map(|l| l.rank()).unwrap_or(16);
             if bake_alpha || !alphas.is_empty() {
                 bake_adapter_scaling(&mut layers, &alphas, default_alpha, rslora);
