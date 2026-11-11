@@ -29,14 +29,16 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
 
 ## Comparison with Existing Tools
 
-| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v0.2.0`) |
+| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v0.3.0`) |
 | :--- | :---: | :---: | :---: | :---: |
 | **SVD Algorithm & Complexity** | Dense $O(d^3)$ (`torch.linalg.svd(B @ A)`) | Dense / Low-rank approx | Dense $O(d^3)$ on delta weights | **Exact QR-Core SVD $O(r^2 d + r^3)$ (`1,050x–2,680x` faster)** |
 | **Runtime Dependencies** | Python + PyTorch + CUDA (`~4 GB`) | Python + PyTorch + Transformers | Python + PyTorch (`~4 GB`) | **Zero-dependency native Rust binary (`< 1 MB`)** |
 | **Spectral Entropy & Rank-Collapse Audit** | No | No | No | **Yes (`r_eff`, `r_stable`, `K_99%`, `K_MP`)** |
 | **Marchenko-Pastur Automatic SGD Denoising** | No | No | No | **Yes (`--mp-denoise`, Gavish-Donoho 2014)** |
 | **PEFT `rank_pattern` / `alpha_pattern` Export** | No | Manual only | No | **Yes (`--peft-config adapter_config.json`)** |
-| **Orthogonal Subspace De-Conflicted Merge** | No (Linear / SV_ratio only) | No (Linear / TIES / DARE) | No (Dense SVD truncation) | **Yes (`--mode ortho-svd` + `--layer-weights`)** |
+| **Disjoint Module & Heterogeneous-Rank Merge** | Fails on shape mismatch | Fails (`PEFT #3737`) | Partial | **Yes (Union over `base_name` + any $r_1 \ne r_2$)** |
+| **Orthogonal Subspace & Norm-Bounded Merge** | No (Linear / SV_ratio only) | No (Linear / TIES / DARE) | No (Dense SVD truncation) | **Yes (`--mode ortho-svd`, `--preserve-norm`, `--layer-weights`)** |
+| **Cross-DType Precision Casting (`F32` / `F16` / `BF16`)** | Partial | No | Yes | **Yes (`--dtype f16\|bf16\|f32` during compress/merge)** |
 
 ---
 
@@ -128,8 +130,8 @@ Summary: 28 layers | Mean rank 64.0 -> k_99% 9.7 / k_MP 8.6 (r_eff 11.77) | Pote
 # Retain 99.0% Frobenius spectral energy per layer and export PEFT rank_pattern config
 ./target/release/loraspectra compress adapter_model.safetensors adapter_slim.safetensors --energy 0.99 --peft-config adapter_config.json
 
-# Automatically prune stochastic SGD tail noise using Gavish-Donoho (2014) Marchenko-Pastur threshold
-./target/release/loraspectra compress adapter_model.safetensors adapter_denoised.safetensors --mp-denoise --peft-config adapter_config.json
+# Automatically prune stochastic SGD tail noise using Gavish-Donoho (2014) Marchenko-Pastur threshold and cast to BF16
+./target/release/loraspectra compress adapter_model.safetensors adapter_denoised.safetensors --mp-denoise --dtype bf16 --peft-config adapter_config.json
 
 # Or truncate uniformly to fixed rank 16
 ./target/release/loraspectra compress adapter_model.safetensors adapter_r16.safetensors --rank 16
@@ -141,9 +143,9 @@ Summary: 28 layers | Mean rank 64.0 -> k_99% 9.7 / k_MP 8.6 (r_eff 11.77) | Pote
 # Inspect layerwise subspace cosines and Frobenius conflict before merging
 ./target/release/loraspectra interference code_lora.safetensors math_lora.safetensors
 
-# Merge with orthogonal subspace projection and custom per-block Attention vs MLP weights
+# Merge with orthogonal subspace projection, spectral norm bounding, and per-block Attention vs MLP weights
 ./target/release/loraspectra merge code_lora.safetensors math_lora.safetensors merged_lora.safetensors \
-  --mode ortho-svd --rank 32 --layer-weights "self_attn=1.0:0.3,mlp=0.4:1.0"
+  --mode ortho-svd --rank 32 --preserve-norm --dtype bf16 --layer-weights "self_attn=1.0:0.3,mlp=0.4:1.0"
 ```
 
 ### Run Unit Tests and Reproducible Benchmarks

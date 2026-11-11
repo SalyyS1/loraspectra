@@ -1,6 +1,6 @@
 [package]
 name = "loraspectra"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Spectral SVD auditor, Eckart-Young dynamic rank compressor, and orthogonal subspace merger for .safetensors LoRA adapters"
 license = "MIT"

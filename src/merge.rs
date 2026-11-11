@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use crate::linalg::{
-    axpy_slice, dot_slice, jacobi_svd, matmul, qr_core_svd_truncated, scale_slice,
-    svd_to_lora_factors, transpose,
+    axpy_slice, dot_slice, jacobi_svd, matmul, qr_core_singular_values, qr_core_svd_truncated,
+    scale_slice, svd_to_lora_factors, transpose,
 };
 use crate::safetensors::{LoraLayer, Tensor2D};
 
@@ -47,6 +49,14 @@ impl MergeStrategy {
                 w2,
                 target_rank,
             },
+        }
+    }
+
+    pub fn weights(self) -> (f64, f64) {
+        match self {
+            MergeStrategy::Linear { w1, w2, .. }
+            | MergeStrategy::Ties { w1, w2, .. }
+            | MergeStrategy::OrthoSvd { w1, w2, .. } => (w1, w2),
         }
     }
 }
@@ -409,12 +419,53 @@ pub fn merge_layer(
     }
 }
 
+fn scale_single_layer(layer: &LoraLayer, weight: f64) -> LoraLayer {
+    let mut out = layer.clone();
+    let mag_sqrt = weight.abs().sqrt();
+    let sign = if weight < 0.0 { -1.0 } else { 1.0 };
+    for v in &mut out.b.data {
+        *v *= sign * mag_sqrt;
+    }
+    for v in &mut out.a.data {
+        *v *= mag_sqrt;
+    }
+    out
+}
+
+fn bound_layer_spectral_norm(merged: &mut LoraLayer, l1: &LoraLayer, l2: &LoraLayer) {
+    let s1 = qr_core_singular_values(&l1.b, &l1.a)
+        .first()
+        .copied()
+        .unwrap_or(0.0);
+    let s2 = qr_core_singular_values(&l2.b, &l2.a)
+        .first()
+        .copied()
+        .unwrap_or(0.0);
+    let max_source_sigma = s1.max(s2);
+    if max_source_sigma <= 1e-12 {
+        return;
+    }
+    let s_merged = qr_core_singular_values(&merged.b, &merged.a)
+        .first()
+        .copied()
+        .unwrap_or(0.0);
+    if s_merged > max_source_sigma {
+        let ratio_sqrt = (max_source_sigma / s_merged).sqrt();
+        for v in &mut merged.b.data {
+            *v *= ratio_sqrt;
+        }
+        for v in &mut merged.a.data {
+            *v *= ratio_sqrt;
+        }
+    }
+}
+
 pub fn merge_adapters(
     layers1: &[LoraLayer],
     layers2: &[LoraLayer],
     strategy: MergeStrategy,
 ) -> Result<Vec<LoraLayer>, String> {
-    merge_adapters_with_block_weights(layers1, layers2, strategy, &[])
+    merge_adapters_with_options(layers1, layers2, strategy, &[], false)
 }
 
 pub fn merge_adapters_with_block_weights(
@@ -423,33 +474,68 @@ pub fn merge_adapters_with_block_weights(
     base_strategy: MergeStrategy,
     rules: &[BlockWeightRule],
 ) -> Result<Vec<LoraLayer>, String> {
-    if layers1.len() != layers2.len() {
-        return Err(format!(
-            "Adapter layer count mismatch: {} vs {}",
-            layers1.len(),
-            layers2.len()
-        ));
+    merge_adapters_with_options(layers1, layers2, base_strategy, rules, false)
+}
+
+pub fn merge_adapters_with_options(
+    layers1: &[LoraLayer],
+    layers2: &[LoraLayer],
+    base_strategy: MergeStrategy,
+    rules: &[BlockWeightRule],
+    preserve_spectral_norm: bool,
+) -> Result<Vec<LoraLayer>, String> {
+    let mut map1: BTreeMap<&str, &LoraLayer> = BTreeMap::new();
+    let mut map2: BTreeMap<&str, &LoraLayer> = BTreeMap::new();
+    let mut all_names: Vec<&str> = Vec::new();
+
+    for l1 in layers1 {
+        map1.insert(l1.base_name.as_str(), l1);
+        all_names.push(l1.base_name.as_str());
     }
-    let mut merged = Vec::with_capacity(layers1.len());
-    for (l1, l2) in layers1.iter().zip(layers2.iter()) {
-        if l1.base_name != l2.base_name || l1.d_out() != l2.d_out() || l1.d_in() != l2.d_in() {
-            return Err(format!(
-                "Incompatible layer pair: {} ({}, {}) vs {} ({}, {})",
-                l1.base_name,
-                l1.d_out(),
-                l1.d_in(),
-                l2.base_name,
-                l2.d_out(),
-                l2.d_in()
-            ));
+    for l2 in layers2 {
+        map2.insert(l2.base_name.as_str(), l2);
+        if !map1.contains_key(l2.base_name.as_str()) {
+            all_names.push(l2.base_name.as_str());
         }
+    }
+
+    let mut merged = Vec::with_capacity(all_names.len());
+    for name in all_names {
         let mut layer_strategy = base_strategy;
         for rule in rules {
-            if l1.base_name.contains(&rule.pattern) {
+            if name.contains(&rule.pattern) {
                 layer_strategy = base_strategy.with_weights(rule.w1, rule.w2);
             }
         }
-        merged.push(merge_layer(l1, l2, layer_strategy));
+        let (w1, w2) = layer_strategy.weights();
+
+        match (map1.get(name), map2.get(name)) {
+            (Some(l1), Some(l2)) => {
+                if l1.d_out() != l2.d_out() || l1.d_in() != l2.d_in() {
+                    return Err(format!(
+                        "Incompatible layer pair: {} ({}, {}) vs {} ({}, {})",
+                        l1.base_name,
+                        l1.d_out(),
+                        l1.d_in(),
+                        l2.base_name,
+                        l2.d_out(),
+                        l2.d_in()
+                    ));
+                }
+                let mut m = merge_layer(l1, l2, layer_strategy);
+                if preserve_spectral_norm {
+                    bound_layer_spectral_norm(&mut m, l1, l2);
+                }
+                merged.push(m);
+            }
+            (Some(l1), None) => {
+                merged.push(scale_single_layer(l1, w1));
+            }
+            (None, Some(l2)) => {
+                merged.push(scale_single_layer(l2, w2));
+            }
+            (None, None) => unreachable!(),
+        }
     }
     Ok(merged)
 }

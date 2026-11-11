@@ -5,23 +5,23 @@ use std::process;
 use loraspectra::audit::audit_adapter;
 use loraspectra::compress::{compress_adapter, CompressionPolicy};
 use loraspectra::merge::{
-    analyze_layer_interference, merge_adapters_with_block_weights, parse_layer_weights,
-    BlockWeightRule, MergeStrategy,
+    analyze_layer_interference, merge_adapters_with_options, parse_layer_weights, BlockWeightRule,
+    MergeStrategy,
 };
 use loraspectra::safetensors::{
-    extract_lora_layers, layers_to_tensor_map, read_safetensors, write_peft_rank_pattern_config,
-    write_safetensors,
+    cast_layers_dtype, extract_lora_layers, layers_to_tensor_map, read_safetensors,
+    write_peft_rank_pattern_config, write_safetensors, DType,
 };
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v0.2.0 — Spectral SVD Auditor, Dynamic Rank Compressor & Orthogonal Merger for LoRA (.safetensors)
+        "loraspectra v0.3.0 — Spectral SVD Auditor, Dynamic Rank Compressor & Orthogonal Merger for LoRA (.safetensors)
 
 USAGE:
   loraspectra audit <adapter.safetensors> [--json]
-  loraspectra compress <input.safetensors> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--peft-config <adapter_config.json>]
+  loraspectra compress <input.safetensors> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a.safetensors> <adapter_b.safetensors>
-  loraspectra merge <adapter_a.safetensors> <adapter_b.safetensors> <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"]"
+  loraspectra merge <adapter_a.safetensors> <adapter_b.safetensors> <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--dtype f16|bf16|f32]"
     );
 }
 
@@ -120,6 +120,7 @@ fn main() {
                 max_rank: 256,
             };
             let mut peft_config_path: Option<String> = None;
+            let mut target_dtype: Option<DType> = None;
 
             let mut i = 4;
             while i < args.len() {
@@ -149,13 +150,22 @@ fn main() {
                         peft_config_path = Some(args[i + 1].clone());
                         i += 2;
                     }
+                    "--dtype" if i + 1 < args.len() => {
+                        target_dtype =
+                            Some(DType::from_name(&args[i + 1]).expect("Invalid --dtype (use f16, bf16, or f32)"));
+                        i += 2;
+                    }
                     _ => i += 1,
                 }
             }
 
             let layers = load_layers_or_exit(input_path);
             let default_r = layers.first().map(|l| l.rank()).unwrap_or(16);
-            let res = compress_adapter(&layers, policy);
+            let mut res = compress_adapter(&layers, policy);
+            if let Some(dt) = target_dtype {
+                cast_layers_dtype(&mut res.layers, dt);
+            }
+            let final_bytes: usize = res.layers.iter().map(|l| l.raw_byte_size()).sum();
             let out_map = layers_to_tensor_map(&res.layers);
             write_safetensors(Path::new(output_path), &out_map).expect("Failed to write output .safetensors");
 
@@ -164,14 +174,14 @@ fn main() {
                     .expect("Failed to write PEFT adapter_config.json");
             }
 
-            let reduction = (1.0 - (res.total_compressed_bytes as f64) / (res.total_original_bytes.max(1) as f64)) * 100.0;
+            let reduction = (1.0 - (final_bytes as f64) / (res.total_original_bytes.max(1) as f64)) * 100.0;
             println!(
                 "Compressed {} -> {} ({} layers): {} bytes -> {} bytes (-{:.1}%), mean retained spectral energy: {:.2}%",
                 input_path,
                 output_path,
                 res.layers.len(),
                 res.total_original_bytes,
-                res.total_compressed_bytes,
+                final_bytes,
                 reduction,
                 res.overall_retained_energy * 100.0
             );
@@ -214,6 +224,8 @@ fn main() {
             let mut rank = default_rank;
             let mut custom_weights: Option<(f64, f64)> = None;
             let mut block_rules: Vec<BlockWeightRule> = Vec::new();
+            let mut preserve_norm = false;
+            let mut target_dtype: Option<DType> = None;
             let mut i = 5;
             while i < args.len() {
                 match args[i].as_str() {
@@ -236,6 +248,15 @@ fn main() {
                     "--layer-weights" if i + 1 < args.len() => {
                         block_rules = parse_layer_weights(&args[i + 1])
                             .expect("Invalid --layer-weights specification");
+                        i += 2;
+                    }
+                    "--preserve-norm" => {
+                        preserve_norm = true;
+                        i += 1;
+                    }
+                    "--dtype" if i + 1 < args.len() => {
+                        target_dtype =
+                            Some(DType::from_name(&args[i + 1]).expect("Invalid --dtype (use f16, bf16, or f32)"));
                         i += 2;
                     }
                     _ => i += 1,
@@ -270,17 +291,26 @@ fn main() {
                 }
             };
 
-            let merged =
-                merge_adapters_with_block_weights(&layers_a, &layers_b, base_strategy, &block_rules)
-                    .expect("Merge failed");
+            let mut merged = merge_adapters_with_options(
+                &layers_a,
+                &layers_b,
+                base_strategy,
+                &block_rules,
+                preserve_norm,
+            )
+            .expect("Merge failed");
+            if let Some(dt) = target_dtype {
+                cast_layers_dtype(&mut merged, dt);
+            }
             let out_map = layers_to_tensor_map(&merged);
             let bytes = write_safetensors(Path::new(output_path), &out_map).expect("Write failed");
             println!(
-                "Merged {} layers using mode '{}' (target rank {}, {} block rules) -> {} ({} bytes)",
+                "Merged {} layers using mode '{}' (target rank {}, {} block rules, preserve_norm={}) -> {} ({} bytes)",
                 merged.len(),
                 mode,
                 rank,
                 block_rules.len(),
+                preserve_norm,
                 output_path,
                 bytes
             );

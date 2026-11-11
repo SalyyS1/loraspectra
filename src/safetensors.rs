@@ -28,10 +28,10 @@ impl DType {
     }
 
     pub fn from_name(s: &str) -> Result<Self, String> {
-        match s {
-            "F32" => Ok(DType::F32),
-            "F16" => Ok(DType::F16),
-            "BF16" => Ok(DType::BF16),
+        match s.trim().to_ascii_uppercase().as_str() {
+            "F32" | "FP32" | "FLOAT32" => Ok(DType::F32),
+            "F16" | "FP16" | "FLOAT16" => Ok(DType::F16),
+            "BF16" | "BFLOAT16" => Ok(DType::BF16),
             other => Err(format!("Unsupported safetensors dtype: {}", other)),
         }
     }
@@ -588,6 +588,14 @@ pub fn layers_to_tensor_map(layers: &[LoraLayer]) -> BTreeMap<String, Tensor2D> 
         map.insert(layer.b_key.clone(), layer.b.clone());
     }
     map
+}
+
+/// Cast the storage `DType` (`F32`, `F16`, or `BF16`) of all LoRA layers in place.
+pub fn cast_layers_dtype(layers: &mut [LoraLayer], target_dtype: DType) {
+    for layer in layers {
+        layer.a.dtype = target_dtype;
+        layer.b.dtype = target_dtype;
+    }
 }
 
 /// Write a HuggingFace PEFT-compatible `adapter_config.json` containing `rank_pattern` and

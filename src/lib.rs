@@ -47,11 +47,11 @@ mod tests {
         jacobi_svd, matmul, qr_core_singular_values, thin_qr_columns,
     };
     use crate::merge::{
-        analyze_layer_interference, merge_adapters_with_block_weights, merge_layer,
-        parse_layer_weights, MergeStrategy,
+        analyze_layer_interference, merge_adapters_with_block_weights, merge_adapters_with_options,
+        merge_layer, parse_layer_weights, MergeStrategy,
     };
     use crate::safetensors::{
-        bf16_to_f32, extract_lora_layers, f16_to_f32, f32_to_bf16, f32_to_f16,
+        bf16_to_f32, cast_layers_dtype, extract_lora_layers, f16_to_f32, f32_to_bf16, f32_to_f16,
         layers_to_tensor_map, read_safetensors, write_peft_rank_pattern_config, write_safetensors,
         DType, LoraLayer, Tensor2D,
     };
@@ -501,5 +501,74 @@ mod tests {
             .sum::<f64>()
             .sqrt();
         assert!(err_attn < 1e-10, "attn should match adapter 1, err={}", err_attn);
+    }
+
+    #[test]
+    fn test_disjoint_and_heterogeneous_rank_adapter_merge_with_preserve_norm() {
+        let mut rng = Rng64::new(5150);
+        let d = 48;
+
+        // Adapter 1 has q_proj (r=4) and v_proj (r=4)
+        let l1_q = LoraLayer {
+            base_name: "layers.0.self_attn.q_proj".to_string(),
+            a_key: "layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, d, &mut rng, DType::F32),
+            b: random_matrix(d, 4, &mut rng, DType::F32),
+        };
+        let l1_v = LoraLayer {
+            base_name: "layers.0.self_attn.v_proj".to_string(),
+            a_key: "layers.0.self_attn.v_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.self_attn.v_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, d, &mut rng, DType::F32),
+            b: random_matrix(d, 4, &mut rng, DType::F32),
+        };
+
+        // Adapter 2 has q_proj (r=8, heterogeneous rank!) and down_proj (r=8, disjoint layer!)
+        let l2_q = LoraLayer {
+            base_name: "layers.0.self_attn.q_proj".to_string(),
+            a_key: "layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(8, d, &mut rng, DType::F32),
+            b: random_matrix(d, 8, &mut rng, DType::F32),
+        };
+        let l2_down = LoraLayer {
+            base_name: "layers.0.mlp.down_proj".to_string(),
+            a_key: "layers.0.mlp.down_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.mlp.down_proj.lora_B.weight".to_string(),
+            a: random_matrix(8, d, &mut rng, DType::F32),
+            b: random_matrix(d, 8, &mut rng, DType::F32),
+        };
+
+        let s1_max = qr_core_singular_values(&l1_q.b, &l1_q.a)[0];
+        let s2_max = qr_core_singular_values(&l2_q.b, &l2_q.a)[0];
+        let bound = s1_max.max(s2_max);
+
+        let mut merged = merge_adapters_with_options(
+            &[l1_q, l1_v],
+            &[l2_q, l2_down],
+            MergeStrategy::OrthoSvd {
+                w1: 2.0,
+                w2: 2.0,
+                target_rank: 6,
+            },
+            &[],
+            true,
+        )
+        .expect("disjoint heterogeneous merge");
+
+        assert_eq!(merged.len(), 3);
+        let s_merged_q = qr_core_singular_values(&merged[0].b, &merged[0].a)[0];
+        assert!(
+            s_merged_q <= bound + 1e-9,
+            "preserve_norm violated: {} > {}",
+            s_merged_q,
+            bound
+        );
+
+        let bytes_f32: usize = merged.iter().map(|l| l.raw_byte_size()).sum();
+        cast_layers_dtype(&mut merged, DType::from_name("bf16").unwrap());
+        let bytes_bf16: usize = merged.iter().map(|l| l.raw_byte_size()).sum();
+        assert_eq!(bytes_bf16 * 2, bytes_f32);
     }
 }
