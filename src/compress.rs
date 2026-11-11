@@ -182,8 +182,26 @@ pub fn compress_adapter(layers: &[LoraLayer], policy: CompressionPolicy) -> Comp
     }
 }
 
+fn strip_model_wrapper_prefix(key: &str) -> &str {
+    for prefix in [
+        "base_model.model.model.diffusion_model.",
+        "model.diffusion_model.",
+        "diffusion_model.",
+        "base_model.model.",
+        "transformer.",
+        "model.",
+    ] {
+        if let Some(rest) = key.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    key
+}
+
 /// Extract a low-rank LoRA adapter directly from the dense weight difference `W_tuned - W_base`
 /// between two `.safetensors` models using Eckart-Young SVD truncation or Marchenko-Pastur denoising.
+/// Automatically normalizes wrapper prefixes (`model.diffusion_model.`, `transformer.`, etc.) so
+/// ComfyUI/SRPO and Kohya/Diffusers checkpoints match seamlessly.
 pub fn extract_lora_from_dense_models(
     base_tensors: &BTreeMap<String, Tensor2D>,
     tuned_tensors: &BTreeMap<String, Tensor2D>,
@@ -194,8 +212,18 @@ pub fn extract_lora_from_dense_models(
     let mut metrics = Vec::new();
     let mut rank_pattern = BTreeMap::new();
 
+    let mut canonical_tuned: BTreeMap<&str, (&String, &Tensor2D)> = BTreeMap::new();
+    for (t_key, t_val) in tuned_tensors {
+        canonical_tuned.insert(strip_model_wrapper_prefix(t_key), (t_key, t_val));
+    }
+
     for (key, w_base) in base_tensors {
-        let Some(w_tuned) = tuned_tensors.get(key) else {
+        let stripped_key = strip_model_wrapper_prefix(key);
+        let (canonical_key_str, w_tuned) = if let Some(exact) = tuned_tensors.get(key) {
+            (key.as_str(), exact)
+        } else if let Some(&(_t_key, matched)) = canonical_tuned.get(stripped_key) {
+            (stripped_key, matched)
+        } else {
             continue;
         };
         if w_base.rows != w_tuned.rows || w_base.cols != w_tuned.cols {
@@ -251,7 +279,10 @@ pub fn extract_lora_from_dense_models(
         };
 
         let (b_new, a_new) = svd_to_lora_factors(&svd, target_k, w_tuned.dtype);
-        let base_name = key.strip_suffix(".weight").unwrap_or(key.as_str()).to_string();
+        let base_name = canonical_key_str
+            .strip_suffix(".weight")
+            .unwrap_or(canonical_key_str)
+            .to_string();
 
         let mut layer = LoraLayer {
             base_name: base_name.clone(),

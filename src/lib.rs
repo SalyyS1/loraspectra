@@ -794,5 +794,27 @@ mod tests {
         for (&orig, &rec) in true_dw.data.iter().zip(rec_dw.data.iter()) {
             assert!((orig - rec).abs() < 1e-9);
         }
+
+        // Verify cross-prefix matching (e.g. ComfyUI/SRPO "model.diffusion_model.double_blocks..." vs Kohya "double_blocks...")
+        let mut srpo_base_map = std::collections::BTreeMap::new();
+        let mut kohya_tuned_map = std::collections::BTreeMap::new();
+        srpo_base_map.insert(
+            "model.diffusion_model.double_blocks.0.img_attn.proj.weight".to_string(),
+            base_map["model.layers.0.self_attn.q_proj.weight"].clone(),
+        );
+        kohya_tuned_map.insert(
+            "double_blocks.0.img_attn.proj.weight".to_string(),
+            tuned_map["model.layers.0.self_attn.q_proj.weight"].clone(),
+        );
+        let res_prefix = extract_lora_from_dense_models(
+            &srpo_base_map,
+            &kohya_tuned_map,
+            CompressionPolicy::FixedRank(true_r),
+            "kohya",
+        )
+        .expect("extract lora across mismatched wrapper prefixes");
+        assert_eq!(res_prefix.layers.len(), 1);
+        assert_eq!(res_prefix.layers[0].base_name, "double_blocks.0.img_attn.proj");
+        assert_eq!(res_prefix.layers[0].a_key, "double_blocks.0.img_attn.proj.lora_down.weight");
     }
 }
