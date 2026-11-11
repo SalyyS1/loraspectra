@@ -185,8 +185,11 @@ pub fn compress_adapter(layers: &[LoraLayer], policy: CompressionPolicy) -> Comp
 fn strip_model_wrapper_prefix(key: &str) -> &str {
     for prefix in [
         "base_model.model.model.diffusion_model.",
+        "base_model.model.language_model.model.",
         "model.diffusion_model.",
         "diffusion_model.",
+        "language_model.model.",
+        "language_model.",
         "base_model.model.",
         "transformer.",
         "model.",
