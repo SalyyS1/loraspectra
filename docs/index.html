@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>loraspectra — Spectral SVD Auditor, Dynamic Compressor &amp; Orthogonal Merger for LoRA .safetensors</title>
+  <meta name="description" content="Zero-dependency Rust engine and CLI for auditing spectral rank collapse, compressing LoRA .safetensors via Eckart-Young adaptive energy allocation (-83.8% size), and merging adapters via QR-Core Orthogonal SVD (1,050x–2,680x faster than dense SVD).">
+  <meta property="og:title" content="loraspectra — 1,050x–2,680x Faster QR-Core SVD for LoRA .safetensors">
+  <meta property="og:description" content="Audit rank collapse, dynamically compress LoRA adapters by -83.8% at 99% Frobenius energy, and merge conflicting adapters via Orthogonal Subspace Projection in pure Rust.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
+  <meta name="twitter:card" content="summary_large_image">
+  <style>
+    :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; line-height: 1.6; }
+    .container { max-width: 980px; margin: 0 auto; padding: 48px 24px; }
+    .badge-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    .badge { background: #1f2937; border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; font-size: 13px; color: var(--accent); }
+    h1 { font-size: 40px; margin: 0 0 12px; letter-spacing: -0.5px; }
+    .lead { font-size: 19px; color: var(--muted); margin-bottom: 28px; }
+    .cta-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 40px; }
+    .btn { display: inline-block; padding: 10px 20px; border-radius: 6px; font-weight: 600; text-decoration: none; font-size: 15px; }
+    .btn-primary { background: #238636; color: #fff; }
+    .btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin-bottom: 28px; }
+    pre { background: #010409; border: 1px solid var(--border); padding: 14px; border-radius: 6px; overflow-x: auto; font-size: 13.5px; color: #c9d1d9; }
+    img { max-width: 100%; border-radius: 6px; border: 1px solid var(--border); margin: 12px 0; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="badge-row">
+      <span class="badge">Pure Rust (0 Dependencies)</span>
+      <span class="badge">1,050x&ndash;2,680x Speedup vs Dense SVD</span>
+      <span class="badge">-83.8% LoRA Size at 99% Energy</span>
+      <span class="badge">PEFT &amp; Kohya/FLUX .safetensors</span>
+    </div>
+    <h1>loraspectra</h1>
+    <p class="lead">Spectral SVD Auditor, Eckart-Young Dynamic Rank Compressor, and Orthogonal Subspace Merger for <code>.safetensors</code> LoRA Adapters &mdash; powered by QR-Core SVD ($O(r^2 d + r^3)$) without loading PyTorch or GPU VRAM.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/SalyyS1/loraspectra">View on GitHub &rarr;</a>
+      <a class="btn btn-secondary" href="https://github.com/SalyyS1/loraspectra/releases/tag/v0.1.0">Download Prebuilt Linux Binary (v0.1.0) &rarr;</a>
+      <a class="btn btn-secondary" href="https://github.com/SalyyS1/mcp-slim">Companion Project: mcp-slim &rarr;</a>
+    </div>
+    <div class="card">
+      <h2>Instant CLI Usage</h2>
+      <pre><code>curl -sL https://github.com/SalyyS1/loraspectra/releases/download/v0.1.0/loraspectra-v0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+./loraspectra audit adapter_model.safetensors
+./loraspectra compress adapter_model.safetensors adapter_slim.safetensors --energy 0.99
+./loraspectra merge lora_a.safetensors lora_b.safetensors merged.safetensors --mode ortho-svd --rank 32</code></pre>
+    </div>
+    <div class="card">
+      <h2>Empirical Benchmarks</h2>
+      <img src="assets/benchmark-compression.svg" alt="Eckart-Young Adaptive Energy Rank Compression Benchmark">
+      <img src="assets/benchmark-svd-merge.svg" alt="QR-Core SVD Speedup and Orthogonal Subspace Merge Benchmark">
+    </div>
+  </div>
+</body>
+</html>

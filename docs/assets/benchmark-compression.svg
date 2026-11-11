@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" width="100%" height="440">
+  <style>
+    .bg { fill: #0d1117; }
+    .panel { fill: #161b22; stroke: #30363d; stroke-width: 1; }
+    .grid { stroke: #21262d; stroke-width: 1; stroke-dasharray: 3,3; }
+    .axis { stroke: #484f58; stroke-width: 1.2; }
+    .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; fill: #e6edf3; }
+    .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11.5px; fill: #8b949e; }
+    .panel-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12.5px; font-weight: 600; fill: #c9d1d9; }
+    .label { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 11px; fill: #c9d1d9; }
+    .val { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600; fill: #e6edf3; }
+    .muted { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 10px; fill: #8b949e; }
+    .bar-orig { fill: #6e7681; }
+    .bar-adapt { fill: #2ea043; }
+    .bar-unif { fill: #d29922; }
+    .bar-err-adapt { fill: #388bfd; }
+    .bar-err-unif { fill: #f85149; }
+  </style>
+
+  <rect width="960" height="440" rx="6" class="bg"/>
+
+  <text x="24" y="28" class="title">Eckart-Young SVD Rank Compression Benchmark (28-Layer Transformer LoRA, r=64, BF16)</text>
+  <text x="24" y="46" class="subtitle">Empirical measurement on 28 projections (q/k/v/o/gate/up/down, d=1024..2048, 8.51 MiB baseline) via loraspectra-bench --release</text>
+
+  <!-- Left Panel: File Size & Retained Spectral Energy -->
+  <rect x="20" y="62" width="452" height="356" rx="4" class="panel"/>
+  <text x="36" y="86" class="panel-title">A. Safetensors Size (MiB) vs Retained Spectral Energy</text>
+  <line x1="190" y1="100" x2="190" y2="375" class="axis"/>
+  <line x1="190" y1="375" x2="452" y2="375" class="axis"/>
+  <text x="182" y="122" text-anchor="end" class="label">Baseline (r=64)</text>
+  <rect x="191" y="108" width="188.1" height="19" rx="2" class="bar-orig"/>
+  <text x="385.1" y="121" class="val">8.51 MiB (0.0%) | E=100.0%</text>
+  <text x="182" y="155" text-anchor="end" class="label">Adaptive 99.5%</text>
+  <rect x="191" y="141" width="38.2" height="19" rx="2" class="bar-adapt"/>
+  <text x="235.2" y="154" class="val">1.73 MiB (-79.6%) | E=99.60%</text>
+  <text x="182" y="188" text-anchor="end" class="label">Adaptive 99.0%</text>
+  <rect x="191" y="174" width="30.5" height="19" rx="2" class="bar-adapt"/>
+  <text x="227.5" y="187" class="val">1.38 MiB (-83.8%) | E=99.19%</text>
+  <text x="182" y="221" text-anchor="end" class="label">Adaptive 97.5%</text>
+  <rect x="191" y="207" width="21.0" height="19" rx="2" class="bar-adapt"/>
+  <text x="218.0" y="220" class="val">0.95 MiB (-88.9%) | E=97.93%</text>
+  <text x="182" y="254" text-anchor="end" class="label">Adaptive 95.0%</text>
+  <rect x="191" y="240" width="14.6" height="19" rx="2" class="bar-adapt"/>
+  <text x="211.6" y="253" class="val">0.66 MiB (-92.2%) | E=95.76%</text>
+  <text x="182" y="287" text-anchor="end" class="label">Uniform r=16</text>
+  <rect x="191" y="273" width="46.9" height="19" rx="2" class="bar-unif"/>
+  <text x="243.9" y="286" class="val">2.12 MiB (-75.0%) | E=99.63%</text>
+  <text x="182" y="320" text-anchor="end" class="label">Uniform r=12</text>
+  <rect x="191" y="306" width="35.1" height="19" rx="2" class="bar-unif"/>
+  <text x="232.1" y="319" class="val">1.59 MiB (-81.2%) | E=99.21%</text>
+  <text x="182" y="353" text-anchor="end" class="label">Uniform r=8</text>
+  <rect x="191" y="339" width="23.4" height="19" rx="2" class="bar-unif"/>
+  <text x="220.4" y="352" class="val">1.06 MiB (-87.5%) | E=98.10%</text>
+  <text x="36" y="402" class="muted">Green: Adaptive per-layer energy allocation | Amber: Uniform fixed rank</text>
+
+  <!-- Right Panel: Worst-Case Layer Relative Frobenius Error (Adaptive vs Uniform) -->
+  <rect x="488" y="62" width="452" height="356" rx="4" class="panel"/>
+  <text x="504" y="86" class="panel-title">B. Worst-Case Layer Reconstruction Error (Lower is Better)</text>
+  <line x1="676" y1="100" x2="676" y2="375" class="axis"/>
+  <line x1="676" y1="375" x2="924" y2="375" class="axis"/>
+  <text x="668" y="126" text-anchor="end" class="label">Adaptive 99.5% (1.73M)</text>
+  <rect x="677" y="112" width="48.2" height="20" rx="2" class="bar-err-adapt"/>
+  <text x="731.2" y="126" class="val">0.0692 (mean r=12.3)</text>
+  <text x="668" y="168" text-anchor="end" class="label">Uniform r=16   (2.12M)</text>
+  <rect x="677" y="154" width="78.3" height="20" rx="2" class="bar-err-unif"/>
+  <text x="761.3" y="168" class="val">0.1125 (mean r=16.0 (+62.6% err))</text>
+  <text x="668" y="218" text-anchor="end" class="label">Adaptive 99.0% (1.38M)</text>
+  <rect x="677" y="204" width="68.2" height="20" rx="2" class="bar-err-adapt"/>
+  <text x="751.2" y="218" class="val">0.0979 (mean r=9.7)</text>
+  <text x="668" y="260" text-anchor="end" class="label">Uniform r=12   (1.59M)</text>
+  <rect x="677" y="246" width="109.4" height="20" rx="2" class="bar-err-unif"/>
+  <text x="792.4" y="260" class="val">0.1571 (mean r=12.0 (+60.5% err))</text>
+  <text x="668" y="310" text-anchor="end" class="label">Adaptive 97.5% (0.95M)</text>
+  <rect x="677" y="296" width="109.9" height="20" rx="2" class="bar-err-adapt"/>
+  <text x="792.9" y="310" class="val">0.1578 (mean r=6.7)</text>
+  <text x="668" y="352" text-anchor="end" class="label">Uniform r=8    (1.06M)</text>
+  <rect x="677" y="338" width="160.5" height="20" rx="2" class="bar-err-unif"/>
+  <text x="843.5" y="352" class="val">0.2304 (mean r=8.0  (+46.0% err))</text>
+  <text x="504" y="402" class="muted">Max ||DeltaW - DeltaW_k||_F / ||DeltaW||_F across all 28 layers</text>
+</svg>

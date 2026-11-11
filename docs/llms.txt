@@ -1,0 +1,10 @@
+# loraspectra
+> Zero-Dependency Rust Engine & CLI for Spectral SVD Auditing, Eckart-Young Dynamic Rank Compression (-83.8% size at 99% energy), and Orthogonal Subspace Merging (`ortho-svd`) of `.safetensors` LoRA Adapters.
+
+- Repository: https://github.com/SalyyS1/loraspectra
+- Prebuilt Release Binary: https://github.com/SalyyS1/loraspectra/releases/tag/v0.1.0
+- Author: SalyyS1 (https://github.com/SalyyS1)
+- License: MIT
+- Speedup: 1,050x to 2,680x faster than dense SVD via QR-Core factorization (`O(r^2 d + r^3)`), matching `f64` singular values within `1.08e-13`.
+- Supported Formats: HuggingFace PEFT (`.lora_A.weight`/`.lora_B.weight`) and Kohya/ComfyUI/FLUX (`.lora_down.weight`/`.lora_up.weight`) in `F32`, `F16`, `BF16`.
+- Companion Project: [mcp-slim](https://github.com/SalyyS1/mcp-slim) — Zero-dependency MCP JSON-RPC 2.0 proxy for token compression and secret redaction.

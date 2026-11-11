@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 430" width="100%" height="430">
+  <style>
+    .bg { fill: #0d1117; }
+    .panel { fill: #161b22; stroke: #30363d; stroke-width: 1; }
+    .axis { stroke: #484f58; stroke-width: 1.2; }
+    .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; fill: #e6edf3; }
+    .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11.5px; fill: #8b949e; }
+    .panel-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12.5px; font-weight: 600; fill: #c9d1d9; }
+    .label { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 11px; fill: #c9d1d9; }
+    .val { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600; fill: #e6edf3; }
+    .muted { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 10px; fill: #8b949e; }
+    .bar-qr { fill: #2ea043; }
+    .bar-factors { fill: #388bfd; }
+    .bar-ortho { fill: #2ea043; }
+    .bar-linear { fill: #d29922; }
+    .bar-ties { fill: #f85149; }
+  </style>
+
+  <rect width="960" height="430" rx="6" class="bg"/>
+
+  <text x="24" y="28" class="title">QR-Core SVD Scaling &amp; Orthogonal Subspace Merge Fidelity Benchmark</text>
+  <text x="24" y="46" class="subtitle">Left: QR-Core SVD latency across d=128..4096 (max error &lt;= 1.08e-13 vs Full Dense SVD) | Right: Multi-Task Merge Fidelity (%)</text>
+
+  <!-- Left Panel: QR-Core SVD Latency & Speedup -->
+  <rect x="20" y="62" width="452" height="346" rx="4" class="panel"/>
+  <text x="36" y="86" class="panel-title">A. QR-Core SVD Latency per Layer (Rust release, Single Thread)</text>
+  <line x1="158" y1="100" x2="158" y2="365" class="axis"/>
+  <line x1="158" y1="365" x2="452" y2="365" class="axis"/>
+  <text x="150" y="123" text-anchor="end" class="label">d=128 r=16</text>
+  <rect x="159" y="108" width="4.0" height="10" rx="1.5" class="bar-qr"/>
+  <rect x="159" y="120" width="6.0" height="10" rx="1.5" class="bar-factors"/>
+  <text x="171.0" y="124" class="val">0.35ms / 0.47ms (1051x vs Dense 371ms)</text>
+  <text x="150" y="164" text-anchor="end" class="label">d=192 r=16</text>
+  <rect x="159" y="149" width="4.0" height="10" rx="1.5" class="bar-qr"/>
+  <rect x="159" y="161" width="6.0" height="10" rx="1.5" class="bar-factors"/>
+  <text x="171.0" y="165" class="val">0.54ms / 0.65ms (2681x vs Dense 1454ms)</text>
+  <text x="150" y="205" text-anchor="end" class="label">d=256 r=32</text>
+  <rect x="159" y="190" width="4.0" height="10" rx="1.5" class="bar-qr"/>
+  <rect x="159" y="202" width="6.0" height="10" rx="1.5" class="bar-factors"/>
+  <text x="171.0" y="206" class="val">2.67ms / 2.97ms (1475x vs Dense 3941ms)</text>
+  <text x="150" y="246" text-anchor="end" class="label">d=1024 r=32</text>
+  <rect x="159" y="231" width="9.7" height="10" rx="1.5" class="bar-qr"/>
+  <rect x="159" y="243" width="14.6" height="10" rx="1.5" class="bar-factors"/>
+  <text x="179.6" y="247" class="val">6.4ms (spectrum) / 9.7ms (full U,V)</text>
+  <text x="150" y="287" text-anchor="end" class="label">d=2048 r=64</text>
+  <rect x="159" y="272" width="78.3" height="10" rx="1.5" class="bar-qr"/>
+  <rect x="159" y="284" width="95.3" height="10" rx="1.5" class="bar-factors"/>
+  <text x="260.3" y="288" class="val">52.2ms (spectrum) / 63.5ms (full U,V)</text>
+  <text x="150" y="328" text-anchor="end" class="label">d=4096 r=64</text>
+  <rect x="159" y="313" width="145.8" height="10" rx="1.5" class="bar-qr"/>
+  <rect x="159" y="325" width="192.5" height="10" rx="1.5" class="bar-factors"/>
+  <text x="357.5" y="329" class="val">97.2ms (spectrum) / 128.3ms (full U,V)</text>
+  <text x="36" y="392" class="muted">Green: Spectrum only (audit) | Blue: Full U,V factors (compress/merge)</text>
+
+  <!-- Right Panel: Multi-Adapter Merge Fidelity -->
+  <rect x="488" y="62" width="452" height="346" rx="4" class="panel"/>
+  <text x="504" y="86" class="panel-title">B. Multi-Task Subspace Fidelity vs Subspace Collision Rate</text>
+  <line x1="636" y1="100" x2="636" y2="365" class="axis"/>
+  <line x1="636" y1="365" x2="924" y2="365" class="axis"/>
+  <text x="628" y="132" text-anchor="end" class="label">Collision 12.5%</text>
+  <rect x="637" y="108" width="215.0" height="13" rx="1.5" class="bar-ortho"/>
+  <text x="858.0" y="118" class="val">Ortho-SVD: 100.0%</text>
+  <rect x="637" y="124" width="150.8" height="13" rx="1.5" class="bar-linear"/>
+  <text x="793.8" y="134" class="val">Linear: 70.2%</text>
+  <rect x="637" y="140" width="134.5" height="13" rx="1.5" class="bar-ties"/>
+  <text x="777.5" y="150" class="val">TIES: 62.6%</text>
+  <text x="628" y="194" text-anchor="end" class="label">Collision 25.0%</text>
+  <rect x="637" y="170" width="215.0" height="13" rx="1.5" class="bar-ortho"/>
+  <text x="858.0" y="180" class="val">Ortho-SVD: 100.0%</text>
+  <rect x="637" y="186" width="132.4" height="13" rx="1.5" class="bar-linear"/>
+  <text x="775.4" y="196" class="val">Linear: 61.6%</text>
+  <rect x="637" y="202" width="114.9" height="13" rx="1.5" class="bar-ties"/>
+  <text x="757.9" y="212" class="val">TIES: 53.5%</text>
+  <text x="628" y="256" text-anchor="end" class="label">Collision 50.0%</text>
+  <rect x="637" y="232" width="215.0" height="13" rx="1.5" class="bar-ortho"/>
+  <text x="858.0" y="242" class="val">Ortho-SVD: 100.0%</text>
+  <rect x="637" y="248" width="116.3" height="13" rx="1.5" class="bar-linear"/>
+  <text x="759.3" y="258" class="val">Linear: 54.1%</text>
+  <rect x="637" y="264" width="94.9" height="13" rx="1.5" class="bar-ties"/>
+  <text x="737.9" y="274" class="val">TIES: 44.2%</text>
+  <text x="628" y="318" text-anchor="end" class="label">Collision 75.0%</text>
+  <rect x="637" y="294" width="215.0" height="13" rx="1.5" class="bar-ortho"/>
+  <text x="858.0" y="304" class="val">Ortho-SVD: 100.0%</text>
+  <rect x="637" y="310" width="110.1" height="13" rx="1.5" class="bar-linear"/>
+  <text x="753.1" y="320" class="val">Linear: 51.2%</text>
+  <rect x="637" y="326" width="83.2" height="13" rx="1.5" class="bar-ties"/>
+  <text x="726.2" y="336" class="val">TIES: 38.7%</text>
+  <text x="504" y="392" class="muted">Mean Task-1 &amp; Task-2 subspace preservation (d=512, r=16)</text>
+</svg>

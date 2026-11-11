@@ -74,6 +74,13 @@ When merging two specialized LoRA adapters whose top singular modes collide with
 
 ## Installation & Usage
 
+### Download Prebuilt Linux `x86_64` Binary (Zero Dependencies)
+
+```bash
+curl -sL https://github.com/SalyyS1/loraspectra/releases/download/v0.1.0/loraspectra-v0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+./loraspectra audit adapter_model.safetensors
+```
+
 ### Build from Source (Zero External Dependencies)
 
 ```bash
@@ -132,3 +139,9 @@ cargo run --release --bin loraspectra-bench
 ## License
 
 MIT License. See [LICENSE](LICENSE).
+
+---
+
+## Related AI Infrastructure Projects by [@SalyyS1](https://github.com/SalyyS1)
+
+- **[mcp-slim](https://github.com/SalyyS1/mcp-slim)** — Zero-dependency Python 3.10+ MCP JSON-RPC 2.0 stdio proxy that compresses bloated `tools/list` schemas and `tools/call` outputs by **48.8% fewer tokens** while redacting leaked API keys and credentials in real time (`~0.93 ms` p50).
