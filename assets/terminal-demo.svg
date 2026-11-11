@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 480" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <style>
+      .mono { font-family: 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace; font-size: 13px; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 600; fill: #8b949e; }
+      .cmd { fill: #f0f6fc; font-weight: 600; }
+      .prompt { fill: #3fb950; font-weight: 700; }
+      .muted { fill: #8b949e; }
+      .cyan { fill: #58a6ff; }
+      .green { fill: #3fb950; font-weight: 600; }
+      .amber { fill: #d29922; font-weight: 600; }
+      .red { fill: #f85149; font-weight: 600; }
+      .purple { fill: #bc8cff; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="940" height="480" rx="12" fill="url(#bg)" stroke="#30363d" stroke-width="1.5"/>
+  <rect width="940" height="38" rx="12" fill="#161b22"/>
+  <line x1="0" y1="38" x2="940" y2="38" stroke="#30363d" stroke-width="1"/>
+
+  <circle cx="22" cy="19" r="6" fill="#f85149"/>
+  <circle cx="42" cy="19" r="6" fill="#d29922"/>
+  <circle cx="62" cy="19" r="6" fill="#3fb950"/>
+  <text x="470" y="24" text-anchor="middle" class="title">loraspectra v0.5.0 - QR-Core Spectral SVD Auditor &amp; Orthogonal LoRA Merger</text>
+
+  <text x="24" y="68" class="mono">
+    <tspan class="prompt">$</tspan>
+    <tspan class="cmd"> loraspectra audit qwen2.5-7b-lora-r64.safetensors</tspan>
+  </text>
+
+  <text x="24" y="96" class="mono muted">LAYER                                        RANK    R_EFF R_STABLE   K_99%   K_MP   NORM_F STATUS</text>
+  <text x="24" y="112" class="mono muted">--------------------------------------------------------------------------------------------------------------</text>
+
+  <text x="24" y="132" class="mono">
+    <tspan fill="#e6edf3">layers.0.self_attn.q_proj                      64     1.84     1.31       3      2   1.4210 </tspan>
+    <tspan class="red">RANK_COLLAPSED</tspan>
+  </text>
+  <text x="24" y="152" class="mono">
+    <tspan fill="#e6edf3">layers.0.self_attn.k_proj                      64     2.41     1.68       5      4   1.1804 </tspan>
+    <tspan class="red">RANK_COLLAPSED</tspan>
+  </text>
+  <text x="24" y="172" class="mono">
+    <tspan fill="#e6edf3">layers.12.mlp.gate_proj                        64     9.62     5.40      12      9   3.8412 </tspan>
+    <tspan class="amber">OVER_PARAMETERIZED</tspan>
+  </text>
+  <text x="24" y="192" class="mono">
+    <tspan fill="#e6edf3">layers.24.mlp.down_proj                        64    28.45    19.12      44     38   6.9105 </tspan>
+    <tspan class="green">OPTIMAL</tspan>
+  </text>
+
+  <text x="24" y="210" class="mono muted">--------------------------------------------------------------------------------------------------------------</text>
+  <text x="24" y="230" class="mono">
+    <tspan fill="#e6edf3">Summary: 28 layers | Mean rank 64.0 -&gt; </tspan>
+    <tspan class="cyan">k_99% 9.7</tspan>
+    <tspan fill="#e6edf3"> / </tspan>
+    <tspan class="purple">k_MP 7.4</tspan>
+    <tspan fill="#e6edf3"> | Size reduction at 99% energy: </tspan>
+    <tspan class="green">-83.8%</tspan>
+  </text>
+
+  <text x="24" y="268" class="mono">
+    <tspan class="prompt">$</tspan>
+    <tspan class="cmd"> loraspectra compress qwen-r64.safetensors qwen-slim.safetensors --energy 0.99 --bake-alpha --peft-config adapter_config.json</tspan>
+  </text>
+  <text x="24" y="294" class="mono">
+    <tspan class="cyan">[QR-Core SVD]</tspan>
+    <tspan fill="#e6edf3"> Compressed 28 layers in </tspan>
+    <tspan class="green">686.1 ms</tspan>
+    <tspan fill="#e6edf3">: 8.51 MiB -&gt; </tspan>
+    <tspan class="green">1.38 MiB (-83.8%)</tspan>
+    <tspan fill="#e6edf3">, retained </tspan>
+    <tspan class="cyan">99.19% energy</tspan>
+  </text>
+  <text x="24" y="316" class="mono">
+    <tspan class="cyan">[PEFT Config]</tspan>
+    <tspan fill="#e6edf3"> Wrote heterogeneous </tspan>
+    <tspan class="amber">rank_pattern</tspan>
+    <tspan fill="#e6edf3"> &amp; baked alpha scales into adapter_config.json</tspan>
+  </text>
+
+  <text x="24" y="354" class="mono">
+    <tspan class="prompt">$</tspan>
+    <tspan class="cmd"> loraspectra merge code_lora.safetensors math_lora.safetensors Reasoning_lora.safetensors merged.safetensors --mode ortho-svd --rank 32</tspan>
+  </text>
+  <text x="24" y="380" class="mono">
+    <tspan class="purple">[Ortho-SVD]</tspan>
+    <tspan fill="#e6edf3"> Projected conflicting right-singular modes orthogonal to primary subspace (12/28 high-overlap layers)</tspan>
+  </text>
+  <text x="24" y="402" class="mono">
+    <tspan class="purple">[Ortho-SVD]</tspan>
+    <tspan fill="#e6edf3"> Merged 3 adapters into rank-32 target (</tspan>
+    <tspan class="green">100.0% primary subspace retention</tspan>
+    <tspan fill="#e6edf3">, max SV err &lt;= 1.08e-13)</tspan>
+  </text>
+  <text x="24" y="438" class="mono muted">Complexity: O(r^2 * (d_out + d_in) + r^3) | 1,050x-2,680x faster than dense SVD | Zero Python/GPU dependencies</text>
+</svg>
