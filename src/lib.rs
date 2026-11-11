@@ -729,7 +729,11 @@ mod tests {
             data: (0..d_out).map(|i| 1.0 + (i as f64) * 0.01).collect(),
         };
         map.insert(
-            "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector".to_string(),
+            "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.weight".to_string(),
+            dora_vec.clone(),
+        );
+        map.insert(
+            "base_model.model.layers.0.self_attn.k_proj.magnitude".to_string(),
             dora_vec,
         );
 
@@ -737,8 +741,9 @@ mod tests {
         write_safetensors(&tmp_path, &map).expect("write dora safetensors");
         let loaded = read_safetensors(&tmp_path).expect("read dora safetensors");
         let dora_scales = extract_dora_scales(&loaded);
-        assert_eq!(dora_scales.len(), 1);
+        assert_eq!(dora_scales.len(), 2);
         assert!(dora_scales.contains_key("base_model.model.layers.0.self_attn.q_proj"));
+        assert!(dora_scales.contains_key("base_model.model.layers.0.self_attn.k_proj"));
 
         // Convert key format from PEFT -> Kohya -> Diffusers
         convert_layers_key_format(&mut layers, "kohya").expect("convert to kohya");

@@ -702,7 +702,7 @@ pub fn bake_adapter_scaling(
     }
 }
 
-/// Extract per-layer DoRA magnitude vectors (`lora_magnitude_vector` or `dora_scale`) from a `.safetensors` map.
+/// Extract per-layer DoRA magnitude vectors (`lora_magnitude_vector`, `dora_scale`, or `magnitude`) from a `.safetensors` map.
 pub fn extract_dora_scales(
     tensors: &BTreeMap<String, Tensor2D>,
 ) -> BTreeMap<String, (String, Tensor2D)> {
@@ -710,8 +710,10 @@ pub fn extract_dora_scales(
     for (key, tensor) in tensors {
         if let Some(base) = key
             .strip_suffix(".lora_magnitude_vector.default.weight")
+            .or_else(|| key.strip_suffix(".lora_magnitude_vector.weight"))
             .or_else(|| key.strip_suffix(".lora_magnitude_vector"))
             .or_else(|| key.strip_suffix(".dora_scale"))
+            .or_else(|| key.strip_suffix(".magnitude"))
         {
             scales.insert(base.to_string(), (key.clone(), tensor.clone()));
         }
