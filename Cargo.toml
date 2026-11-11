@@ -1,0 +1,26 @@
+[package]
+name = "loraspectra"
+version = "0.1.0"
+edition = "2021"
+description = "Spectral SVD auditor, Eckart-Young dynamic rank compressor, and orthogonal subspace merger for .safetensors LoRA adapters"
+license = "MIT"
+repository = "https://github.com/SalyyS1/loraspectra"
+keywords = ["lora", "safetensors", "svd", "llm", "model-merging"]
+categories = ["command-line-utilities", "science", "mathematics"]
+
+[lib]
+name = "loraspectra"
+path = "src/lib.rs"
+
+[[bin]]
+name = "loraspectra"
+path = "src/main.rs"
+
+[[bin]]
+name = "loraspectra-bench"
+path = "src/bin/bench.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

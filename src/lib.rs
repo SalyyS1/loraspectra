@@ -1,0 +1,350 @@
+pub mod audit;
+pub mod compress;
+pub mod linalg;
+pub mod merge;
+pub mod safetensors;
+
+/// Deterministic SplitMix64 pseudo-random generator for reproducible synthetic LoRA benchmarks and tests.
+#[derive(Debug, Clone)]
+pub struct Rng64 {
+    state: u64,
+}
+
+impl Rng64 {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    #[inline]
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    #[inline]
+    pub fn next_f64(&mut self) -> f64 {
+        ((self.next_u64() >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+    }
+
+    /// Standard normal `N(0, 1)` via Box-Muller transform.
+    #[inline]
+    pub fn next_gaussian(&mut self) -> f64 {
+        let u1 = self.next_f64().max(1e-15);
+        let u2 = self.next_f64();
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::{audit_layer, LayerHealth};
+    use crate::compress::{compress_layer, CompressionPolicy};
+    use crate::linalg::{
+        jacobi_svd, matmul, qr_core_singular_values, thin_qr_columns,
+    };
+    use crate::merge::{analyze_layer_interference, merge_layer, MergeStrategy};
+    use crate::safetensors::{
+        bf16_to_f32, extract_lora_layers, f16_to_f32, f32_to_bf16, f32_to_f16,
+        layers_to_tensor_map, read_safetensors, write_safetensors, DType, LoraLayer, Tensor2D,
+    };
+
+    fn random_matrix(rows: usize, cols: usize, rng: &mut Rng64, dtype: DType) -> Tensor2D {
+        let mut t = Tensor2D::zeros(rows, cols, dtype);
+        let scale = 1.0 / (cols as f64).sqrt();
+        for v in &mut t.data {
+            *v = rng.next_gaussian() * scale;
+        }
+        t
+    }
+
+    #[test]
+    fn test_f16_and_bf16_roundtrip_accuracy() {
+        let samples = [-12.5_f32, -1.0, -0.03125, 0.0, 0.0078125, 0.5, 1.0, 3.14159, 42.0];
+        for &x in &samples {
+            let h = f32_to_f16(x);
+            let x_f16 = f16_to_f32(h);
+            assert!(
+                (x - x_f16).abs() <= x.abs() * 1e-2 + 1e-4,
+                "f16 roundtrip failed for {}: got {}",
+                x,
+                x_f16
+            );
+
+            let b = f32_to_bf16(x);
+            let x_bf16 = bf16_to_f32(b);
+            assert!(
+                (x - x_bf16).abs() <= x.abs() * 1e-2 + 1e-4,
+                "bf16 roundtrip failed for {}: got {}",
+                x,
+                x_bf16
+            );
+        }
+    }
+
+    #[test]
+    fn test_safetensors_read_write_roundtrip_all_dtypes() {
+        let mut rng = Rng64::new(101);
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            let layer = LoraLayer {
+                base_name: "model.layers.0.self_attn.q_proj".to_string(),
+                a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+                a: random_matrix(8, 32, &mut rng, dtype),
+                b: random_matrix(32, 8, &mut rng, dtype),
+            };
+            let map = layers_to_tensor_map(&[layer.clone()]);
+            let tmp_path = std::env::temp_dir().join(format!("test_lora_{}.safetensors", dtype.as_str()));
+            let written = write_safetensors(&tmp_path, &map).expect("write safetensors");
+            assert!(written > 64);
+
+            let loaded_map = read_safetensors(&tmp_path).expect("read safetensors");
+            let loaded_layers = extract_lora_layers(&loaded_map).expect("extract layers");
+            assert_eq!(loaded_layers.len(), 1);
+            assert_eq!(loaded_layers[0].rank(), 8);
+            assert_eq!(loaded_layers[0].d_in(), 32);
+            assert_eq!(loaded_layers[0].d_out(), 32);
+
+            let tol = match dtype {
+                DType::F32 => 1e-6,
+                DType::F16 => 2e-3,
+                DType::BF16 => 1e-2,
+            };
+            for (&orig, &dec) in layer.a.data.iter().zip(loaded_layers[0].a.data.iter()) {
+                assert!((orig - dec).abs() <= tol, "mismatch: {} vs {}", orig, dec);
+            }
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+
+    #[test]
+    fn test_qr_core_svd_matches_full_dense_svd_to_machine_precision() {
+        let mut rng = Rng64::new(4242);
+        let d_out = 96;
+        let d_in = 80;
+        let r = 12;
+        let b = random_matrix(d_out, r, &mut rng, DType::F32);
+        let a = random_matrix(r, d_in, &mut rng, DType::F32);
+
+        let qr_sigma = qr_core_singular_values(&b, &a);
+        let dense_dw = matmul(&b, &a);
+        let dense_svd = jacobi_svd(&dense_dw);
+
+        for i in 0..r {
+            let diff = (qr_sigma[i] - dense_svd.sigma[i]).abs();
+            assert!(
+                diff < 1e-11,
+                "Singular value {} mismatch: qr={} vs dense={} (diff={})",
+                i,
+                qr_sigma[i],
+                dense_svd.sigma[i],
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_eckart_young_optimal_truncation_theorem() {
+        let mut rng = Rng64::new(777);
+        let d_out = 128;
+        let d_in = 128;
+        let r = 16;
+        let layer = LoraLayer {
+            base_name: "layers.0.mlp.down_proj".to_string(),
+            a_key: "layers.0.mlp.down_proj.lora_A.weight".to_string(),
+            b_key: "layers.0.mlp.down_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+
+        let sigma = qr_core_singular_values(&layer.b, &layer.a);
+        let k = 6;
+        let (compressed, metric) = compress_layer(&layer, CompressionPolicy::FixedRank(k));
+        assert_eq!(compressed.rank(), k);
+
+        // Compute exact dense difference ||B*A - B_k*A_k||_F
+        let dw_orig = matmul(&layer.b, &layer.a);
+        let dw_comp = matmul(&compressed.b, &compressed.a);
+        let mut err_sq = 0.0;
+        for (&x, &y) in dw_orig.data.iter().zip(dw_comp.data.iter()) {
+            let d = x - y;
+            err_sq += d * d;
+        }
+        let actual_frob_err = err_sq.sqrt();
+        let theoretical_frob_err = sigma[k..].iter().map(|&s| s * s).sum::<f64>().sqrt();
+
+        assert!(
+            (actual_frob_err - theoretical_frob_err).abs() < 1e-10,
+            "Eckart-Young theorem violation: actual={} vs theoretical={}",
+            actual_frob_err,
+            theoretical_frob_err
+        );
+
+        let total_e: f64 = sigma.iter().map(|&s| s * s).sum();
+        let expected_rel_err = theoretical_frob_err / total_e.sqrt();
+        assert!((metric.relative_frobenius_error - expected_rel_err).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_audit_detects_rank_collapse_and_optimal_layers() {
+        let mut rng = Rng64::new(999);
+        let d = 64;
+        let r = 16;
+
+        // 1. Construct a rank-1 collapsed layer embedded in rank-16 matrices
+        let u_vec = random_matrix(d, 1, &mut rng, DType::F32);
+        let v_vec = random_matrix(1, d, &mut rng, DType::F32);
+        let mut b_col = Tensor2D::zeros(d, r, DType::F32);
+        let mut a_col = Tensor2D::zeros(r, d, DType::F32);
+        for i in 0..d {
+            b_col.set(i, 0, u_vec.get(i, 0) * 5.0);
+            a_col.set(0, i, v_vec.get(0, i) * 5.0);
+        }
+        let collapsed_layer = LoraLayer {
+            base_name: "layers.1.self_attn.q_proj".to_string(),
+            a_key: "layers.1.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "layers.1.self_attn.q_proj.lora_B.weight".to_string(),
+            a: a_col,
+            b: b_col,
+        };
+        let rep_collapsed = audit_layer(&collapsed_layer);
+        assert_eq!(rep_collapsed.health, LayerHealth::RankCollapsed);
+        assert_eq!(rep_collapsed.rank_at_99_energy, 1);
+        assert!((rep_collapsed.effective_rank - 1.0).abs() < 1e-6);
+
+        // 2. Construct an isotropic full-rank layer
+        let full_layer = LoraLayer {
+            base_name: "layers.1.self_attn.v_proj".to_string(),
+            a_key: "layers.1.self_attn.v_proj.lora_A.weight".to_string(),
+            b_key: "layers.1.self_attn.v_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+        let rep_full = audit_layer(&full_layer);
+        assert_eq!(rep_full.health, LayerHealth::Optimal);
+        assert!(rep_full.rank_at_99_energy >= 12);
+    }
+
+    #[test]
+    fn test_ortho_svd_merge_eliminates_destructive_subspace_cancellation() {
+        let mut rng = Rng64::new(2026);
+        let d = 128;
+        let r = 8;
+
+        // Build orthonormal bases U (d x 2r) and V (d x 2r)
+        let raw_u = random_matrix(d, 2 * r, &mut rng, DType::F32);
+        let (u_cols, _) = thin_qr_columns(&raw_u);
+        let raw_v = random_matrix(d, 2 * r, &mut rng, DType::F32);
+        let (v_cols, _) = thin_qr_columns(&raw_v);
+
+        // Adapter 1 uses modes 0..r with singular values 4.0
+        let mut b1 = Tensor2D::zeros(d, r, DType::F32);
+        let mut a1 = Tensor2D::zeros(r, d, DType::F32);
+        for j in 0..r {
+            for row in 0..d {
+                b1.set(row, j, u_cols[j][row] * 2.0);
+                a1.set(j, row, v_cols[j][row] * 2.0);
+            }
+        }
+
+        // Adapter 2 shares modes 0..4 with OPPOSITE sign (destructive conflict!)
+        // and uses novel orthogonal modes r..(r+4) for its remaining 4 dimensions
+        let mut b2 = Tensor2D::zeros(d, r, DType::F32);
+        let mut a2 = Tensor2D::zeros(r, d, DType::F32);
+        for j in 0..4 {
+            for row in 0..d {
+                b2.set(row, j, -u_cols[j][row] * 2.0);
+                a2.set(j, row, v_cols[j][row] * 2.0);
+            }
+        }
+        for j in 4..r {
+            let novel_idx = r + (j - 4);
+            for row in 0..d {
+                b2.set(row, j, u_cols[novel_idx][row] * 2.0);
+                a2.set(j, row, v_cols[novel_idx][row] * 2.0);
+            }
+        }
+
+        let l1 = LoraLayer {
+            base_name: "attn.o_proj".to_string(),
+            a_key: "attn.o_proj.lora_A.weight".to_string(),
+            b_key: "attn.o_proj.lora_B.weight".to_string(),
+            a: a1,
+            b: b1,
+        };
+        let l2 = LoraLayer {
+            base_name: "attn.o_proj".to_string(),
+            a_key: "attn.o_proj.lora_A.weight".to_string(),
+            b_key: "attn.o_proj.lora_B.weight".to_string(),
+            a: a2,
+            b: b2,
+        };
+
+        let interf = analyze_layer_interference(&l1, &l2);
+        assert_eq!(interf.conflict_severity, "HIGH_INTERFERENCE");
+        assert!(interf.frobenius_cosine < -0.4);
+
+        let linear_merged = merge_layer(
+            &l1,
+            &l2,
+            MergeStrategy::Linear {
+                w1: 1.0,
+                w2: 1.0,
+                target_rank: 12,
+            },
+        );
+        let ortho_merged = merge_layer(
+            &l1,
+            &l2,
+            MergeStrategy::OrthoSvd {
+                w1: 1.0,
+                w2: 1.0,
+                target_rank: 12,
+            },
+        );
+
+        // Evaluate Task 1 preservation on Task 1's right singular basis v_cols[0]
+        // Under Linear Merge, mode 0 cancels to ZERO! Under OrthoSvd, mode 0 is preserved!
+        let dw1 = matmul(&l1.b, &l1.a);
+        let dw_lin = matmul(&linear_merged.b, &linear_merged.a);
+        let dw_ortho = matmul(&ortho_merged.b, &ortho_merged.a);
+
+        let mut v0 = Tensor2D::zeros(d, 1, DType::F32);
+        for row in 0..d {
+            v0.set(row, 0, v_cols[0][row]);
+        }
+
+        let y1 = matmul(&dw1, &v0);
+        let y_lin = matmul(&dw_lin, &v0);
+        let y_ortho = matmul(&dw_ortho, &v0);
+
+        let err_lin: f64 = y1
+            .data
+            .iter()
+            .zip(y_lin.data.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let err_ortho: f64 = y1
+            .data
+            .iter()
+            .zip(y_ortho.data.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+
+        assert!(
+            err_lin > 3.5,
+            "Linear merge should suffer cancellation on conflicting mode 0, got {}",
+            err_lin
+        );
+        assert!(
+            err_ortho < 1e-10,
+            "OrthoSvd merge should preserve Task 1 mode 0 with near-zero error, got {}",
+            err_ortho
+        );
+    }
+}

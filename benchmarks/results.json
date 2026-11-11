@@ -1,0 +1,25 @@
+{
+  "svd_speed_and_precision": [
+    {"d": 128, "rank": 16, "qr_spectrum_ms": 0.3532, "qr_factors_ms": 0.4717, "dense_svd_ms": 371.3815, "speedup_measured": 1051.40, "max_sigma_error": 4.841e-14, "qr_mem_kib": 38.0, "dense_mem_kib": 257.0},
+    {"d": 192, "rank": 16, "qr_spectrum_ms": 0.5423, "qr_factors_ms": 0.6459, "dense_svd_ms": 1453.8699, "speedup_measured": 2680.83, "max_sigma_error": 7.017e-14, "qr_mem_kib": 54.0, "dense_mem_kib": 577.5},
+    {"d": 256, "rank": 32, "qr_spectrum_ms": 2.6712, "qr_factors_ms": 2.9710, "dense_svd_ms": 3940.5872, "speedup_measured": 1475.19, "max_sigma_error": 1.084e-13, "qr_mem_kib": 152.0, "dense_mem_kib": 1026.0},
+    {"d": 1024, "rank": 32, "qr_spectrum_ms": 6.4472, "qr_factors_ms": 9.7471, "dense_svd_ms": 0.0000, "speedup_measured": 0.00, "max_sigma_error": 0.000e0, "qr_mem_kib": 536.0, "dense_mem_kib": 16392.0},
+    {"d": 2048, "rank": 64, "qr_spectrum_ms": 52.2058, "qr_factors_ms": 63.5435, "dense_svd_ms": 0.0000, "speedup_measured": 0.00, "max_sigma_error": 0.000e0, "qr_mem_kib": 2144.0, "dense_mem_kib": 65552.0},
+    {"d": 4096, "rank": 64, "qr_spectrum_ms": 97.1774, "qr_factors_ms": 128.3127, "dense_svd_ms": 0.0000, "speedup_measured": 0.00, "max_sigma_error": 0.000e0, "qr_mem_kib": 4192.0, "dense_mem_kib": 262176.0}
+  ],
+  "compression_28_layer_bf16": [
+    {"policy": "Adaptive Energy 99.5%", "mean_rank": 12.29, "original_bytes": 8912896, "compressed_bytes": 1818624, "size_reduction_pct": 79.60, "retained_energy_pct": 99.595, "mean_rel_frob_error": 0.06334, "max_rel_frob_error": 0.06922, "wall_time_ms": 798.91},
+    {"policy": "Adaptive Energy 99.0%", "mean_rank": 9.71, "original_bytes": 8912896, "compressed_bytes": 1441792, "size_reduction_pct": 83.82, "retained_energy_pct": 99.186, "mean_rel_frob_error": 0.08997, "max_rel_frob_error": 0.09788, "wall_time_ms": 686.09},
+    {"policy": "Adaptive Energy 97.5%", "mean_rank": 6.71, "original_bytes": 8912896, "compressed_bytes": 991232, "size_reduction_pct": 88.88, "retained_energy_pct": 97.933, "mean_rel_frob_error": 0.14328, "max_rel_frob_error": 0.15781, "wall_time_ms": 661.68},
+    {"policy": "Adaptive Energy 95.0%", "mean_rank": 4.71, "original_bytes": 8912896, "compressed_bytes": 696320, "size_reduction_pct": 92.19, "retained_energy_pct": 95.757, "mean_rel_frob_error": 0.20448, "max_rel_frob_error": 0.22255, "wall_time_ms": 662.61},
+    {"policy": "Uniform Fixed Rank 16", "mean_rank": 16.00, "original_bytes": 8912896, "compressed_bytes": 2228224, "size_reduction_pct": 75.00, "retained_energy_pct": 99.626, "mean_rel_frob_error": 0.04602, "max_rel_frob_error": 0.11245, "wall_time_ms": 692.11},
+    {"policy": "Uniform Fixed Rank 12", "mean_rank": 12.00, "original_bytes": 8912896, "compressed_bytes": 1671168, "size_reduction_pct": 81.25, "retained_energy_pct": 99.209, "mean_rel_frob_error": 0.06952, "max_rel_frob_error": 0.15708, "wall_time_ms": 698.71},
+    {"policy": "Uniform Fixed Rank 8", "mean_rank": 8.00, "original_bytes": 8912896, "compressed_bytes": 1114112, "size_reduction_pct": 87.50, "retained_energy_pct": 98.099, "mean_rel_frob_error": 0.11327, "max_rel_frob_error": 0.23037, "wall_time_ms": 642.91}
+  ],
+  "subspace_merge_fidelity": [
+    {"collision_pct": 12.5, "linear_task1_fidelity": 40.32, "linear_task2_fidelity": 100.00, "linear_mean_fidelity": 70.16, "ties_mean_fidelity": 62.58, "ortho_task1_fidelity": 100.00, "ortho_task2_fidelity": 100.00, "ortho_mean_fidelity": 100.00},
+    {"collision_pct": 25.0, "linear_task1_fidelity": 23.20, "linear_task2_fidelity": 100.00, "linear_mean_fidelity": 61.60, "ties_mean_fidelity": 53.45, "ortho_task1_fidelity": 100.00, "ortho_task2_fidelity": 100.00, "ortho_mean_fidelity": 100.00},
+    {"collision_pct": 50.0, "linear_task1_fidelity": 8.15, "linear_task2_fidelity": 100.00, "linear_mean_fidelity": 54.07, "ties_mean_fidelity": 44.16, "ortho_task1_fidelity": 100.00, "ortho_task2_fidelity": 100.00, "ortho_mean_fidelity": 100.00},
+    {"collision_pct": 75.0, "linear_task1_fidelity": 2.38, "linear_task2_fidelity": 100.00, "linear_mean_fidelity": 51.19, "ties_mean_fidelity": 38.69, "ortho_task1_fidelity": 100.00, "ortho_task2_fidelity": 100.00, "ortho_mean_fidelity": 100.00}
+  ]
+}

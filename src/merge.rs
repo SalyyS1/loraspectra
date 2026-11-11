@@ -1,0 +1,373 @@
+use crate::linalg::{
+    axpy_slice, dot_slice, jacobi_svd, matmul, qr_core_svd_truncated, scale_slice,
+    svd_to_lora_factors, transpose,
+};
+use crate::safetensors::{LoraLayer, Tensor2D};
+
+#[derive(Debug, Clone, Copy)]
+pub enum MergeStrategy {
+    Linear {
+        w1: f64,
+        w2: f64,
+        target_rank: usize,
+    },
+    Ties {
+        w1: f64,
+        w2: f64,
+        density: f64,
+        target_rank: usize,
+    },
+    OrthoSvd {
+        w1: f64,
+        w2: f64,
+        target_rank: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct LayerInterferenceReport {
+    pub base_name: String,
+    pub max_left_principal_cos: f64,
+    pub max_right_principal_cos: f64,
+    pub grassmann_left_overlap: f64,
+    pub grassmann_right_overlap: f64,
+    pub frobenius_cosine: f64,
+    pub conflict_severity: &'static str,
+}
+
+/// Analyze principal subspace angles and Frobenius cosine similarity between two LoRA layers
+/// in `O(r^2 * (d_out + d_in) + r^3)` time without forming `d_out x d_in` dense matrices.
+pub fn analyze_layer_interference(
+    layer1: &LoraLayer,
+    layer2: &LoraLayer,
+) -> LayerInterferenceReport {
+    let r1 = layer1.rank();
+    let r2 = layer2.rank();
+    let svd1 = qr_core_svd_truncated(&layer1.b, &layer1.a, r1);
+    let svd2 = qr_core_svd_truncated(&layer2.b, &layer2.a, r2);
+
+    // U1^T * U2 (r1 x r2) and V1^T * V2 (r1 x r2)
+    let u1_t = transpose(&svd1.u);
+    let u_cross = matmul(&u1_t, &svd2.u);
+    let u_cross_svd = jacobi_svd(&u_cross);
+
+    let v1_t = transpose(&svd1.v);
+    let v_cross = matmul(&v1_t, &svd2.v);
+    let v_cross_svd = jacobi_svd(&v_cross);
+
+    let max_left_principal_cos = u_cross_svd
+        .sigma
+        .first()
+        .copied()
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let max_right_principal_cos = v_cross_svd
+        .sigma
+        .first()
+        .copied()
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+
+    let min_r = r1.min(r2).max(1) as f64;
+    let grassmann_left_overlap = (u_cross.frobenius_norm_sq() / min_r).clamp(0.0, 1.0);
+    let grassmann_right_overlap = (v_cross.frobenius_norm_sq() / min_r).clamp(0.0, 1.0);
+
+    // Exact Frobenius inner product <DeltaW_1, DeltaW_2>_F = sum_{i,j} sigma1_i * sigma2_j * (U1^T U2)_{i,j} * (V1^T V2)_{i,j}
+    let mut inner_prod = 0.0;
+    for i in 0..r1 {
+        let s1 = svd1.sigma[i];
+        for j in 0..r2 {
+            let s2 = svd2.sigma[j];
+            inner_prod += s1 * s2 * u_cross.get(i, j) * v_cross.get(i, j);
+        }
+    }
+
+    let norm1 = svd1.sigma.iter().map(|&s| s * s).sum::<f64>().sqrt();
+    let norm2 = svd2.sigma.iter().map(|&s| s * s).sum::<f64>().sqrt();
+    let frobenius_cosine = if norm1 > 1e-15 && norm2 > 1e-15 {
+        (inner_prod / (norm1 * norm2)).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let conflict_severity = if frobenius_cosine < -0.15
+        || (max_left_principal_cos > 0.70 && max_right_principal_cos > 0.70)
+    {
+        "HIGH_INTERFERENCE"
+    } else if max_left_principal_cos > 0.40 || max_right_principal_cos > 0.40 {
+        "MODERATE_OVERLAP"
+    } else {
+        "ORTHOGONAL_SAFE"
+    };
+
+    LayerInterferenceReport {
+        base_name: layer1.base_name.clone(),
+        max_left_principal_cos,
+        max_right_principal_cos,
+        grassmann_left_overlap,
+        grassmann_right_overlap,
+        frobenius_cosine,
+        conflict_severity,
+    }
+}
+
+/// Concatenate two low-rank representations `[w1*B1 | w2*B2]` and `[A1; A2]` and compress
+/// to `target_rank` via QR-Core SVD.
+fn combine_and_compress_factors(
+    base_name: &str,
+    a_key: &str,
+    b_key: &str,
+    b1: &Tensor2D,
+    a1: &Tensor2D,
+    b2: &Tensor2D,
+    a2: &Tensor2D,
+    w1: f64,
+    w2: f64,
+    target_rank: usize,
+) -> LoraLayer {
+    let d_out = b1.rows;
+    let d_in = a1.cols;
+    let r1 = a1.rows;
+    let r2 = a2.rows;
+    let r_sum = r1 + r2;
+
+    let mut b_cat = Tensor2D::zeros(d_out, r_sum, b1.dtype);
+    for row in 0..d_out {
+        for c in 0..r1 {
+            b_cat.set(row, c, w1 * b1.get(row, c));
+        }
+        for c in 0..r2 {
+            b_cat.set(row, r1 + c, w2 * b2.get(row, c));
+        }
+    }
+
+    let mut a_cat = Tensor2D::zeros(r_sum, d_in, a1.dtype);
+    for r in 0..r1 {
+        for col in 0..d_in {
+            a_cat.set(r, col, a1.get(r, col));
+        }
+    }
+    for r in 0..r2 {
+        for col in 0..d_in {
+            a_cat.set(r1 + r, col, a2.get(r, col));
+        }
+    }
+
+    let keep = target_rank.min(r_sum).max(1);
+    let svd = qr_core_svd_truncated(&b_cat, &a_cat, keep);
+    let (b_merged, a_merged) = svd_to_lora_factors(&svd, keep, a1.dtype);
+
+    LoraLayer {
+        base_name: base_name.to_string(),
+        a_key: a_key.to_string(),
+        b_key: b_key.to_string(),
+        a: a_merged,
+        b: b_merged,
+    }
+}
+
+fn magnitude_prune_tensor(t: &Tensor2D, density: f64) -> Tensor2D {
+    let d = density.clamp(0.05, 1.0);
+    if d >= 0.999 {
+        return t.clone();
+    }
+    let mut mags: Vec<f64> = t.data.iter().map(|x| x.abs()).collect();
+    mags.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let keep_idx = ((mags.len() as f64) * d).floor() as usize;
+    let threshold = mags.get(keep_idx.min(mags.len().saturating_sub(1))).copied().unwrap_or(0.0);
+
+    let mut out = t.clone();
+    for val in &mut out.data {
+        if val.abs() < threshold {
+            *val = 0.0;
+        }
+    }
+    out
+}
+
+/// Merge two matched `LoraLayer` instances according to `strategy`.
+pub fn merge_layer(
+    layer1: &LoraLayer,
+    layer2: &LoraLayer,
+    strategy: MergeStrategy,
+) -> LoraLayer {
+    match strategy {
+        MergeStrategy::Linear {
+            w1,
+            w2,
+            target_rank,
+        } => combine_and_compress_factors(
+            &layer1.base_name,
+            &layer1.a_key,
+            &layer1.b_key,
+            &layer1.b,
+            &layer1.a,
+            &layer2.b,
+            &layer2.a,
+            w1,
+            w2,
+            target_rank,
+        ),
+        MergeStrategy::Ties {
+            w1,
+            w2,
+            density,
+            target_rank,
+        } => {
+            let b1_p = magnitude_prune_tensor(&layer1.b, density);
+            let a1_p = magnitude_prune_tensor(&layer1.a, density);
+            let b2_p = magnitude_prune_tensor(&layer2.b, density);
+            let a2_p = magnitude_prune_tensor(&layer2.a, density);
+            combine_and_compress_factors(
+                &layer1.base_name,
+                &layer1.a_key,
+                &layer1.b_key,
+                &b1_p,
+                &a1_p,
+                &b2_p,
+                &a2_p,
+                w1,
+                w2,
+                target_rank,
+            )
+        }
+        MergeStrategy::OrthoSvd {
+            w1,
+            w2,
+            target_rank,
+        } => {
+            let r1 = layer1.rank();
+            let r2 = layer2.rank();
+            let d_out = layer1.d_out();
+            let d_in = layer1.d_in();
+
+            let svd1 = qr_core_svd_truncated(&layer1.b, &layer1.a, r1);
+            let svd2 = qr_core_svd_truncated(&layer2.b, &layer2.a, r2);
+
+            // Extract columns of U1, V1 and U2, V2
+            let mut u1_cols: Vec<Vec<f64>> = vec![vec![0.0; d_out]; r1];
+            for row in 0..d_out {
+                for c in 0..r1 {
+                    u1_cols[c][row] = svd1.u.get(row, c);
+                }
+            }
+            let mut v1_cols: Vec<Vec<f64>> = vec![vec![0.0; d_in]; r1];
+            for row in 0..d_in {
+                for c in 0..r1 {
+                    v1_cols[c][row] = svd1.v.get(row, c);
+                }
+            }
+
+            let mut u2_cols: Vec<Vec<f64>> = vec![vec![0.0; d_out]; r2];
+            for row in 0..d_out {
+                for c in 0..r2 {
+                    u2_cols[c][row] = svd2.u.get(row, c);
+                }
+            }
+            let mut v2_cols: Vec<Vec<f64>> = vec![vec![0.0; d_in]; r2];
+            for row in 0..d_in {
+                for c in 0..r2 {
+                    v2_cols[c][row] = svd2.v.get(row, c);
+                }
+            }
+
+            // Identify dominant modes of Adapter 1 (capturing 95% of Adapter 1 spectral energy)
+            let e1_total: f64 = svd1.sigma.iter().map(|&s| s * s).sum();
+            let mut e1_cum = 0.0;
+            let mut dom_k1 = r1;
+            if e1_total > 1e-18 {
+                for (i, &s) in svd1.sigma.iter().enumerate() {
+                    e1_cum += s * s;
+                    if e1_cum / e1_total >= 0.95 {
+                        dom_k1 = i + 1;
+                        break;
+                    }
+                }
+            }
+
+            // Orthogonalize Adapter 2's right-singular input vectors against conflicting dominant
+            // right-singular modes of Adapter 1 so Adapter 2 does not destructively interfere
+            // with Adapter 1's input subspace while retaining its full orthogonal capacity.
+            let mut sigma2_adj = svd2.sigma.clone();
+            for j in 0..r2 {
+                for i in 0..dom_k1 {
+                    let u_dot = dot_slice(&u1_cols[i], &u2_cols[j]);
+                    let v_dot = dot_slice(&v1_cols[i], &v2_cols[j]);
+                    // If Adapter 2 mode j has destructive sign alignment (u_dot * v_dot < 0)
+                    // or high subspace collision with Adapter 1's dominant mode i, remove the
+                    // colliding right-subspace component from v2_cols[j].
+                    if u_dot * v_dot < -0.02 || v_dot.abs() > 0.25 {
+                        axpy_slice(&mut v2_cols[j], -v_dot, &v1_cols[i]);
+                    }
+                }
+                let residual_norm = dot_slice(&v2_cols[j], &v2_cols[j]).sqrt();
+                if residual_norm > 1e-12 {
+                    // Scale singular value by the orthogonal residual norm and re-normalize vector
+                    sigma2_adj[j] *= residual_norm;
+                    scale_slice(&mut v2_cols[j], 1.0 / residual_norm);
+                } else {
+                    sigma2_adj[j] = 0.0;
+                    v2_cols[j].fill(0.0);
+                }
+            }
+
+            // Build balanced low-rank factors for Adapter 1 and De-conflicted Adapter 2
+            let (b1_bal, a1_bal) = svd_to_lora_factors(&svd1, r1, layer1.a.dtype);
+
+            let mut b2_ortho = Tensor2D::zeros(d_out, r2, layer2.b.dtype);
+            let mut a2_ortho = Tensor2D::zeros(r2, d_in, layer2.a.dtype);
+            for j in 0..r2 {
+                let s_sqrt = sigma2_adj[j].max(0.0).sqrt();
+                for row in 0..d_out {
+                    b2_ortho.set(row, j, u2_cols[j][row] * s_sqrt);
+                }
+                for col in 0..d_in {
+                    a2_ortho.set(j, col, s_sqrt * v2_cols[j][col]);
+                }
+            }
+
+            combine_and_compress_factors(
+                &layer1.base_name,
+                &layer1.a_key,
+                &layer1.b_key,
+                &b1_bal,
+                &a1_bal,
+                &b2_ortho,
+                &a2_ortho,
+                w1,
+                w2,
+                target_rank,
+            )
+        }
+    }
+}
+
+pub fn merge_adapters(
+    layers1: &[LoraLayer],
+    layers2: &[LoraLayer],
+    strategy: MergeStrategy,
+) -> Result<Vec<LoraLayer>, String> {
+    if layers1.len() != layers2.len() {
+        return Err(format!(
+            "Adapter layer count mismatch: {} vs {}",
+            layers1.len(),
+            layers2.len()
+        ));
+    }
+    let mut merged = Vec::with_capacity(layers1.len());
+    for (l1, l2) in layers1.iter().zip(layers2.iter()) {
+        if l1.base_name != l2.base_name || l1.d_out() != l2.d_out() || l1.d_in() != l2.d_in() {
+            return Err(format!(
+                "Incompatible layer pair: {} ({}, {}) vs {} ({}, {})",
+                l1.base_name,
+                l1.d_out(),
+                l1.d_in(),
+                l2.base_name,
+                l2.d_out(),
+                l2.d_in()
+            ));
+        }
+        merged.push(merge_layer(l1, l2, strategy));
+    }
+    Ok(merged)
+}
