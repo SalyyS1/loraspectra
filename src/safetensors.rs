@@ -571,7 +571,7 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
     let mut b_map: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
 
     for (key, tensor) in tensors {
-        if let Some(base) = key
+        if let Some(raw_base) = key
             .strip_suffix(".lora_A.weight")
             .or_else(|| key.strip_suffix(".lora_A.default.weight"))
             .or_else(|| key.strip_suffix(".lora_down.weight"))
@@ -579,8 +579,12 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
             .or_else(|| key.strip_suffix(".lora_linear_layer.down.weight"))
             .or_else(|| key.strip_suffix("_lora.down.weight"))
         {
+            let base = raw_base
+                .strip_suffix(".dora_layer")
+                .or_else(|| raw_base.strip_suffix(".lora_layer"))
+                .unwrap_or(raw_base);
             a_map.insert(base.to_string(), (key.clone(), tensor.clone()));
-        } else if let Some(base) = key
+        } else if let Some(raw_base) = key
             .strip_suffix(".lora_B.weight")
             .or_else(|| key.strip_suffix(".lora_B.default.weight"))
             .or_else(|| key.strip_suffix(".lora_up.weight"))
@@ -588,6 +592,10 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
             .or_else(|| key.strip_suffix(".lora_linear_layer.up.weight"))
             .or_else(|| key.strip_suffix("_lora.up.weight"))
         {
+            let base = raw_base
+                .strip_suffix(".dora_layer")
+                .or_else(|| raw_base.strip_suffix(".lora_layer"))
+                .unwrap_or(raw_base);
             b_map.insert(base.to_string(), (key.clone(), tensor.clone()));
         }
     }
@@ -708,13 +716,17 @@ pub fn extract_dora_scales(
 ) -> BTreeMap<String, (String, Tensor2D)> {
     let mut scales = BTreeMap::new();
     for (key, tensor) in tensors {
-        if let Some(base) = key
+        if let Some(raw_base) = key
             .strip_suffix(".lora_magnitude_vector.default.weight")
             .or_else(|| key.strip_suffix(".lora_magnitude_vector.weight"))
             .or_else(|| key.strip_suffix(".lora_magnitude_vector"))
             .or_else(|| key.strip_suffix(".dora_scale"))
             .or_else(|| key.strip_suffix(".magnitude"))
         {
+            let base = raw_base
+                .strip_suffix(".dora_layer")
+                .or_else(|| raw_base.strip_suffix(".lora_layer"))
+                .unwrap_or(raw_base);
             scales.insert(base.to_string(), (key.clone(), tensor.clone()));
         }
     }
