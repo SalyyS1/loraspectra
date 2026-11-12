@@ -407,14 +407,22 @@ fn parse_safetensors_header(json_str: &str) -> Result<BTreeMap<String, RawTensor
     Ok(entries)
 }
 
-/// Read all 2D tensors from a `.safetensors` file on disk.
+/// Maximum allowed `.safetensors` JSON header size (100 MB, matching the official `safetensors` spec).
+pub const MAX_SAFETENSORS_HEADER_BYTES: usize = 100_000_000;
+
+/// Read all 2D tensors (plus 1D/scalar LoRA `.alpha` and DoRA magnitude vectors) from a `.safetensors` file on disk.
 pub fn read_safetensors(path: &Path) -> Result<BTreeMap<String, Tensor2D>, String> {
     let raw = fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
     if raw.len() < 8 {
         return Err("File too small to be a valid .safetensors archive".to_string());
     }
     let header_len = u64::from_le_bytes(raw[0..8].try_into().unwrap()) as usize;
-    if 8 + header_len > raw.len() {
+    if header_len == 0
+        || header_len > MAX_SAFETENSORS_HEADER_BYTES
+        || 8usize
+            .checked_add(header_len)
+            .map_or(true, |end| end > raw.len())
+    {
         return Err("Invalid safetensors header length".to_string());
     }
     let header_str = std::str::from_utf8(&raw[8..8 + header_len])
@@ -432,8 +440,10 @@ pub fn read_safetensors(path: &Path) -> Result<BTreeMap<String, Tensor2D>, Strin
             (1, 1)
         } else if entry.shape.len() == 1
             && (name.ends_with(".lora_magnitude_vector")
+                || name.ends_with(".lora_magnitude_vector.weight")
                 || name.ends_with(".lora_magnitude_vector.default.weight")
-                || name.ends_with(".dora_scale"))
+                || name.ends_with(".dora_scale")
+                || name.ends_with(".magnitude"))
         {
             (entry.shape[0], 1)
         } else {
