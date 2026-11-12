@@ -822,4 +822,341 @@ mod tests {
         assert_eq!(res_prefix.layers[0].base_name, "double_blocks.0.img_attn.proj");
         assert_eq!(res_prefix.layers[0].a_key, "double_blocks.0.img_attn.proj.lora_down.weight");
     }
+
+    #[test]
+    fn test_remote_hf_uri_parsing_siblings_resolution_and_cache() {
+        use crate::remote::{
+            build_curl_args, cache_path_for_hf, hf_api_model_url, hf_resolve_url,
+            is_huggingface_url, parse_source_spec, resolve_cache_dir_from_tmpdir,
+            resolve_source_path_with_cache, select_safetensors_from_hf_api_json, RemoteSpec,
+        };
+
+        // 1. hf://<org>/<repo> default repo spec
+        let spec_repo = parse_source_spec("hf://XLabs-AI/flux-RealismLora").expect("parse hf repo");
+        assert_eq!(
+            spec_repo,
+            RemoteSpec::HuggingFaceRepo {
+                org: "XLabs-AI".to_string(),
+                repo: "flux-RealismLora".to_string(),
+                revision: "main".to_string(),
+            }
+        );
+        assert_eq!(
+            hf_api_model_url("XLabs-AI", "flux-RealismLora", "main"),
+            "https://huggingface.co/api/models/XLabs-AI/flux-RealismLora"
+        );
+
+        // 2. hf://<org>/<repo>/<filename.safetensors> -> exact resolve/main URL
+        let spec_file =
+            parse_source_spec("hf://ostris/flux-lora/lora_v2.safetensors").expect("parse hf file");
+        assert_eq!(
+            spec_file,
+            RemoteSpec::HuggingFaceFile {
+                org: "ostris".to_string(),
+                repo: "flux-lora".to_string(),
+                revision: "main".to_string(),
+                filename: "lora_v2.safetensors".to_string(),
+            }
+        );
+        assert_eq!(
+            hf_resolve_url("ostris", "flux-lora", "main", "lora_v2.safetensors"),
+            "https://huggingface.co/ostris/flux-lora/resolve/main/lora_v2.safetensors"
+        );
+
+        // 3. Direct URL & HuggingFace /blob/ -> /resolve/ normalization
+        let spec_blob = parse_source_spec(
+            "https://huggingface.co/SalyyS1/demo-lora/blob/main/adapter_model.safetensors",
+        )
+        .expect("parse blob url");
+        assert_eq!(
+            spec_blob,
+            RemoteSpec::DirectUrl {
+                url: "https://huggingface.co/SalyyS1/demo-lora/resolve/main/adapter_model.safetensors"
+                    .to_string()
+            }
+        );
+
+        // 4. Reject path traversal in hf:// URIs
+        assert!(parse_source_spec("hf://org/../etc/passwd").is_err());
+        assert!(parse_source_spec("hf://only_org").is_err());
+
+        // 5. Sibling discovery from HuggingFace /api/models/<org>/<repo> JSON
+        let peft_api_json = r#"{
+            "id": "org/peft-lora",
+            "siblings": [
+                {"rfilename": "README.md"},
+                {"rfilename": "adapter_config.json"},
+                {"rfilename": "adapter_model.safetensors"}
+            ]
+        }"#;
+        assert_eq!(
+            select_safetensors_from_hf_api_json(peft_api_json).as_deref(),
+            Some("adapter_model.safetensors")
+        );
+
+        let kohya_api_json = r#"{
+            "id": "XLabs-AI/flux-RealismLora",
+            "siblings": [
+                {"rfilename": ".gitattributes"},
+                {"rfilename": "flux_realism_lora.safetensors"}
+            ]
+        }"#;
+        assert_eq!(
+            select_safetensors_from_hf_api_json(kohya_api_json).as_deref(),
+            Some("flux_realism_lora.safetensors")
+        );
+
+        // 6. HF_TOKEN header scoping: attached to huggingface.co, never leaked to third-party hosts
+        assert!(is_huggingface_url(
+            "https://huggingface.co/org/repo/resolve/main/lora.safetensors"
+        ));
+        assert!(!is_huggingface_url("https://example.com/lora.safetensors"));
+
+        let hf_args = build_curl_args(
+            "https://huggingface.co/org/repo/resolve/main/lora.safetensors",
+            None,
+            Some("hf_secret_test_123"),
+        );
+        assert!(hf_args
+            .iter()
+            .any(|a| a == "Authorization: Bearer hf_secret_test_123"));
+
+        let ext_args = build_curl_args(
+            "https://cdn.example.com/lora.safetensors",
+            None,
+            Some("hf_secret_test_123"),
+        );
+        assert!(!ext_args.iter().any(|a| a.contains("Authorization")));
+
+        // 7. Warm-cache zero-network resolution under ${TMPDIR:-/tmp}/loraspectra-cache/
+        assert_eq!(
+            resolve_cache_dir_from_tmpdir(None),
+            std::path::PathBuf::from("/tmp/loraspectra-cache")
+        );
+        let test_cache = std::env::temp_dir().join("loraspectra_unit_cache_v060");
+        let cached_file = cache_path_for_hf(
+            &test_cache,
+            "SalyyS1",
+            "cached-lora",
+            "main",
+            "custom_lora.safetensors",
+        );
+        std::fs::create_dir_all(cached_file.parent().unwrap()).expect("create cache dir");
+        std::fs::write(&cached_file, &[0u8; 32]).expect("write dummy cached safetensors");
+        std::fs::write(
+            cached_file.parent().unwrap().join(".resolved_target"),
+            "custom_lora.safetensors",
+        )
+        .expect("write pointer");
+
+        let resolved =
+            resolve_source_path_with_cache("hf://SalyyS1/cached-lora", &test_cache, None)
+                .expect("warm cache repo resolve without network");
+        assert_eq!(resolved, cached_file);
+
+        let resolved_explicit = resolve_source_path_with_cache(
+            "hf://SalyyS1/cached-lora/custom_lora.safetensors",
+            &test_cache,
+            None,
+        )
+        .expect("warm cache explicit file resolve without network");
+        assert_eq!(resolved_explicit, cached_file);
+
+        let _ = std::fs::remove_dir_all(&test_cache);
+    }
+
+    #[test]
+    fn test_interference_automated_merge_recommendation_modes_and_localization() {
+        use crate::merge::analyze_adapter_interference;
+
+        let mut rng = Rng64::new(6006);
+        let d = 96;
+        let r = 6;
+
+        // Orthonormal basis pools for deterministic orthogonal vs colliding subspaces
+        let (u_pool, _) = thin_qr_columns(&random_matrix(d, 3 * r, &mut rng, DType::F32));
+        let (v_pool, _) = thin_qr_columns(&random_matrix(d, 3 * r, &mut rng, DType::F32));
+
+        let build_from_modes = |name: &str, u_off: usize, v_off: usize, sign: f64| -> LoraLayer {
+            let mut b = Tensor2D::zeros(d, r, DType::F32);
+            let mut a = Tensor2D::zeros(r, d, DType::F32);
+            for j in 0..r {
+                for row in 0..d {
+                    b.set(row, j, sign * u_pool[u_off + j][row] * 2.0);
+                    a.set(j, row, v_pool[v_off + j][row] * 2.0);
+                }
+            }
+            LoraLayer {
+                base_name: name.to_string(),
+                a_key: format!("{}.lora_A.weight", name),
+                b_key: format!("{}.lora_B.weight", name),
+                a,
+                b,
+            }
+        };
+
+        // Case 1: Orthogonal subspaces across both attn and mlp -> recommends --mode linear
+        let ortho_a = vec![
+            build_from_modes("model.layers.0.self_attn.q_proj", 0, 0, 1.0),
+            build_from_modes("model.layers.0.mlp.down_proj", 0, 0, 1.0),
+        ];
+        let ortho_b = vec![
+            build_from_modes("model.layers.0.self_attn.q_proj", r, r, 1.0),
+            build_from_modes("model.layers.0.mlp.down_proj", r, r, 1.0),
+        ];
+        let sum_ortho = analyze_adapter_interference(&ortho_a, &ortho_b, "a.safetensors", "b.safetensors")
+            .expect("orthogonal interference summary");
+        assert_eq!(sum_ortho.recommendation.recommended_mode, "linear");
+        assert_eq!(sum_ortho.recommendation.conflict_localization, "NONE");
+        assert!(sum_ortho.recommendation.suggested_layer_weights.is_none());
+        assert!(sum_ortho.recommendation.cli_command.contains("--mode linear"));
+
+        // Case 2: High sign-opposing collision localized ONLY in attention, orthogonal in MLP
+        // -> recommends --mode ortho-svd + --layer-weights attenuating attn!
+        let loc_b = vec![
+            build_from_modes("model.layers.0.self_attn.q_proj", 0, 0, -1.0),
+            build_from_modes("model.layers.0.mlp.down_proj", r, r, 1.0),
+        ];
+        let sum_loc = analyze_adapter_interference(&ortho_a, &loc_b, "hf://org/code", "hf://org/math")
+            .expect("localized conflict summary");
+        assert_eq!(sum_loc.recommendation.recommended_mode, "ortho-svd");
+        assert_eq!(sum_loc.recommendation.conflict_localization, "LOCALIZED_ATTN");
+        let lw = sum_loc
+            .recommendation
+            .suggested_layer_weights
+            .as_deref()
+            .expect("expected suggested layer weights");
+        assert!(lw.contains("attn=1.0:0.35"));
+        assert!(lw.contains("mlp=1.0:1.0"));
+        assert!(sum_loc.recommendation.cli_command.contains("--mode ortho-svd"));
+        assert!(sum_loc.recommendation.cli_command.contains("--layer-weights"));
+
+        // Case 3: Moderate overlap (shared U subspace, orthogonal V subspace -> cos_u = 1.0, cos_v = 0.0, frob_cos = 0.0)
+        // Wait: max_principal_cos = 1.0 > 0.70 triggers ortho-svd unless cos_u ~ 0.55; let's construct cos_u = 0.55!
+        let mut b_mod = Tensor2D::zeros(d, r, DType::F32);
+        let mut a_mod = Tensor2D::zeros(r, d, DType::F32);
+        let c = 0.55_f64;
+        let s = (1.0 - c * c).sqrt();
+        for j in 0..r {
+            for row in 0..d {
+                b_mod.set(
+                    row,
+                    j,
+                    (c * u_pool[j][row] + s * u_pool[r + j][row]) * 2.0,
+                );
+                a_mod.set(j, row, v_pool[r + j][row] * 2.0);
+            }
+        }
+        let mod_b = vec![
+            LoraLayer {
+                base_name: "model.layers.0.self_attn.q_proj".to_string(),
+                a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+                a: a_mod.clone(),
+                b: b_mod.clone(),
+            },
+            LoraLayer {
+                base_name: "model.layers.0.mlp.down_proj".to_string(),
+                a_key: "model.layers.0.mlp.down_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.mlp.down_proj.lora_B.weight".to_string(),
+                a: a_mod,
+                b: b_mod,
+            },
+        ];
+        let sum_ties = analyze_adapter_interference(&ortho_a, &mod_b, "a.safetensors", "b.safetensors")
+            .expect("moderate overlap summary");
+        assert_eq!(sum_ties.recommendation.recommended_mode, "ties");
+        assert!(sum_ties.recommendation.cli_command.contains("--mode ties"));
+    }
+
+    #[test]
+    fn test_remote_url_caching_revisions_and_localized_mlp_conflict() {
+        use crate::merge::analyze_adapter_interference;
+        use crate::remote::{
+            cache_path_for_url, hf_api_model_url, parse_source_spec,
+            resolve_source_path_with_cache, select_safetensors_from_hf_api_json, RemoteSpec,
+        };
+
+        // 1. hf://<org>/<repo>@<revision>/<subpath>
+        let spec_rev = parse_source_spec("hf://org/my-lora@v2.1/checkpoints/lora.safetensors")
+            .expect("parse revision spec");
+        assert_eq!(
+            spec_rev,
+            RemoteSpec::HuggingFaceFile {
+                org: "org".to_string(),
+                repo: "my-lora".to_string(),
+                revision: "v2.1".to_string(),
+                filename: "checkpoints/lora.safetensors".to_string(),
+            }
+        );
+        assert_eq!(
+            hf_api_model_url("org", "my-lora", "v2.1"),
+            "https://huggingface.co/api/models/org/my-lora/revision/v2.1"
+        );
+
+        // 2. Prefer LoRA sibling over sharded base model weights
+        let mixed_siblings = r#"{
+            "siblings": [
+                {"rfilename": "model-00001-of-00004.safetensors"},
+                {"rfilename": "model-00002-of-00004.safetensors"},
+                {"rfilename": "style_lora_bf16.safetensors"}
+            ]
+        }"#;
+        assert_eq!(
+            select_safetensors_from_hf_api_json(mixed_siblings).as_deref(),
+            Some("style_lora_bf16.safetensors")
+        );
+
+        // 3. Direct URL cache resolution without network hit when cached
+        let tmp_cache = std::env::temp_dir().join("loraspectra_url_cache_v060");
+        let direct_url = "https://cdn.example.org/models/custom_adapter.safetensors?download=1";
+        let expected_path = cache_path_for_url(&tmp_cache, direct_url);
+        std::fs::create_dir_all(expected_path.parent().unwrap()).expect("mkdir url cache");
+        std::fs::write(&expected_path, &[0u8; 32]).expect("seed url cache");
+
+        let got = resolve_source_path_with_cache(direct_url, &tmp_cache, None)
+            .expect("resolve cached direct url");
+        assert_eq!(got, expected_path);
+        let _ = std::fs::remove_dir_all(&tmp_cache);
+
+        // 4. Localized MLP conflict -> recommends attenuating mlp in --layer-weights
+        let mut rng = Rng64::new(7171);
+        let d = 64;
+        let r = 4;
+        let (u_pool, _) = thin_qr_columns(&random_matrix(d, 3 * r, &mut rng, DType::F32));
+        let (v_pool, _) = thin_qr_columns(&random_matrix(d, 3 * r, &mut rng, DType::F32));
+        let make_l = |name: &str, off: usize, sign: f64| -> LoraLayer {
+            let mut b = Tensor2D::zeros(d, r, DType::F32);
+            let mut a = Tensor2D::zeros(r, d, DType::F32);
+            for j in 0..r {
+                for row in 0..d {
+                    b.set(row, j, sign * u_pool[off + j][row] * 2.0);
+                    a.set(j, row, v_pool[off + j][row] * 2.0);
+                }
+            }
+            LoraLayer {
+                base_name: name.to_string(),
+                a_key: format!("{}.lora_down.weight", name),
+                b_key: format!("{}.lora_up.weight", name),
+                a,
+                b,
+            }
+        };
+
+        let a_layers = vec![
+            make_l("lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q", 0, 1.0),
+            make_l("lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_ff_net_0_proj", 0, 1.0),
+        ];
+        let b_layers = vec![
+            make_l("lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q", r, 1.0),
+            make_l("lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_ff_net_0_proj", 0, -1.0),
+        ];
+        let rep = analyze_adapter_interference(&a_layers, &b_layers, "style.safetensors", "char.safetensors")
+            .expect("sdxl kohya interference");
+        assert_eq!(rep.recommendation.conflict_localization, "LOCALIZED_MLP");
+        let lw = rep.recommendation.suggested_layer_weights.unwrap();
+        assert!(lw.contains("ff=1.0:0.35"), "unexpected lw: {}", lw);
+    }
 }
+
+pub mod remote;

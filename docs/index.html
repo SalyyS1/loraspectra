@@ -3,58 +3,1886 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra — Spectral SVD Auditor, Dynamic Compressor &amp; Orthogonal Merger for LoRA .safetensors</title>
-  <meta name="description" content="Zero-dependency Rust engine and CLI for auditing spectral rank collapse, compressing LoRA .safetensors via Eckart-Young adaptive energy allocation (-83.8% size), and merging adapters via QR-Core Orthogonal SVD (1,050x–2,680x faster than dense SVD).">
-  <meta property="og:title" content="loraspectra — 1,050x–2,680x Faster QR-Core SVD for LoRA .safetensors">
-  <meta property="og:description" content="Audit rank collapse, dynamically compress LoRA adapters by -83.8% at 99% Frobenius energy, and merge conflicting adapters via Orthogonal Subspace Projection in pure Rust.">
+  <title>loraspectra v0.6.0 — Interactive .safetensors LoRA Spectral SVD &amp; Rank-Collapse Inspector</title>
+  <meta name="description" content="100% client-side in-browser .safetensors LoRA spectral SVD inspector + zero-dependency Rust CLI (v0.6.0). Audit rank collapse, Gavish-Donoho Marchenko-Pastur noise floors, compress LoRAs by -83.8%, and inspect hf://org/repo adapters.">
+  <meta property="og:title" content="loraspectra v0.6.0 — Interactive .safetensors Spectral SVD Inspector &amp; Rust Engine">
+  <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
   <meta name="twitter:card" content="summary_large_image">
   <style>
-    :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; line-height: 1.6; }
-    .container { max-width: 980px; margin: 0 auto; padding: 48px 24px; }
-    .badge-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
-    .badge { background: #1f2937; border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; font-size: 13px; color: var(--accent); }
-    h1 { font-size: 40px; margin: 0 0 12px; letter-spacing: -0.5px; }
-    .lead { font-size: 19px; color: var(--muted); margin-bottom: 28px; }
-    .cta-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 40px; }
-    .btn { display: inline-block; padding: 10px 20px; border-radius: 6px; font-weight: 600; text-decoration: none; font-size: 15px; }
-    .btn-primary { background: #238636; color: #fff; }
-    .btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin-bottom: 28px; }
-    pre { background: #010409; border: 1px solid var(--border); padding: 14px; border-radius: 6px; overflow-x: auto; font-size: 13.5px; color: #c9d1d9; }
-    img { max-width: 100%; border-radius: 6px; border: 1px solid var(--border); margin: 12px 0; }
-    a { color: var(--accent); }
+    :root {
+      --bg: #0b0f17;
+      --bg-elev: #111827;
+      --card: #161b22;
+      --card-hover: #1c2330;
+      --border: #30363d;
+      --border-soft: #21262d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-soft: rgba(88, 166, 255, 0.14);
+      --green: #3fb950;
+      --green-bg: rgba(63, 185, 80, 0.14);
+      --amber: #d29922;
+      --amber-bg: rgba(210, 153, 34, 0.15);
+      --red: #f85149;
+      --red-bg: rgba(248, 81, 73, 0.15);
+      --purple: #bc8cff;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: radial-gradient(circle at 50% -10%, rgba(88, 166, 255, 0.10), transparent 45%), var(--bg);
+      color: var(--text);
+      margin: 0;
+      line-height: 1.55;
+    }
+    .container { max-width: 1180px; margin: 0 auto; padding: 36px 20px 64px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); font-size: 0.9em; background: rgba(110, 118, 129, 0.18); padding: 2px 6px; border-radius: 4px; }
+
+    /* Hero */
+    .badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .badge {
+      background: rgba(31, 41, 55, 0.85);
+      border: 1px solid var(--border);
+      padding: 4px 11px;
+      border-radius: 999px;
+      font-size: 12.5px;
+      color: var(--accent);
+      font-weight: 500;
+    }
+    .badge-green { color: var(--green); border-color: rgba(63, 185, 80, 0.35); }
+    .hero-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap; margin-bottom: 22px; }
+    h1 { font-size: 38px; margin: 0 0 8px; letter-spacing: -0.6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .ver-pill { font-size: 14px; font-family: var(--mono); background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(88, 166, 255, 0.35); padding: 3px 10px; border-radius: 999px; font-weight: 600; }
+    .lead { font-size: 17px; color: var(--muted); max-width: 820px; margin: 0; }
+    .cta-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 16px;
+      border-radius: 7px;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      transition: background 0.15s, border-color 0.15s, transform 0.05s;
+      text-decoration: none;
+    }
+    .btn:hover { background: var(--card-hover); border-color: #484f58; text-decoration: none; }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary { background: #238636; border-color: #2ea043; color: #fff; }
+    .btn-primary:hover { background: #2ea043; border-color: #3fb950; }
+    .btn-accent { background: rgba(31, 111, 235, 0.2); border-color: rgba(88, 166, 255, 0.5); color: #79c0ff; }
+    .btn-accent:hover { background: rgba(31, 111, 235, 0.32); border-color: var(--accent); }
+    .btn-sm { padding: 5px 11px; font-size: 12.5px; border-radius: 6px; }
+
+    /* Cards */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 22px;
+      margin-bottom: 22px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .card-title { font-size: 18px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; }
+    .privacy-tag {
+      font-size: 12px;
+      color: var(--green);
+      background: var(--green-bg);
+      border: 1px solid rgba(63, 185, 80, 0.3);
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-weight: 500;
+    }
+
+    /* Dropzone */
+    .dropzone {
+      border: 2px dashed #3b434d;
+      border-radius: 10px;
+      padding: 26px 20px;
+      text-align: center;
+      background: rgba(13, 17, 23, 0.65);
+      transition: border-color 0.15s, background 0.15s;
+      cursor: pointer;
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--accent);
+      background: rgba(88, 166, 255, 0.06);
+    }
+    .dropzone-title { font-size: 16.5px; font-weight: 600; margin: 0 0 6px; color: var(--text); }
+    .dropzone-sub { font-size: 13.5px; color: var(--muted); margin: 0 0 16px; }
+    .demo-bar {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    .status-line {
+      margin-top: 12px;
+      font-size: 13px;
+      font-family: var(--mono);
+      color: var(--muted);
+      min-height: 20px;
+    }
+    .progress-wrap {
+      height: 5px;
+      background: #21262d;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 10px;
+      display: none;
+    }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent), var(--green));
+      transition: width 0.1s linear;
+    }
+
+    /* KPI Grid */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .kpi-card {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 15px;
+    }
+    .kpi-label {
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--muted);
+      margin-bottom: 5px;
+      font-weight: 600;
+    }
+    .kpi-value {
+      font-size: 21px;
+      font-weight: 700;
+      font-family: var(--mono);
+      color: var(--text);
+      line-height: 1.25;
+      word-break: break-word;
+    }
+    .kpi-value.text-sm { font-size: 15px; font-family: inherit; }
+    .kpi-value.accent { color: var(--accent); }
+    .kpi-value.green { color: var(--green); }
+    .kpi-value.purple { color: var(--purple); }
+    .kpi-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    /* Energy Slider Panel */
+    .slider-panel {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+    .slider-left { flex: 1 1 320px; }
+    .slider-title { font-size: 13.5px; font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+    .slider-desc { font-size: 12.5px; color: var(--muted); }
+    .slider-controls { display: flex; align-items: center; gap: 12px; flex: 1 1 360px; flex-wrap: wrap; }
+    input[type="range"] {
+      flex: 1 1 180px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      height: 6px;
+    }
+    .energy-readout {
+      font-family: var(--mono);
+      font-weight: 700;
+      font-size: 16px;
+      color: var(--accent);
+      min-width: 64px;
+      text-align: right;
+    }
+    .preset-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+    .pill-btn {
+      background: #161b22;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11.5px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    .pill-btn:hover, .pill-btn.active {
+      color: var(--text);
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    /* Spectrum SVG Chart */
+    .chart-box {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .chart-layer-name {
+      font-family: var(--mono);
+      font-size: 14.5px;
+      font-weight: 600;
+      color: var(--accent);
+      word-break: break-all;
+    }
+    .chart-meta { font-size: 12.5px; color: var(--muted); margin-top: 2px; font-family: var(--mono); }
+    .legend-row { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); align-items: center; }
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+    .swatch-line { width: 16px; height: 2.5px; display: inline-block; }
+    .svg-container { width: 100%; overflow-x: auto; position: relative; }
+    svg.spectrum-svg { width: 100%; height: auto; min-width: 560px; display: block; }
+    .hover-readout {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #c9d1d9;
+      background: #161b22;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 5px 10px;
+      margin-top: 8px;
+      min-height: 27px;
+    }
+
+    /* Layer Audit Table */
+    .table-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .search-input {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 7px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: var(--mono);
+      min-width: 250px;
+      flex: 1 1 250px;
+      max-width: 400px;
+    }
+    .search-input:focus { outline: none; border-color: var(--accent); }
+    .table-scroll {
+      max-height: 410px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0d1117;
+    }
+    table.audit-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--mono);
+      font-size: 12.5px;
+    }
+    table.audit-table thead th {
+      position: sticky;
+      top: 0;
+      background: #161b22;
+      color: var(--muted);
+      text-align: left;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      z-index: 2;
+    }
+    table.audit-table thead th:hover { color: var(--text); }
+    table.audit-table thead th.num, table.audit-table tbody td.num { text-align: right; }
+    table.audit-table tbody tr {
+      border-bottom: 1px solid var(--border-soft);
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    table.audit-table tbody tr:hover { background: rgba(88, 166, 255, 0.08); }
+    table.audit-table tbody tr.selected {
+      background: rgba(88, 166, 255, 0.16);
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+    table.audit-table tbody td { padding: 8px 12px; white-space: nowrap; }
+    td.layer-col { max-width: 380px; overflow: hidden; text-overflow: ellipsis; color: #d2dce6; }
+
+    .status-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+    .st-RANK_COLLAPSED { background: var(--red-bg); color: #ff7b72; border: 1px solid rgba(248, 81, 73, 0.35); }
+    .st-OVER_PARAMETERIZED { background: var(--amber-bg); color: #e3b341; border: 1px solid rgba(210, 153, 34, 0.35); }
+    .st-OPTIMAL { background: var(--green-bg); color: #56d364; border: 1px solid rgba(63, 185, 80, 0.35); }
+    .st-DEAD_LAYER { background: rgba(139, 148, 158, 0.15); color: var(--muted); border: 1px solid var(--border); }
+
+    /* CLI Commands Box */
+    .cli-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 18px; }
+    .cli-block {
+      background: #010409;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .cli-block-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .cli-code {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 12.8px;
+      color: #c9d1d9;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .bench-img {
+      max-width: 100%;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      margin: 10px 0;
+      display: block;
+    }
+    .hidden { display: none !important; }
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 36px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border-soft);
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="badge-row">
-      <span class="badge">Pure Rust (0 Dependencies)</span>
-      <span class="badge">1,050x&ndash;2,680x Speedup vs Dense SVD</span>
-      <span class="badge">-83.8% LoRA Size at 99% Energy</span>
-      <span class="badge">PEFT &amp; Kohya/FLUX .safetensors</span>
+      <span class="badge badge-green">100% Local Browser SVD (0 Uploads)</span>
+      <span class="badge">Pure Rust CLI (0 Dependencies)</span>
+      <span class="badge">1,050x&ndash;2,680x Faster QR-Core SVD</span>
+      <span class="badge">hf://org/repo Remote Inspection</span>
+      <span class="badge">PEFT &bull; Kohya &bull; ComfyUI &bull; FLUX &bull; Diffusers</span>
     </div>
-    <h1>loraspectra</h1>
-    <p class="lead">Spectral SVD Auditor, Eckart-Young Dynamic Rank Compressor, and Orthogonal Subspace Merger for <code>.safetensors</code> LoRA Adapters &mdash; powered by QR-Core SVD ($O(r^2 d + r^3)$) without loading PyTorch or GPU VRAM.</p>
-    <div class="cta-row">
-      <a class="btn btn-primary" href="https://github.com/SalyyS1/loraspectra">View on GitHub &rarr;</a>
-      <a class="btn btn-secondary" href="https://github.com/SalyyS1/loraspectra/releases/tag/v0.1.0">Download Prebuilt Linux Binary (v0.1.0) &rarr;</a>
-      <a class="btn btn-secondary" href="https://github.com/SalyyS1/mcp-slim">Companion Project: mcp-slim &rarr;</a>
+
+    <div class="hero-top">
+      <div>
+        <h1>loraspectra <span class="ver-pill">v0.6.0</span></h1>
+        <p class="lead">
+          Spectral SVD Auditor, Eckart-Young Dynamic Rank Compressor, and Orthogonal Subspace Merger for
+          <code>.safetensors</code> LoRA Adapters &mdash; powered by exact QR-Core SVD
+          (<code>O(r&sup2;d + r&sup3;)</code>) in your browser or native Rust CLI without PyTorch or GPU VRAM.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/SalyyS1/loraspectra">View on GitHub &rarr;</a>
+          <a class="btn" href="https://github.com/SalyyS1/loraspectra/releases">Prebuilt Binaries &amp; Releases &rarr;</a>
+          <a class="btn" href="https://github.com/SalyyS1/mcp-slim">Companion: mcp-slim &rarr;</a>
+        </div>
+      </div>
     </div>
+
+    <!-- Interactive Browser Inspector -->
     <div class="card">
-      <h2>Instant CLI Usage</h2>
-      <pre><code>curl -sL https://github.com/SalyyS1/loraspectra/releases/download/v0.1.0/loraspectra-v0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz
-./loraspectra audit adapter_model.safetensors
-./loraspectra compress adapter_model.safetensors adapter_slim.safetensors --energy 0.99
-./loraspectra merge lora_a.safetensors lora_b.safetensors merged.safetensors --mode ortho-svd --rank 32</code></pre>
+      <div class="card-header">
+        <h2 class="card-title">Interactive <code>.safetensors</code> Spectral SVD &amp; Rank-Collapse Inspector</h2>
+        <span class="privacy-tag">&#128274; 100% Local Web File API &mdash; Your weights never leave your device</span>
+      </div>
+
+      <input type="file" id="file-input" accept=".safetensors" class="hidden">
+      <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Drop a .safetensors LoRA file or click to browse">
+        <p class="dropzone-title">Drop any <code>.safetensors</code> LoRA file here, or click to select from disk</p>
+        <p class="dropzone-sub">
+          Decodes <code>F32</code>, IEEE-754 <code>F16</code>, and <code>BF16</code> 2D <code>(lora_A, lora_B)</code> pairs + <code>.alpha</code> scalars across PEFT, Kohya/ComfyUI, FLUX, Diffusers &amp; OneTrainer
+        </p>
+        <div class="demo-bar" id="demo-bar">
+          <button type="button" class="btn btn-accent btn-sm" id="btn-demo-peft">
+            &#9889; Load Demo: Rank-64 Collapsed Transformer LoRA (PEFT)
+          </button>
+          <button type="button" class="btn btn-sm" id="btn-demo-flux">
+            &#10024; Load Demo: Healthy Rank-16 FLUX/Kohya Style LoRA
+          </button>
+          <button type="button" class="btn btn-sm hidden" id="btn-export-demo" title="Download the active synthetic demo as a real .safetensors binary file">
+            &#11015; Export Demo <code>.safetensors</code>
+          </button>
+        </div>
+        <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+        <div class="status-line" id="status-line">Ready &mdash; drop a local .safetensors adapter or click a 1-click preset above.</div>
+      </div>
+
+      <!-- Inspector Output Area -->
+      <div id="inspector-results" style="margin-top: 22px;" class="hidden">
+        <!-- 6 Summary KPI Cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">Architecture &amp; Format</div>
+            <div class="kpi-value text-sm" id="kpi-arch">&mdash;</div>
+            <div class="kpi-sub" id="kpi-format">&mdash;</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Nominal Rank</div>
+            <div class="kpi-value" id="kpi-rank">&mdash;</div>
+            <div class="kpi-sub" id="kpi-params">&mdash;</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Mean Effective Rank (r<sub>eff</sub>)</div>
+            <div class="kpi-value accent" id="kpi-reff">&mdash;</div>
+            <div class="kpi-sub" id="kpi-rstable">&mdash;</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label" id="kpi-ke-label">Mean K_99.0%</div>
+            <div class="kpi-value" id="kpi-ke">&mdash;</div>
+            <div class="kpi-sub" id="kpi-ke-sub">Eckart-Young energy rank</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Mean Gavish-Donoho K_MP</div>
+            <div class="kpi-value purple" id="kpi-kmp">&mdash;</div>
+            <div class="kpi-sub">Marchenko-Pastur signal rank</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Compressible Size Savings</div>
+            <div class="kpi-value green" id="kpi-savings">&mdash;</div>
+            <div class="kpi-sub" id="kpi-bytes">&mdash;</div>
+          </div>
+        </div>
+
+        <!-- Target Energy Slider -->
+        <div class="slider-panel">
+          <div class="slider-left">
+            <div class="slider-title">
+              Target Spectral Energy Retention (<code>--energy</code>)
+            </div>
+            <div class="slider-desc">
+              Adjust cumulative Frobenius energy threshold (&sum;<sub>i&le;k</sub> &sigma;<sub>i</sub>&sup2; / &sum; &sigma;<sub>j</sub>&sup2;) to preview dynamic per-layer rank truncation in real time.
+            </div>
+          </div>
+          <div class="slider-controls">
+            <input type="range" id="energy-slider" min="90.0" max="99.9" step="0.1" value="99.0" aria-label="Target spectral energy percentage">
+            <span class="energy-readout" id="energy-readout">99.0%</span>
+            <div class="preset-pills">
+              <button type="button" class="pill-btn" data-energy="95.0">95%</button>
+              <button type="button" class="pill-btn" data-energy="97.5">97.5%</button>
+              <button type="button" class="pill-btn active" data-energy="99.0">99%</button>
+              <button type="button" class="pill-btn" data-energy="99.5">99.5%</button>
+              <button type="button" class="pill-btn" data-energy="99.9">99.9%</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Interactive SVG Singular Value Spectrum Chart -->
+        <div class="chart-box">
+          <div class="chart-header">
+            <div>
+              <div class="chart-layer-name" id="chart-layer-title">Select a layer below</div>
+              <div class="chart-meta" id="chart-layer-meta">&mdash;</div>
+            </div>
+            <div class="legend-row">
+              <span class="legend-item"><span class="swatch" style="background:#58a6ff;"></span> Kept Modes (&le; K<sub>E%</sub>)</span>
+              <span class="legend-item"><span class="swatch" style="background:#30363d;"></span> Pruned Tail (&gt; K<sub>E%</sub>)</span>
+              <span class="legend-item"><span class="swatch-line" style="background:#3fb950;"></span> Cumulative Energy (%)</span>
+              <span class="legend-item"><span class="swatch-line" style="border-top:2px dashed #f0883e; background:none;"></span> MP Noise Floor (&tau;*)</span>
+            </div>
+          </div>
+          <div class="svg-container">
+            <svg id="spectrum-svg" class="spectrum-svg" viewBox="0 0 860 270" role="img" aria-label="Singular value spectrum chart"></svg>
+          </div>
+          <div class="hover-readout" id="hover-readout">Hover over any singular mode bar to inspect exact &sigma;<sub>i</sub>, cumulative Frobenius energy, and &tau;* signal margin.</div>
+        </div>
+
+        <!-- Sortable / Clickable Layer Audit Table -->
+        <div class="table-toolbar">
+          <input type="text" id="layer-filter" class="search-input" placeholder="Filter layers (e.g. q_proj, k_proj, mlp, double_blocks)...">
+          <div class="preset-pills" id="status-filters">
+            <button type="button" class="pill-btn active" data-status="ALL">All</button>
+            <button type="button" class="pill-btn" data-status="RANK_COLLAPSED">Collapsed</button>
+            <button type="button" class="pill-btn" data-status="OVER_PARAMETERIZED">Over-Param</button>
+            <button type="button" class="pill-btn" data-status="OPTIMAL">Optimal</button>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table class="audit-table">
+            <thead>
+              <tr>
+                <th data-sort="baseName">LAYER <span class="sort-ind" id="sort-baseName"></span></th>
+                <th class="num" data-sort="nominalRank">RANK <span class="sort-ind" id="sort-nominalRank"></span></th>
+                <th class="num" data-sort="effectiveRank">R_EFF <span class="sort-ind" id="sort-effectiveRank"></span></th>
+                <th class="num" data-sort="rankAtEnergy" id="th-ke">K_99% <span class="sort-ind" id="sort-rankAtEnergy"></span></th>
+                <th class="num" data-sort="rankMp">K_MP <span class="sort-ind" id="sort-rankMp"></span></th>
+                <th class="num" data-sort="frobeniusNorm">NORM_F <span class="sort-ind" id="sort-frobeniusNorm"></span></th>
+                <th data-sort="health">STATUS <span class="sort-ind" id="sort-health"></span></th>
+              </tr>
+            </thead>
+            <tbody id="audit-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- Auto-Generated Copyable CLI Commands -->
+        <div class="cli-grid">
+          <div class="cli-block">
+            <div class="cli-block-head">
+              <span> Eckart-Young Adaptive Energy Compression + Gavish-Donoho Denoising</span>
+              <button type="button" class="btn btn-sm" data-copy="cli-compress">Copy</button>
+            </div>
+            <pre class="cli-code" id="cli-compress"></pre>
+          </div>
+          <div class="cli-block">
+            <div class="cli-block-head">
+              <span> Zero-Download-Friction HuggingFace Hub Audit &amp; Automated Merge Advisor (v0.6.0)</span>
+              <button type="button" class="btn btn-sm" data-copy="cli-remote">Copy</button>
+            </div>
+            <pre class="cli-code" id="cli-remote"></pre>
+          </div>
+        </div>
+      </div>
     </div>
+
+    <!-- Quick CLI Installation Card -->
     <div class="card">
-      <h2>Empirical Benchmarks</h2>
-      <img src="assets/benchmark-compression.svg" alt="Eckart-Young Adaptive Energy Rank Compression Benchmark">
-      <img src="assets/benchmark-svd-merge.svg" alt="QR-Core SVD Speedup and Orthogonal Subspace Merge Benchmark">
+      <div class="card-header">
+        <h2 class="card-title">Native CLI Quickstart (Zero Dependencies)</h2>
+      </div>
+      <div class="cli-block">
+<pre class="cli-code">cargo install --git https://github.com/SalyyS1/loraspectra
+
+# Inspect or audit remote HuggingFace LoRAs directly (auto-cached in ${TMPDIR:-/tmp}/loraspectra-cache/)
+loraspectra info hf://XLabs-AI/flux-RealismLora
+loraspectra audit hf://org/llama3-lora/adapter_model.safetensors
+
+# Compress a rank-collapsed LoRA at 99% Frobenius energy and emit PEFT rank_pattern config
+loraspectra compress adapter_model.safetensors adapter_slim.safetensors --energy 0.99 --peft-config adapter_config.json
+
+# Analyze attn vs mlp subspace conflict and get an exact merge command recommendation
+loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
+      </div>
     </div>
+
+    <!-- Empirical Benchmarks -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Empirical Benchmarks</h2>
+      </div>
+      <img class="bench-img" src="assets/benchmark-compression.svg" alt="Eckart-Young Adaptive Energy Rank Compression Benchmark">
+      <img class="bench-img" src="assets/benchmark-svd-merge.svg" alt="QR-Core SVD Speedup and Orthogonal Subspace Merge Benchmark">
+    </div>
+
+    <footer>
+      Built in zero-dependency Rust by <a href="https://github.com/SalyyS1">@SalyyS1</a> &bull;
+      MIT License &bull; <a href="https://github.com/SalyyS1/loraspectra">GitHub Repository</a>
+    </footer>
   </div>
+
+  <script>
+  (function () {
+    "use strict";
+
+    // =========================================================================
+    // 1. IEEE-754 F16 & BF16 Lookup Tables (65,536 entries -> O(1) decode)
+    // =========================================================================
+    const F16_LUT = new Float64Array(65536);
+    const BF16_LUT = new Float64Array(65536);
+    (function initFloatTables() {
+      const buf = new ArrayBuffer(4);
+      const u32 = new Uint32Array(buf);
+      const f32 = new Float32Array(buf);
+      for (let bits = 0; bits < 65536; bits++) {
+        // BF16 -> F32: upper 16 bits of IEEE-754 binary32
+        u32[0] = (bits << 16) >>> 0;
+        BF16_LUT[bits] = f32[0];
+
+        // F16 -> F32: exact subnormal, normal, Inf/NaN conversion
+        const sign = (bits & 32768) << 16;
+        const exp = (bits >> 10) & 31;
+        const mant = bits & 1023;
+        if (exp === 0) {
+          if (mant === 0) {
+            u32[0] = sign >>> 0;
+          } else {
+            let m = mant;
+            let e = 127 - 14;
+            while ((m & 1024) === 0) {
+              m <<= 1;
+              e -= 1;
+            }
+            m &= 1023;
+            u32[0] = (sign | (e << 23) | (m << 13)) >>> 0;
+          }
+        } else if (exp === 31) {
+          u32[0] = (sign | 2139095040 | (mant << 13)) >>> 0;
+        } else {
+          const e = exp + (127 - 15);
+          u32[0] = (sign | (e << 23) | (mant << 13)) >>> 0;
+        }
+        F16_LUT[bits] = f32[0];
+      }
+    })();
+
+    function f32ToBf16Bits(val) {
+      const buf = new ArrayBuffer(4);
+      const f32 = new Float32Array(buf);
+      const u32 = new Uint32Array(buf);
+      f32[0] = val;
+      const bits = u32[0];
+      const bias = 32767 + ((bits >>> 16) & 1);
+      return ((bits + bias) >>> 16) & 65535;
+    }
+
+    // =========================================================================
+    // 2. Exact QR-Core + One-Sided Jacobi SVD (matching src/linalg.rs)
+    // =========================================================================
+    function dotVec(a, b) {
+      let s = 0.0;
+      const n = a.length;
+      for (let i = 0; i < n; i++) s += a[i] * b[i];
+      return s;
+    }
+
+    function axpyVec(y, alpha, x) {
+      const n = y.length;
+      for (let i = 0; i < n; i++) y[i] += alpha * x[i];
+    }
+
+    function scaleVec(x, alpha) {
+      const n = x.length;
+      for (let i = 0; i < n; i++) x[i] *= alpha;
+    }
+
+    // Modified Gram-Schmidt with second DGKS re-orthogonalization pass.
+    // cols: array of `c` Float64Array vectors each of length `rows` (mutated to Q).
+    // Returns upper-triangular R as Float64Array(c * c).
+    function thinQrFromCols(cols, rows) {
+      const c = cols.length;
+      const rMat = new Float64Array(c * c);
+      for (let j = 0; j < c; j++) {
+        const qj = cols[j];
+        for (let i = 0; i < j; i++) {
+          const qi = cols[i];
+          const proj = dotVec(qi, qj);
+          rMat[i * c + j] = proj;
+          if (proj !== 0.0) axpyVec(qj, -proj, qi);
+        }
+        for (let i = 0; i < j; i++) {
+          const qi = cols[i];
+          const corr = dotVec(qi, qj);
+          if (Math.abs(corr) > 1e-16) {
+            rMat[i * c + j] += corr;
+            axpyVec(qj, -corr, qi);
+          }
+        }
+        const norm = Math.sqrt(dotVec(qj, qj));
+        if (norm > 1e-14) {
+          rMat[j * c + j] = norm;
+          scaleVec(qj, 1.0 / norm);
+        } else {
+          rMat[j * c + j] = 0.0;
+          qj.fill(0.0);
+          for (let bIdx = 0; bIdx < rows; bIdx++) {
+            qj.fill(0.0);
+            qj[bIdx] = 1.0;
+            for (let i = 0; i < j; i++) {
+              const proj = dotVec(cols[i], qj);
+              axpyVec(qj, -proj, cols[i]);
+            }
+            const bnorm = Math.sqrt(dotVec(qj, qj));
+            if (bnorm > 1e-7) {
+              scaleVec(qj, 1.0 / bnorm);
+              break;
+            }
+          }
+        }
+      }
+      return rMat;
+    }
+
+    // One-Sided Jacobi SVD singular values on a matrix given as `n` column vectors of length `m` (m >= n).
+    function jacobiSingularValuesFromCols(wCols, m, n) {
+      const maxSweeps = 28;
+      const eps = 1e-12;
+      for (let sweep = 0; sweep < maxSweeps; sweep++) {
+        let maxOff = 0.0;
+        for (let p = 0; p < n; p++) {
+          const wp = wCols[p];
+          for (let q = p + 1; q < n; q++) {
+            const wq = wCols[q];
+            const alpha = dotVec(wp, wp);
+            const beta = dotVec(wq, wq);
+            const gamma = dotVec(wp, wq);
+            const denom = Math.sqrt(alpha * beta);
+            if (denom > 0.0) {
+              const rel = Math.abs(gamma) / denom;
+              if (rel > maxOff) maxOff = rel;
+            }
+            if (Math.abs(gamma) <= eps * denom) continue;
+
+            const zeta = (beta - alpha) / (2.0 * gamma);
+            const t = zeta >= 0.0
+              ? 1.0 / (zeta + Math.sqrt(1.0 + zeta * zeta))
+              : -1.0 / (-zeta + Math.sqrt(1.0 + zeta * zeta));
+            const c = 1.0 / Math.sqrt(1.0 + t * t);
+            const s = c * t;
+
+            for (let i = 0; i < m; i++) {
+              const vp = wp[i];
+              const vq = wq[i];
+              wp[i] = c * vp - s * vq;
+              wq[i] = s * vp + c * vq;
+            }
+          }
+        }
+        if (maxOff < eps) break;
+      }
+      const sigma = new Float64Array(n);
+      for (let j = 0; j < n; j++) {
+        sigma[j] = Math.sqrt(dotVec(wCols[j], wCols[j]));
+      }
+      sigma.sort();
+      // Reverse in-place for descending order sigma_1 >= sigma_2 >= ... >= sigma_r
+      for (let i = 0, j = n - 1; i < j; i++, j--) {
+        const tmp = sigma[i];
+        sigma[i] = sigma[j];
+        sigma[j] = tmp;
+      }
+      return sigma;
+    }
+
+    // Compute exact singular values of DeltaW = B (dOut x r) * A (r x dIn) in O(r^2*(dOut+dIn) + r^3).
+    function qrCoreSingularValues(bData, dOut, r, aData, dIn) {
+      if (r === 0) return new Float64Array(0);
+      // Edge case when nominal rank exceeds matrix dimension
+      if (r > dOut || r > dIn) {
+        const m = Math.max(dOut, dIn);
+        const n = Math.min(dOut, dIn);
+        const cols = [];
+        for (let c = 0; c < n; c++) cols.push(new Float64Array(m));
+        for (let i = 0; i < dOut; i++) {
+          for (let j = 0; j < dIn; j++) {
+            let sum = 0.0;
+            for (let k = 0; k < r; k++) sum += bData[i * r + k] * aData[k * dIn + j];
+            if (dOut >= dIn) cols[j][i] = sum;
+            else cols[i][j] = sum;
+          }
+        }
+        return jacobiSingularValuesFromCols(cols, m, n);
+      }
+
+      // Extract columns of B (dOut x r)
+      const bCols = new Array(r);
+      for (let c = 0; c < r; c++) {
+        const col = new Float64Array(dOut);
+        for (let row = 0; row < dOut; row++) col[row] = bData[row * r + c];
+        bCols[c] = col;
+      }
+      const rb = thinQrFromCols(bCols, dOut);
+
+      // Columns of A^T are contiguous rows of A (r x dIn)!
+      const atCols = new Array(r);
+      for (let c = 0; c < r; c++) {
+        const col = new Float64Array(dIn);
+        const off = c * dIn;
+        for (let k = 0; k < dIn; k++) col[k] = aData[off + k];
+        atCols[c] = col;
+      }
+      const ra = thinQrFromCols(atCols, dIn);
+
+      // Core M = R_B * R_A^T (r x r), stored by columns of M for Jacobi SVD
+      const coreCols = new Array(r);
+      for (let j = 0; j < r; j++) {
+        const col = new Float64Array(r);
+        const raRowOff = j * r;
+        for (let i = 0; i < r; i++) {
+          const rbRowOff = i * r;
+          const kStart = i > j ? i : j;
+          let sum = 0.0;
+          for (let k = kStart; k < r; k++) {
+            sum += rb[rbRowOff + k] * ra[raRowOff + k];
+          }
+          col[i] = sum;
+        }
+        coreCols[j] = col;
+      }
+      return jacobiSingularValuesFromCols(coreCols, r, r);
+    }
+
+    // =========================================================================
+    // 3. Spectral Audit & Gavish-Donoho Marchenko-Pastur Estimator
+    // =========================================================================
+    function estimateMarchenkoPastur(sigma, dOut, dIn) {
+      const r = sigma.length;
+      if (r === 0) return { kMp: 1, tau: 0.0 };
+      const sigma1 = sigma[0];
+      if (sigma1 <= 1e-12 || r <= 2) return { kMp: Math.max(r, 1), tau: 0.0 };
+
+      const minD = Math.max(Math.min(dOut, dIn), 1);
+      const maxD = Math.max(Math.max(dOut, dIn), 1);
+      const beta = Math.min(Math.max(minD / maxD, 1e-4), 1.0);
+      const omega = 0.56 * Math.pow(beta, 3) - 0.95 * Math.pow(beta, 2) + 1.82 * beta + 1.43;
+
+      const tailStart = Math.floor(r / 2);
+      const tailLen = r - tailStart;
+      const mid = Math.floor(tailLen / 2);
+      const tailMedian = (tailLen % 2 === 1)
+        ? sigma[tailStart + mid]
+        : 0.5 * (sigma[tailStart + mid - 1] + sigma[tailStart + mid]);
+
+      const tau = omega * tailMedian;
+      if (sigma1 <= tau) return { kMp: r, tau: tau };
+
+      let count = 0;
+      for (let i = 0; i < r; i++) {
+        if (sigma[i] > tau) count++;
+        else break;
+      }
+      return { kMp: Math.min(Math.max(count, 1), r), tau: tau };
+    }
+
+    function computeEnergyRank(sigma, totalEnergy, threshold) {
+      const r = sigma.length;
+      if (totalEnergy <= 1e-18 || r === 0) return 1;
+      let cum = 0.0;
+      for (let i = 0; i < r; i++) {
+        cum += sigma[i] * sigma[i];
+        if (cum / totalEnergy >= threshold - 1e-12) return i + 1;
+      }
+      return Math.max(r, 1);
+    }
+
+    function classifyHealth(nominalRank, effectiveRank, frobNorm, spectralNorm, kEnergy) {
+      if (frobNorm < 1e-9 || spectralNorm < 1e-9) return "DEAD_LAYER";
+      const util = kEnergy / Math.max(nominalRank, 1);
+      if (effectiveRank < 2.0 || (nominalRank >= 8 && util <= 0.15)) return "RANK_COLLAPSED";
+      if (util <= 0.55) return "OVER_PARAMETERIZED";
+      return "OPTIMAL";
+    }
+
+    function buildLayerAuditRecord(baseName, aKey, dOut, dIn, nominalRank, dtype, sigma, alphaVal) {
+      const elemBytes = dtype === "F32" ? 4 : 2;
+      const scaledSigma = new Float64Array(sigma.length);
+      const scale = (alphaVal !== null && alphaVal !== undefined && nominalRank > 0)
+        ? Math.abs(alphaVal / nominalRank)
+        : 1.0;
+      for (let i = 0; i < sigma.length; i++) scaledSigma[i] = sigma[i] * scale;
+
+      const spectralNorm = scaledSigma.length > 0 ? scaledSigma[0] : 0.0;
+      let totalEnergy = 0.0;
+      let l1Sum = 0.0;
+      for (let i = 0; i < scaledSigma.length; i++) {
+        const s = Math.max(scaledSigma[i], 0.0);
+        totalEnergy += s * s;
+        l1Sum += s;
+      }
+      const frobeniusNorm = Math.sqrt(totalEnergy);
+      const stableRank = (spectralNorm > 1e-12) ? (totalEnergy / (spectralNorm * spectralNorm)) : 0.0;
+
+      let entropy = 0.0;
+      if (l1Sum > 1e-15) {
+        for (let i = 0; i < scaledSigma.length; i++) {
+          const s = scaledSigma[i];
+          if (s > 1e-15) {
+            const p = s / l1Sum;
+            entropy -= p * Math.log(p);
+          }
+        }
+      }
+      const effectiveRank = frobeniusNorm < 1e-9 ? 0.0 : Math.exp(entropy);
+      const mp = estimateMarchenkoPastur(scaledSigma, dOut, dIn);
+      const k99 = computeEnergyRank(scaledSigma, totalEnergy, 0.99);
+      const rawBytes = nominalRank * (dOut + dIn) * elemBytes;
+
+      return {
+        baseName,
+        aKey,
+        dOut,
+        dIn,
+        nominalRank,
+        dtype,
+        elemBytes,
+        alpha: alphaVal,
+        sigma: scaledSigma,
+        totalEnergy,
+        spectralNorm,
+        frobeniusNorm,
+        stableRank,
+        effectiveRank,
+        rankMp: mp.kMp,
+        mpTau: mp.tau,
+        rankAt99: k99,
+        rankAtEnergy: k99,
+        bytesAtEnergy: k99 * (dOut + dIn) * elemBytes,
+        rawBytes,
+        health: classifyHealth(nominalRank, effectiveRank, frobeniusNorm, spectralNorm, k99)
+      };
+    }
+
+    // =========================================================================
+    // 4. Architecture & Naming Reverse-Engineering (matching safetensors.rs)
+    // =========================================================================
+    function inferAdapterMetadata(records, alphaCount, doraCount) {
+      const firstA = records.length > 0 ? records[0].aKey : "";
+      let namingFormat = "Custom LoRA";
+      let cliFormat = "peft";
+      if (firstA.startsWith("lycoris_")) {
+        namingFormat = "SimpleTuner / LyCORIS";
+        cliFormat = "kohya";
+      } else if (firstA.endsWith(".lora_A.weight") || firstA.endsWith(".lora_A.default.weight") || firstA.endsWith(".lora_A")) {
+        namingFormat = "HuggingFace PEFT";
+        cliFormat = "peft";
+      } else if (firstA.endsWith(".lora_down.weight") || firstA.endsWith(".lora_down")) {
+        namingFormat = "Kohya-ss / ComfyUI";
+        cliFormat = "kohya";
+      } else if (firstA.endsWith(".lora.down.weight") || firstA.endsWith(".lora_linear_layer.down.weight")) {
+        namingFormat = "HuggingFace Diffusers";
+        cliFormat = "diffusers";
+      } else if (firstA.endsWith("_lora.down.weight")) {
+        namingFormat = "OneTrainer";
+        cliFormat = "diffusers";
+      }
+
+      let minRank = Infinity, maxRank = 0, maxDIn = 0, maxDOut = 0, totalParams = 0, totalBytes = 0;
+      for (const r of records) {
+        if (r.nominalRank < minRank) minRank = r.nominalRank;
+        if (r.nominalRank > maxRank) maxRank = r.nominalRank;
+        if (r.dIn > maxDIn) maxDIn = r.dIn;
+        if (r.dOut > maxDOut) maxDOut = r.dOut;
+        totalParams += r.nominalRank * (r.dIn + r.dOut);
+        totalBytes += r.rawBytes;
+      }
+      if (records.length === 0) minRank = 0;
+
+      const hasSub = (sub) => records.some((r) => r.baseName.includes(sub));
+      const isDiffusion = hasSub("unet") || hasSub("double_blocks") || hasSub("single_blocks") || hasSub("down_blocks") || hasSub("transformer_blocks");
+      const isMiniCpm = hasSub("llm.model.") || hasSub("vpm.") || hasSub("apm.") || hasSub("resampler.");
+      const isVlm = hasSub("language_model.") || hasSub("vision_tower.") || hasSub("multi_modal_projector.");
+      const maxDim = Math.max(maxDIn, maxDOut);
+
+      let inferredArch = "Compact Transformer / Custom Model";
+      if (isDiffusion) {
+        if (hasSub("double_stream_modulation") || hasSub("single_stream_modulation")) {
+          inferredArch = "Flux.2 DiT (Flow Transformer)";
+        } else if (hasSub("double_blocks") || hasSub("single_blocks")) {
+          inferredArch = "Flux.1 DiT (12B Flow Transformer)";
+        } else if (maxDim >= 2048) {
+          inferredArch = "Stable Diffusion XL (SDXL)";
+        } else {
+          inferredArch = "Stable Diffusion 1.5 / UNet";
+        }
+      } else if (isMiniCpm) {
+        inferredArch = "MiniCPM-o / MiniCPM-V VLM";
+      } else if (isVlm) {
+        inferredArch = "Gemma-3 / Multimodal VLM";
+      } else if (maxDim >= 16384) {
+        inferredArch = "Llama-3-70B / Qwen2.5-72B LLM";
+      } else if (maxDim >= 13824) {
+        inferredArch = "Llama-2-13B / Qwen2.5-14B LLM";
+      } else if (maxDim >= 11008 || maxDIn === 4096) {
+        inferredArch = "Llama-3-8B / Mistral-7B LLM";
+      } else if (maxDIn === 3584) {
+        inferredArch = "Qwen2.5-7B / Gemma-2-9B LLM";
+      } else if (maxDIn >= 2048) {
+        inferredArch = "Llama-3.2-3B / Qwen2.5-3B LLM";
+      } else if (hasSub("self_attn") && hasSub("mlp")) {
+        inferredArch = "Decoder Transformer LLM";
+      }
+
+      return {
+        namingFormat,
+        cliFormat,
+        inferredArch,
+        layerCount: records.length,
+        minRank,
+        maxRank,
+        isHeterogeneous: minRank !== maxRank,
+        maxDIn,
+        maxDOut,
+        totalParams,
+        totalBytes,
+        primaryDtype: records.length > 0 ? records[0].dtype : "BF16",
+        alphaCount,
+        doraCount
+      };
+    }
+
+    // =========================================================================
+    // 5. Zero-Dependency .safetensors Binary Parser (supports sliced File I/O)
+    // =========================================================================
+    const A_SUFFIXES = [
+      ".lora_A.weight",
+      ".lora_A.default.weight",
+      ".lora_down.weight",
+      ".lora.down.weight",
+      ".lora_linear_layer.down.weight",
+      "_lora.down.weight",
+      ".lora_A",
+      ".lora_down"
+    ];
+    const B_SUFFIXES = [
+      ".lora_B.weight",
+      ".lora_B.default.weight",
+      ".lora_up.weight",
+      ".lora.up.weight",
+      ".lora_linear_layer.up.weight",
+      "_lora.up.weight",
+      ".lora_B",
+      ".lora_up"
+    ];
+
+    function stripWrapperSuffix(rawBase) {
+      if (rawBase.endsWith(".dora_layer")) return rawBase.slice(0, -11);
+      if (rawBase.endsWith(".lora_layer")) return rawBase.slice(0, -11);
+      return rawBase;
+    }
+
+    function matchSuffix(key, suffixes) {
+      for (const sfx of suffixes) {
+        if (key.endsWith(sfx)) {
+          return stripWrapperSuffix(key.slice(0, key.length - sfx.length));
+        }
+      }
+      return null;
+    }
+
+    function normalizeDtype(dt) {
+      const u = String(dt || "").trim().toUpperCase();
+      if (u === "F32" || u === "FP32" || u === "FLOAT32") return "F32";
+      if (u === "F16" || u === "FP16" || u === "FLOAT16") return "F16";
+      if (u === "BF16" || u === "BFLOAT16") return "BF16";
+      return null;
+    }
+
+    function decodeTensorBytes(arrayBuf, dtype, numel) {
+      const out = new Float64Array(numel);
+      const dv = new DataView(arrayBuf);
+      if (dtype === "F32") {
+        for (let i = 0; i < numel; i++) out[i] = dv.getFloat32(i * 4, true);
+      } else if (dtype === "F16") {
+        for (let i = 0; i < numel; i++) out[i] = F16_LUT[dv.getUint16(i * 2, true)];
+      } else if (dtype === "BF16") {
+        for (let i = 0; i < numel; i++) out[i] = BF16_LUT[dv.getUint16(i * 2, true)];
+      }
+      return out;
+    }
+
+    async function parseSafetensorsFile(file) {
+      if (file.size < 16) throw new Error("File is too small to be a valid .safetensors checkpoint.");
+      const lenBuf = await file.slice(0, 8).arrayBuffer();
+      const lenDv = new DataView(lenBuf);
+      const lo = lenDv.getUint32(0, true);
+      const hi = lenDv.getUint32(4, true);
+      const headerLen = hi * 4294967296 + lo;
+      if (headerLen <= 0 || headerLen > 100000000 || 8 + headerLen > file.size) {
+        throw new Error("Invalid .safetensors 8-byte header length (" + headerLen + ").");
+      }
+
+      const headerBuf = await file.slice(8, 8 + headerLen).arrayBuffer();
+      const headerJson = new TextDecoder("utf-8").decode(headerBuf);
+      let headerObj;
+      try {
+        headerObj = JSON.parse(headerJson);
+      } catch (err) {
+        throw new Error("Malformed JSON in .safetensors header: " + err.message);
+      }
+
+      const bodyOffset = 8 + headerLen;
+      const aEntries = new Map();
+      const bEntries = new Map();
+      const alphaEntries = new Map();
+      let doraCount = 0;
+
+      for (const [key, meta] of Object.entries(headerObj)) {
+        if (key === "__metadata__" || !meta || typeof meta !== "object") continue;
+        const dtype = normalizeDtype(meta.dtype);
+        const shape = Array.isArray(meta.shape) ? meta.shape : null;
+        const offsets = Array.isArray(meta.data_offsets) ? meta.data_offsets : null;
+        if (!dtype || !shape || !offsets || offsets.length !== 2) continue;
+
+        const [start, end] = offsets;
+        if (start < 0 || end < start || bodyOffset + end > file.size) {
+          throw new Error("Corrupt data_offsets for tensor " + key);
+        }
+
+        if ((shape.length === 0 || (shape.length === 1 && shape[0] === 1)) && key.endsWith(".alpha")) {
+          const base = stripWrapperSuffix(key.slice(0, -6));
+          alphaEntries.set(base, { dtype, start, end });
+          continue;
+        }
+
+        if (shape.length === 1 && (
+          key.endsWith(".lora_magnitude_vector") ||
+          key.endsWith(".lora_magnitude_vector.weight") ||
+          key.endsWith(".lora_magnitude_vector.default.weight") ||
+          key.endsWith(".dora_scale") ||
+          key.endsWith(".magnitude")
+        )) {
+          doraCount++;
+          continue;
+        }
+
+        if (shape.length === 2) {
+          const baseA = matchSuffix(key, A_SUFFIXES);
+          if (baseA !== null) {
+            aEntries.set(baseA, { key, dtype, rows: shape[0], cols: shape[1], start, end });
+            continue;
+          }
+          const baseB = matchSuffix(key, B_SUFFIXES);
+          if (baseB !== null) {
+            bEntries.set(baseB, { key, dtype, rows: shape[0], cols: shape[1], start, end });
+          }
+        }
+      }
+
+      const matchedBases = Array.from(aEntries.keys()).filter((b) => bEntries.has(b)).sort();
+      if (matchedBases.length === 0) {
+        throw new Error("No matched 2D (lora_A, lora_B) / (lora_down, lora_up) tensor pairs found in checkpoint.");
+      }
+
+      // Decode .alpha scalars
+      const alphaValues = new Map();
+      for (const [base, info] of alphaEntries.entries()) {
+        const buf = await file.slice(bodyOffset + info.start, bodyOffset + info.end).arrayBuffer();
+        const arr = decodeTensorBytes(buf, info.dtype, 1);
+        alphaValues.set(base, arr[0]);
+      }
+
+      const records = [];
+      const t0 = performance.now();
+      let lastYield = t0;
+
+      for (let idx = 0; idx < matchedBases.length; idx++) {
+        const baseName = matchedBases[idx];
+        const aInfo = aEntries.get(baseName);
+        const bInfo = bEntries.get(baseName);
+
+        const aBuf = await file.slice(bodyOffset + aInfo.start, bodyOffset + aInfo.end).arrayBuffer();
+        const bBuf = await file.slice(bodyOffset + bInfo.start, bodyOffset + bInfo.end).arrayBuffer();
+        let aData = decodeTensorBytes(aBuf, aInfo.dtype, aInfo.rows * aInfo.cols);
+        let bData = decodeTensorBytes(bBuf, bInfo.dtype, bInfo.rows * bInfo.cols);
+        let r = aInfo.rows;
+        let dIn = aInfo.cols;
+        let dOut = bInfo.rows;
+
+        if (aInfo.rows !== bInfo.cols) {
+          // Support transposed factor convention if encountered
+          if (aInfo.cols === bInfo.rows) {
+            r = aInfo.cols;
+            dIn = aInfo.rows;
+            dOut = bInfo.cols;
+            const aT = new Float64Array(r * dIn);
+            for (let i = 0; i < dIn; i++) {
+              for (let j = 0; j < r; j++) aT[j * dIn + i] = aData[i * r + j];
+            }
+            const bT = new Float64Array(dOut * r);
+            for (let i = 0; i < r; i++) {
+              for (let j = 0; j < dOut; j++) bT[j * r + i] = bData[i * dOut + j];
+            }
+            aData = aT;
+            bData = bT;
+          } else {
+            throw new Error("Rank mismatch in layer " + baseName + ": A=(" + aInfo.rows + "," + aInfo.cols + "), B=(" + bInfo.rows + "," + bInfo.cols + ")");
+          }
+        }
+
+        const sigma = qrCoreSingularValues(bData, dOut, r, aData, dIn);
+        const alphaVal = alphaValues.has(baseName) ? alphaValues.get(baseName) : null;
+        records.push(buildLayerAuditRecord(baseName, aInfo.key, dOut, dIn, r, aInfo.dtype, sigma, alphaVal));
+
+        const now = performance.now();
+        if (now - lastYield > 16) {
+          setProgress(((idx + 1) / matchedBases.length) * 100, "Computing QR-Core SVD: layer " + (idx + 1) + " / " + matchedBases.length + "...");
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          lastYield = performance.now();
+        }
+      }
+
+      const elapsedMs = performance.now() - t0;
+      return {
+        fileName: file.name,
+        records,
+        alphaCount: alphaValues.size,
+        doraCount,
+        elapsedMs,
+        syntheticTensors: null
+      };
+    }
+
+    // =========================================================================
+    // 6. 1-Click Synthetic Demo Presets (runs genuine QR-Core SVD in browser!)
+    // =========================================================================
+    function createDeterministicRng(seed) {
+      let s = seed >>> 0;
+      function nextUniform() {
+        s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+        return (s + 0.5) / 4294967296.0;
+      }
+      function nextGaussian() {
+        const u1 = Math.max(nextUniform(), 1e-12);
+        const u2 = nextUniform();
+        return Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+      }
+      return { nextUniform, nextGaussian };
+    }
+
+    function randomOrthonormalCols(rows, cols, rng) {
+      const arr = new Array(cols);
+      for (let c = 0; c < cols; c++) {
+        const v = new Float64Array(rows);
+        for (let i = 0; i < rows; i++) v[i] = rng.nextGaussian();
+        arr[c] = v;
+      }
+      thinQrFromCols(arr, rows);
+      return arr;
+    }
+
+    function synthesizeFromBasisPool(uPool, dOut, vPool, dIn, r, layerSalt, profileFn, rng) {
+      const bData = new Float64Array(dOut * r);
+      const aData = new Float64Array(r * dIn);
+      const uLen = uPool.length;
+      const vLen = vPool.length;
+      for (let k = 0; k < r; k++) {
+        const sv = Math.max(profileFn(k, r, rng), 1e-5);
+        const root = Math.sqrt(sv);
+        const uk = uPool[(k + layerSalt * 7) % uLen];
+        const vk = vPool[(k + layerSalt * 11) % vLen];
+        const sign = ((k + layerSalt) & 1) === 0 ? 1.0 : -1.0;
+        const bScale = sign * root;
+        for (let i = 0; i < dOut; i++) bData[i * r + k] = uk[i] * bScale;
+        const aOff = k * dIn;
+        for (let j = 0; j < dIn; j++) aData[aOff + j] = root * vk[j];
+      }
+      return { bData, aData };
+    }
+
+    async function generateDemoPreset(kind) {
+      const t0 = performance.now();
+      const records = [];
+      const exportTensors = [];
+
+      if (kind === "peft-collapsed") {
+        // 28-layer Rank-64 Collapsed Transformer LoRA (PEFT)
+        // Steep singular value decay on k_proj / v_proj vs broader spectra on q_proj / down_proj
+        const rng = createDeterministicRng(202606);
+        const r = 64;
+        const pool256 = randomOrthonormalCols(256, r, rng);
+        const pool384 = randomOrthonormalCols(384, r, rng);
+        const projs = [
+          { name: "self_attn.k_proj", dOut: 256, dIn: 256, activeK: 3, decay: 2.55, tail: 0.008 },
+          { name: "self_attn.v_proj", dOut: 256, dIn: 256, activeK: 4, decay: 2.30, tail: 0.009 },
+          { name: "self_attn.o_proj", dOut: 256, dIn: 256, activeK: 7, decay: 1.55, tail: 0.012 },
+          { name: "self_attn.q_proj", dOut: 256, dIn: 256, activeK: 14, decay: 0.95, tail: 0.015 },
+          { name: "mlp.gate_proj", dOut: 384, dIn: 256, activeK: 9, decay: 1.35, tail: 0.013 },
+          { name: "mlp.up_proj", dOut: 384, dIn: 256, activeK: 10, decay: 1.25, tail: 0.014 },
+          { name: "mlp.down_proj", dOut: 256, dIn: 384, activeK: 18, decay: 0.82, tail: 0.016 }
+        ];
+
+        let idx = 0;
+        for (let blk = 0; blk < 4; blk++) {
+          for (const p of projs) {
+            const baseName = "model.layers." + blk + "." + p.name;
+            const aKey = baseName + ".lora_A.weight";
+            const bKey = baseName + ".lora_B.weight";
+            const uPool = p.dOut === 384 ? pool384 : pool256;
+            const vPool = p.dIn === 384 ? pool384 : pool256;
+            const { bData, aData } = synthesizeFromBasisPool(
+              uPool,
+              p.dOut,
+              vPool,
+              p.dIn,
+              r,
+              idx,
+              (k, _rank, prng) => {
+                if (k < p.activeK) {
+                  return 2.4 * Math.pow(k + 1, -p.decay) * (0.94 + 0.12 * prng.nextUniform());
+                }
+                return p.tail * (0.65 + 0.7 * prng.nextUniform());
+              },
+              rng
+            );
+            const sigma = qrCoreSingularValues(bData, p.dOut, r, aData, p.dIn);
+            records.push(buildLayerAuditRecord(baseName, aKey, p.dOut, p.dIn, r, "BF16", sigma, null));
+            exportTensors.push({ key: aKey, rows: r, cols: p.dIn, data: aData, isScalar: false });
+            exportTensors.push({ key: bKey, rows: p.dOut, cols: r, data: bData, isScalar: false });
+            idx++;
+          }
+        }
+        return {
+          fileName: "demo_llama_r64_collapsed_peft.safetensors",
+          records,
+          alphaCount: 0,
+          doraCount: 0,
+          elapsedMs: performance.now() - t0,
+          syntheticTensors: exportTensors
+        };
+      } else {
+        // Healthy Rank-16 FLUX/Kohya Style LoRA
+        const rng = createDeterministicRng(909016);
+        const r = 16;
+        const pool256 = randomOrthonormalCols(256, r, rng);
+        const pool384 = randomOrthonormalCols(384, r, rng);
+        const specs = [];
+        for (let b = 0; b < 6; b++) {
+          specs.push({ base: "transformer.double_blocks." + b + ".img_attn.proj", dOut: 256, dIn: 256, slope: 0.24 });
+          specs.push({ base: "transformer.double_blocks." + b + ".img_mlp.0", dOut: 384, dIn: 256, slope: 0.20 });
+        }
+        for (let s = 0; s < 8; s++) {
+          specs.push({ base: "transformer.single_blocks." + s + ".linear1", dOut: 384, dIn: 256, slope: 0.27 });
+        }
+
+        for (let i = 0; i < specs.length; i++) {
+          const sp = specs[i];
+          const aKey = sp.base + ".lora_down.weight";
+          const bKey = sp.base + ".lora_up.weight";
+          const alphaKey = sp.base + ".alpha";
+          const uPool = sp.dOut === 384 ? pool384 : pool256;
+          const vPool = pool256;
+          const { bData, aData } = synthesizeFromBasisPool(
+            uPool,
+            sp.dOut,
+            vPool,
+            sp.dIn,
+            r,
+            i,
+            (k, _rank, prng) => (k < 14 ? 1.35 * Math.pow(k + 1, -sp.slope) : 0.28) * (0.92 + 0.16 * prng.nextUniform()),
+            rng
+          );
+          const sigma = qrCoreSingularValues(bData, sp.dOut, r, aData, sp.dIn);
+          records.push(buildLayerAuditRecord(sp.base, aKey, sp.dOut, sp.dIn, r, "BF16", sigma, 16.0));
+          exportTensors.push({ key: alphaKey, rows: 1, cols: 1, data: new Float64Array([16.0]), isScalar: true });
+          exportTensors.push({ key: aKey, rows: r, cols: sp.dIn, data: aData, isScalar: false });
+          exportTensors.push({ key: bKey, rows: sp.dOut, cols: r, data: bData, isScalar: false });
+        }
+        return {
+          fileName: "demo_flux_style_r16_kohya.safetensors",
+          records,
+          alphaCount: specs.length,
+          doraCount: 0,
+          elapsedMs: performance.now() - t0,
+          syntheticTensors: exportTensors
+        };
+      }
+    }
+
+    function encodeSyntheticSafetensorsBlob(tensors) {
+      const headerObj = { __metadata__: { format: "pt", generator: "loraspectra-web-v0.6.0" } };
+      let offset = 0;
+      for (const t of tensors) {
+        const byteLen = t.data.length * 2; // BF16
+        headerObj[t.key] = {
+          dtype: "BF16",
+          shape: t.isScalar ? [] : [t.rows, t.cols],
+          data_offsets: [offset, offset + byteLen]
+        };
+        offset += byteLen;
+      }
+      let headerStr = JSON.stringify(headerObj);
+      const enc = new TextEncoder();
+      let headerBytes = enc.encode(headerStr);
+      const rem = headerBytes.length % 8;
+      if (rem !== 0) {
+        headerStr += " ".repeat(8 - rem);
+        headerBytes = enc.encode(headerStr);
+      }
+
+      const outBuf = new ArrayBuffer(8 + headerBytes.length + offset);
+      const dv = new DataView(outBuf);
+      dv.setUint32(0, headerBytes.length >>> 0, true);
+      dv.setUint32(4, Math.floor(headerBytes.length / 4294967296) >>> 0, true);
+      new Uint8Array(outBuf, 8, headerBytes.length).set(headerBytes);
+
+      let pos = 8 + headerBytes.length;
+      for (const t of tensors) {
+        for (let i = 0; i < t.data.length; i++) {
+          dv.setUint16(pos, f32ToBf16Bits(t.data[i]), true);
+          pos += 2;
+        }
+      }
+      return new Blob([outBuf], { type: "application/octet-stream" });
+    }
+
+    // =========================================================================
+    // 7. Interactive UI State & Rendering
+    // =========================================================================
+    const state = {
+      fileName: "",
+      records: [],
+      meta: null,
+      targetEnergyPct: 99.0,
+      selectedBaseName: null,
+      sortKey: "effectiveRank",
+      sortAsc: true,
+      filterText: "",
+      statusFilter: "ALL",
+      syntheticTensors: null
+    };
+
+    const dropzone = document.getElementById("dropzone");
+    const fileInput = document.getElementById("file-input");
+    const statusLine = document.getElementById("status-line");
+    const progressWrap = document.getElementById("progress-wrap");
+    const progressBar = document.getElementById("progress-bar");
+    const resultsBox = document.getElementById("inspector-results");
+    const energySlider = document.getElementById("energy-slider");
+    const energyReadout = document.getElementById("energy-readout");
+    const btnExportDemo = document.getElementById("btn-export-demo");
+
+    function setProgress(pct, msg) {
+      progressWrap.style.display = "block";
+      progressBar.style.width = Math.min(Math.max(pct, 0), 100).toFixed(1) + "%";
+      statusLine.textContent = msg;
+    }
+
+    function clearProgress(msg) {
+      progressWrap.style.display = "none";
+      progressBar.style.width = "0%";
+      statusLine.textContent = msg;
+    }
+
+    function formatBytes(bytes) {
+      if (bytes >= 1048576) return (bytes / 1048576).toFixed(2) + " MiB";
+      if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KiB";
+      return bytes + " B";
+    }
+
+    function formatEnergyLabel(pct) {
+      return (Math.abs(pct - Math.round(pct)) < 0.04) ? Math.round(pct).toString() : pct.toFixed(1);
+    }
+
+    function recomputeForTargetEnergy() {
+      const thresh = state.targetEnergyPct / 100.0;
+      for (const rec of state.records) {
+        const ke = computeEnergyRank(rec.sigma, rec.totalEnergy, thresh);
+        rec.rankAtEnergy = ke;
+        rec.bytesAtEnergy = ke * (rec.dOut + rec.dIn) * rec.elemBytes;
+        rec.health = classifyHealth(rec.nominalRank, rec.effectiveRank, rec.frobeniusNorm, rec.spectralNorm, ke);
+      }
+    }
+
+    function updateKpiAndCli() {
+      const recs = state.records;
+      if (recs.length === 0 || !state.meta) return;
+      const n = recs.length;
+      const m = state.meta;
+
+      let sumReff = 0, sumRstable = 0, sumKe = 0, sumKmp = 0, totalNomBytes = 0, totalOptBytes = 0;
+      for (const r of recs) {
+        sumReff += r.effectiveRank;
+        sumRstable += r.stableRank;
+        sumKe += r.rankAtEnergy;
+        sumKmp += r.rankMp;
+        totalNomBytes += r.rawBytes;
+        totalOptBytes += r.bytesAtEnergy;
+      }
+
+      const meanReff = sumReff / n;
+      const meanRstable = sumRstable / n;
+      const meanKe = sumKe / n;
+      const meanKmp = sumKmp / n;
+      const savingsPct = totalNomBytes > 0 ? (1.0 - totalOptBytes / totalNomBytes) * 100.0 : 0.0;
+      const eStr = formatEnergyLabel(state.targetEnergyPct);
+
+      document.getElementById("kpi-arch").textContent = m.inferredArch;
+      const alphaNote = m.alphaCount > 0 ? " \u2022 " + m.alphaCount + " .alpha" : "";
+      document.getElementById("kpi-format").textContent = m.namingFormat + " (" + m.primaryDtype + ", " + n + " layers" + alphaNote + ")";
+
+      document.getElementById("kpi-rank").textContent = m.isHeterogeneous
+        ? ("r = " + m.minRank + ".." + m.maxRank)
+        : ("r = " + m.maxRank);
+      document.getElementById("kpi-params").textContent = (m.totalParams / 1e6).toFixed(2) + "M params (" + formatBytes(totalNomBytes) + ")";
+
+      document.getElementById("kpi-reff").textContent = meanReff.toFixed(2);
+      document.getElementById("kpi-rstable").textContent = "Mean stable rank: " + meanRstable.toFixed(2);
+
+      document.getElementById("kpi-ke-label").textContent = "Mean K_" + eStr + "%";
+      document.getElementById("kpi-ke").textContent = meanKe.toFixed(1) + " / " + m.maxRank;
+      document.getElementById("kpi-ke-sub").textContent = "At " + state.targetEnergyPct.toFixed(1) + "% Frobenius energy";
+
+      document.getElementById("kpi-kmp").textContent = meanKmp.toFixed(1) + " / " + m.maxRank;
+
+      document.getElementById("kpi-savings").textContent = "-" + savingsPct.toFixed(1) + "%";
+      document.getElementById("kpi-bytes").textContent = formatBytes(totalNomBytes) + " \u2192 " + formatBytes(totalOptBytes);
+
+      document.getElementById("th-ke").innerHTML = "K_" + eStr + "% <span class=\"sort-ind\" id=\"sort-rankAtEnergy\"></span>";
+
+      // Generate tailored CLI commands
+      const inFile = state.fileName || "adapter_model.safetensors";
+      const stem = inFile.replace(/\.safetensors$/i, "");
+      const slimFile = stem + "_slim.safetensors";
+      const denoisedFile = stem + "_mp.safetensors";
+      const energyFloat = (state.targetEnergyPct / 100.0).toFixed(3).replace(/0$/, "");
+      const extraPeft = m.cliFormat === "peft" ? " --peft-config adapter_config.json" : " --bake-alpha";
+
+      document.getElementById("cli-compress").textContent =
+        "loraspectra compress " + inFile + " " + slimFile + " --energy " + energyFloat + extraPeft + "\n" +
+        "loraspectra compress " + inFile + " " + denoisedFile + " --mp-denoise --dtype bf16" + extraPeft;
+
+      document.getElementById("cli-remote").textContent =
+        "loraspectra audit hf://org/repo/" + inFile + "\n" +
+        "loraspectra interference hf://org/lora-a hf://org/lora-b --json";
+    }
+
+    function renderSpectrumSvg() {
+      const svg = document.getElementById("spectrum-svg");
+      const rec = state.records.find((r) => r.baseName === state.selectedBaseName) || state.records[0];
+      if (!rec) return;
+      state.selectedBaseName = rec.baseName;
+
+      const eStr = formatEnergyLabel(state.targetEnergyPct);
+      document.getElementById("chart-layer-title").textContent = rec.baseName;
+      const alphaTag = rec.alpha !== null ? " | alpha=" + rec.alpha : "";
+      document.getElementById("chart-layer-meta").textContent =
+        "Shape: " + rec.dOut + "\u00d7" + rec.dIn + " (r=" + rec.nominalRank + ", " + rec.dtype + alphaTag + ") | " +
+        "r_eff=" + rec.effectiveRank.toFixed(2) + " | K_" + eStr + "%=" + rec.rankAtEnergy +
+        " | K_MP=" + rec.rankMp + " (\u03c4*=" + rec.mpTau.toFixed(4) + ") | ||\u0394W||_F=" + rec.frobeniusNorm.toFixed(4);
+
+      const W = 860, H = 270;
+      const padL = 54, padR = 54, padT = 22, padB = 36;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+      const sigma = rec.sigma;
+      const r = sigma.length;
+      const maxS = Math.max(sigma[0] || 1e-6, rec.mpTau * 1.05, 1e-6);
+
+      const parts = [];
+      // Horizontal gridlines
+      for (let g = 0; g <= 4; g++) {
+        const frac = g / 4;
+        const y = padT + plotH * (1 - frac);
+        const sVal = (maxS * frac).toFixed(2);
+        const ePct = Math.round(frac * 100) + "%";
+        parts.push("<line x1=\"" + padL + "\" y1=\"" + y.toFixed(1) + "\" x2=\"" + (W - padR) + "\" y2=\"" + y.toFixed(1) + "\" stroke=\"#21262d\" stroke-width=\"1\"/>");
+        parts.push("<text x=\"" + (padL - 8) + "\" y=\"" + (y + 4).toFixed(1) + "\" fill=\"#8b949e\" font-size=\"11\" font-family=\"monospace\" text-anchor=\"end\">" + sVal + "</text>");
+        parts.push("<text x=\"" + (W - padR + 8) + "\" y=\"" + (y + 4).toFixed(1) + "\" fill=\"#3fb950\" font-size=\"11\" font-family=\"monospace\" text-anchor=\"start\">" + ePct + "</text>");
+      }
+
+      // Compute cumulative energy curve & singular value bars
+      const step = plotW / Math.max(r, 1);
+      const barW = Math.max(Math.min(step * 0.74, 28), 2.0);
+      const cumPctArr = new Float64Array(r);
+      let cumSq = 0.0;
+      const pathPts = [];
+
+      for (let i = 0; i < r; i++) {
+        cumSq += sigma[i] * sigma[i];
+        const cumRatio = rec.totalEnergy > 1e-18 ? Math.min(cumSq / rec.totalEnergy, 1.0) : 1.0;
+        cumPctArr[i] = cumRatio * 100.0;
+
+        const cx = padL + (i + 0.5) * step;
+        const barH = Math.max((sigma[i] / maxS) * plotH, 1.2);
+        const bx = cx - barW / 2;
+        const by = padT + plotH - barH;
+        const kept = (i + 1) <= rec.rankAtEnergy;
+        const fill = kept ? "#58a6ff" : "#30363d";
+
+        parts.push(
+          "<rect class=\"sv-bar\" data-idx=\"" + i + "\" x=\"" + bx.toFixed(2) + "\" y=\"" + by.toFixed(2) +
+          "\" width=\"" + barW.toFixed(2) + "\" height=\"" + barH.toFixed(2) + "\" rx=\"1.5\" fill=\"" + fill + "\"/>"
+        );
+
+        const ey = padT + plotH * (1.0 - cumRatio);
+        pathPts.push((i === 0 ? "M" : "L") + cx.toFixed(2) + "," + ey.toFixed(2));
+
+        // X-axis tick labels
+        const stride = r <= 16 ? 1 : (r <= 32 ? 2 : (r <= 64 ? 4 : 8));
+        if (i === 0 || (i + 1) % stride === 0 || i === r - 1) {
+          parts.push("<text x=\"" + cx.toFixed(1) + "\" y=\"" + (H - 12) + "\" fill=\"#8b949e\" font-size=\"10.5\" font-family=\"monospace\" text-anchor=\"middle\">" + (i + 1) + "</text>");
+        }
+      }
+
+      // Marchenko-Pastur tau* noise threshold horizontal line
+      if (rec.mpTau > 0 && rec.mpTau <= maxS) {
+        const ty = padT + plotH * (1.0 - rec.mpTau / maxS);
+        parts.push("<line x1=\"" + padL + "\" y1=\"" + ty.toFixed(1) + "\" x2=\"" + (W - padR) + "\" y2=\"" + ty.toFixed(1) + "\" stroke=\"#f0883e\" stroke-width=\"1.6\" stroke-dasharray=\"5,4\"/>");
+        parts.push("<text x=\"" + (W - padR - 6) + "\" y=\"" + Math.max(ty - 5, padT + 10).toFixed(1) + "\" fill=\"#f0883e\" font-size=\"11\" font-family=\"monospace\" text-anchor=\"end\">\u03c4* = " + rec.mpTau.toFixed(3) + " (K_MP=" + rec.rankMp + ")</text>");
+      }
+
+      // K_E% vertical cutoff line
+      const cutX = padL + Math.min(rec.rankAtEnergy, r) * step;
+      parts.push("<line x1=\"" + cutX.toFixed(1) + "\" y1=\"" + padT + "\" x2=\"" + cutX.toFixed(1) + "\" y2=\"" + (padT + plotH) + "\" stroke=\"#79c0ff\" stroke-width=\"1.8\" stroke-dasharray=\"3,3\"/>");
+      const labelAnchor = cutX > W - padR - 110 ? "end" : "start";
+      const labelDx = labelAnchor === "end" ? -6 : 6;
+      parts.push("<text x=\"" + (cutX + labelDx).toFixed(1) + "\" y=\"" + (padT + 13) + "\" fill=\"#79c0ff\" font-size=\"11.5\" font-weight=\"bold\" font-family=\"monospace\" text-anchor=\"" + labelAnchor + "\">K_" + eStr + "% = " + rec.rankAtEnergy + "</text>");
+
+      // Cumulative energy curve
+      if (pathPts.length > 0) {
+        parts.push("<path d=\"" + pathPts.join(" ") + "\" fill=\"none\" stroke=\"#3fb950\" stroke-width=\"2.2\"/>");
+      }
+
+      svg.innerHTML = parts.join("");
+
+      // Attach hover listeners to bars
+      const readout = document.getElementById("hover-readout");
+      const bars = svg.querySelectorAll(".sv-bar");
+      bars.forEach((bar) => {
+        bar.addEventListener("mouseenter", () => {
+          const i = parseInt(bar.getAttribute("data-idx"), 10);
+          const sv = sigma[i];
+          const cum = cumPctArr[i];
+          const indivPct = rec.totalEnergy > 1e-18 ? ((sv * sv) / rec.totalEnergy) * 100.0 : 0.0;
+          const aboveMp = sv > rec.mpTau ? "Signal (>\u03c4*)" : "SGD Noise Tail (\u2264\u03c4*)";
+          readout.textContent =
+            "Mode #" + (i + 1) + " / " + r + "  |  \u03c3_" + (i + 1) + " = " + sv.toFixed(5) +
+            "  |  Mode Energy: " + indivPct.toFixed(2) + "%  |  Cumulative: " + cum.toFixed(2) + "%  |  " + aboveMp;
+        });
+      });
+    }
+
+    const HEALTH_ORDER = { RANK_COLLAPSED: 0, DEAD_LAYER: 1, OVER_PARAMETERIZED: 2, OPTIMAL: 3 };
+
+    function renderAuditTable() {
+      const tbody = document.getElementById("audit-tbody");
+      const q = state.filterText.trim().toLowerCase();
+      const filtered = state.records.filter((r) => {
+        if (state.statusFilter !== "ALL" && r.health !== state.statusFilter) return false;
+        if (q && !r.baseName.toLowerCase().includes(q)) return false;
+        return true;
+      });
+
+      const key = state.sortKey;
+      const dir = state.sortAsc ? 1 : -1;
+      filtered.sort((a, b) => {
+        let va = a[key], vb = b[key];
+        if (key === "health") {
+          va = HEALTH_ORDER[va] ?? 9;
+          vb = HEALTH_ORDER[vb] ?? 9;
+        }
+        if (typeof va === "string") return va.localeCompare(vb) * dir;
+        return (va - vb) * dir;
+      });
+
+      // Update sort indicators
+      document.querySelectorAll(".sort-ind").forEach((el) => { el.textContent = ""; });
+      const activeSortEl = document.getElementById("sort-" + key);
+      if (activeSortEl) activeSortEl.textContent = state.sortAsc ? "\u25b2" : "\u25bc";
+
+      const rowsHtml = filtered.map((r) => {
+        const selClass = r.baseName === state.selectedBaseName ? " class=\"selected\"" : "";
+        return (
+          "<tr data-layer=\"" + r.baseName.replace(/"/g, "&quot;") + "\"" + selClass + ">" +
+          "<td class=\"layer-col\" title=\"" + r.baseName.replace(/"/g, "&quot;") + "\">" + r.baseName + "</td>" +
+          "<td class=\"num\">" + r.nominalRank + "</td>" +
+          "<td class=\"num\">" + r.effectiveRank.toFixed(2) + "</td>" +
+          "<td class=\"num\">" + r.rankAtEnergy + "</td>" +
+          "<td class=\"num\">" + r.rankMp + "</td>" +
+          "<td class=\"num\">" + r.frobeniusNorm.toFixed(4) + "</td>" +
+          "<td><span class=\"status-pill st-" + r.health + "\">" + r.health + "</span></td>" +
+          "</tr>"
+        );
+      });
+      tbody.innerHTML = rowsHtml.join("");
+
+      tbody.querySelectorAll("tr").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          state.selectedBaseName = tr.getAttribute("data-layer");
+          tbody.querySelectorAll("tr").forEach((row) => row.classList.remove("selected"));
+          tr.classList.add("selected");
+          renderSpectrumSvg();
+        });
+      });
+    }
+
+    function applyLoadedAdapter(payload) {
+      state.fileName = payload.fileName;
+      state.records = payload.records;
+      state.syntheticTensors = payload.syntheticTensors || null;
+      recomputeForTargetEnergy();
+      state.meta = inferAdapterMetadata(state.records, payload.alphaCount, payload.doraCount);
+      state.selectedBaseName = state.records.length > 0 ? state.records[0].baseName : null;
+
+      btnExportDemo.classList.toggle("hidden", !state.syntheticTensors);
+      resultsBox.classList.remove("hidden");
+      updateKpiAndCli();
+      renderAuditTable();
+      renderSpectrumSvg();
+
+      clearProgress(
+        "Audited " + state.records.length + " LoRA layers in " + payload.elapsedMs.toFixed(1) +
+        " ms (" + state.fileName + ") \u2014 click any layer row below to inspect its singular value spectrum."
+      );
+    }
+
+    async function handleFileSelection(file) {
+      if (!file) return;
+      try {
+        setProgress(8, "Reading .safetensors header from " + file.name + "...");
+        await new Promise((r) => setTimeout(r, 0));
+        const payload = await parseSafetensorsFile(file);
+        applyLoadedAdapter(payload);
+      } catch (err) {
+        clearProgress("Error: " + (err && err.message ? err.message : String(err)));
+      }
+    }
+
+    // Event bindings
+    dropzone.addEventListener("click", (ev) => {
+      if (ev.target.closest("button")) return;
+      fileInput.click();
+    });
+    dropzone.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        if (ev.target.closest("button")) return;
+        ev.preventDefault();
+        fileInput.click();
+      }
+    });
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files && fileInput.files[0]) handleFileSelection(fileInput.files[0]);
+    });
+
+    dropzone.addEventListener("dragover", (ev) => {
+      ev.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+    dropzone.addEventListener("drop", (ev) => {
+      ev.preventDefault();
+      dropzone.classList.remove("dragover");
+      if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0]) {
+        handleFileSelection(ev.dataTransfer.files[0]);
+      }
+    });
+
+    document.getElementById("btn-demo-peft").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      setProgress(15, "Synthesizing Rank-64 Collapsed Transformer LoRA (PEFT)...");
+      await new Promise((r) => setTimeout(r, 0));
+      const payload = await generateDemoPreset("peft-collapsed");
+      applyLoadedAdapter(payload);
+    });
+
+    document.getElementById("btn-demo-flux").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      setProgress(15, "Synthesizing Healthy Rank-16 FLUX/Kohya Style LoRA...");
+      await new Promise((r) => setTimeout(r, 0));
+      const payload = await generateDemoPreset("flux-healthy");
+      applyLoadedAdapter(payload);
+    });
+
+    btnExportDemo.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (!state.syntheticTensors) return;
+      const blob = encodeSyntheticSafetensorsBlob(state.syntheticTensors);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = state.fileName || "demo_lora.safetensors";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    });
+
+    function setEnergyPercent(val) {
+      const clamped = Math.min(Math.max(val, 90.0), 99.9);
+      state.targetEnergyPct = clamped;
+      energySlider.value = clamped.toFixed(1);
+      energyReadout.textContent = clamped.toFixed(1) + "%";
+      document.querySelectorAll("[data-energy]").forEach((btn) => {
+        btn.classList.toggle("active", Math.abs(parseFloat(btn.getAttribute("data-energy")) - clamped) < 0.05);
+      });
+      if (state.records.length > 0) {
+        recomputeForTargetEnergy();
+        updateKpiAndCli();
+        renderAuditTable();
+        renderSpectrumSvg();
+      }
+    }
+
+    energySlider.addEventListener("input", () => setEnergyPercent(parseFloat(energySlider.value)));
+    document.querySelectorAll("[data-energy]").forEach((btn) => {
+      btn.addEventListener("click", () => setEnergyPercent(parseFloat(btn.getAttribute("data-energy"))));
+    });
+
+    document.getElementById("layer-filter").addEventListener("input", (ev) => {
+      state.filterText = ev.target.value;
+      renderAuditTable();
+    });
+
+    document.querySelectorAll("#status-filters [data-status]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.statusFilter = btn.getAttribute("data-status");
+        document.querySelectorAll("#status-filters [data-status]").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        renderAuditTable();
+      });
+    });
+
+    document.querySelectorAll("table.audit-table thead th[data-sort]").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = th.getAttribute("data-sort");
+        if (state.sortKey === key) state.sortAsc = !state.sortAsc;
+        else {
+          state.sortKey = key;
+          state.sortAsc = key === "baseName" || key === "effectiveRank";
+        }
+        renderAuditTable();
+      });
+    });
+
+    document.querySelectorAll("[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const targetId = btn.getAttribute("data-copy");
+        const text = document.getElementById(targetId).textContent;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(() => {
+            const orig = btn.textContent;
+            btn.textContent = "Copied!";
+            setTimeout(() => { btn.textContent = orig; }, 1200);
+          });
+        }
+      });
+    });
+
+    // Auto-load Demo 1 on initial page open so visitors immediately see live interactive charts!
+    generateDemoPreset("peft-collapsed").then(applyLoadedAdapter);
+  })();
+  </script>
 </body>
 </html>

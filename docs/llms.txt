@@ -1,10 +1,12 @@
-# loraspectra
-> Zero-Dependency Rust Engine & CLI for Spectral SVD Auditing, Eckart-Young Dynamic Rank Compression (-83.8% size at 99% energy), and Orthogonal Subspace Merging (`ortho-svd`) of `.safetensors` LoRA Adapters.
+# loraspectra (v0.6.0)
+> Zero-Dependency Rust Engine, CLI & 100% Client-Side Browser Inspector for Spectral SVD Auditing, Eckart-Young Dynamic Rank Compression (-83.8% size at 99% energy), and Orthogonal Subspace Merging (`ortho-svd`) of `.safetensors` LoRA/DoRA Adapters.
 
+- Interactive Browser `.safetensors` Inspector (100% local JS QR-Core SVD, 0 uploads): https://salyys1.github.io/loraspectra/
 - Repository: https://github.com/SalyyS1/loraspectra
-- Prebuilt Release Binary: https://github.com/SalyyS1/loraspectra/releases/tag/v0.1.0
+- Releases: https://github.com/SalyyS1/loraspectra/releases
 - Author: SalyyS1 (https://github.com/SalyyS1)
 - License: MIT
 - Speedup: 1,050x to 2,680x faster than dense SVD via QR-Core factorization (`O(r^2 d + r^3)`), matching `f64` singular values within `1.08e-13`.
-- Supported Formats: HuggingFace PEFT (`.lora_A.weight`/`.lora_B.weight`) and Kohya/ComfyUI/FLUX (`.lora_down.weight`/`.lora_up.weight`) in `F32`, `F16`, `BF16`.
+- Remote Hub Support: Pass `hf://<org>/<repo>`, `hf://<org>/<repo>/<file.safetensors>`, or `https://.../*.safetensors` directly to `info`, `audit`, `compress`, `interference [--json]`, or `merge` (auto-cached in `${TMPDIR:-/tmp}/loraspectra-cache/`; respects `HF_TOKEN`).
+- Supported Formats: HuggingFace PEFT (`.lora_A.weight`/`.lora_B.weight`), Kohya/ComfyUI/FLUX (`.lora_down.weight`/`.lora_up.weight` + `.alpha`), Diffusers, OneTrainer, and DoRA magnitude vectors in `F32`, `F16`, `BF16`.
 - Companion Project: [mcp-slim](https://github.com/SalyyS1/mcp-slim) — Zero-dependency MCP JSON-RPC 2.0 proxy for token compression and secret redaction.

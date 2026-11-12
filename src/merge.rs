@@ -112,12 +112,58 @@ pub struct LayerInterferenceReport {
     pub conflict_severity: &'static str,
 }
 
-/// Analyze principal subspace angles and Frobenius cosine similarity between two LoRA layers
-/// in `O(r^2 * (d_out + d_in) + r^3)` time without forming `d_out x d_in` dense matrices.
-pub fn analyze_layer_interference(
+/// Automated merge strategy recommendation synthesized from principal subspace angles,
+/// Frobenius sign conflict, effective spectral rank, and `attn` vs `mlp` localization.
+#[derive(Debug, Clone)]
+pub struct MergeRecommendation {
+    pub recommended_mode: &'static str,
+    pub suggested_rank: usize,
+    pub suggested_layer_weights: Option<String>,
+    pub preserve_norm: bool,
+    pub conflict_localization: &'static str,
+    pub rationale: String,
+    pub cli_command: String,
+}
+
+/// Full adapter-pair interference report with `attn` vs `mlp` breakdown and merge advisor output.
+#[derive(Debug, Clone)]
+pub struct InterferenceSummary {
+    pub layers: Vec<LayerInterferenceReport>,
+    pub max_principal_cos: f64,
+    pub mean_principal_cos: f64,
+    pub mean_frobenius_cosine: f64,
+    pub min_frobenius_cosine: f64,
+    pub high_conflict_count: usize,
+    pub moderate_overlap_count: usize,
+    pub orthogonal_safe_count: usize,
+    pub attn_layer_count: usize,
+    pub mlp_layer_count: usize,
+    pub attn_mean_conflict: f64,
+    pub mlp_mean_conflict: f64,
+    pub attn_mean_frobenius_cos: f64,
+    pub mlp_mean_frobenius_cos: f64,
+    pub recommendation: MergeRecommendation,
+}
+
+fn energy_rank_99(sigma: &[f64]) -> usize {
+    let total: f64 = sigma.iter().map(|&s| s * s).sum();
+    if total <= 1e-18 {
+        return 1;
+    }
+    let mut cum = 0.0;
+    for (idx, &s) in sigma.iter().enumerate() {
+        cum += s * s;
+        if cum / total >= 0.99 {
+            return idx + 1;
+        }
+    }
+    sigma.len().max(1)
+}
+
+fn analyze_layer_interference_with_ranks(
     layer1: &LoraLayer,
     layer2: &LoraLayer,
-) -> LayerInterferenceReport {
+) -> (LayerInterferenceReport, usize, usize) {
     let r1 = layer1.rank();
     let r2 = layer2.rank();
     let svd1 = qr_core_svd_truncated(&layer1.b, &layer1.a, r1);
@@ -177,15 +223,385 @@ pub fn analyze_layer_interference(
         "ORTHOGONAL_SAFE"
     };
 
-    LayerInterferenceReport {
-        base_name: layer1.base_name.clone(),
-        max_left_principal_cos,
-        max_right_principal_cos,
-        grassmann_left_overlap,
-        grassmann_right_overlap,
-        frobenius_cosine,
-        conflict_severity,
+    let k99_1 = energy_rank_99(&svd1.sigma);
+    let k99_2 = energy_rank_99(&svd2.sigma);
+
+    (
+        LayerInterferenceReport {
+            base_name: layer1.base_name.clone(),
+            max_left_principal_cos,
+            max_right_principal_cos,
+            grassmann_left_overlap,
+            grassmann_right_overlap,
+            frobenius_cosine,
+            conflict_severity,
+        },
+        k99_1,
+        k99_2,
+    )
+}
+
+/// Analyze principal subspace angles and Frobenius cosine similarity between two LoRA layers
+/// in `O(r^2 * (d_out + d_in) + r^3)` time without forming `d_out x d_in` dense matrices.
+pub fn analyze_layer_interference(
+    layer1: &LoraLayer,
+    layer2: &LoraLayer,
+) -> LayerInterferenceReport {
+    analyze_layer_interference_with_ranks(layer1, layer2).0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerBlockClass {
+    Attn,
+    Mlp,
+    Other,
+}
+
+fn classify_layer_block(base_name: &str) -> LayerBlockClass {
+    let lower = base_name.to_ascii_lowercase();
+    if lower.contains("mlp")
+        || lower.contains("ffn")
+        || lower.contains("feed_forward")
+        || lower.ends_with("gate_proj")
+        || lower.ends_with("up_proj")
+        || lower.ends_with("down_proj")
+        || lower.contains(".ff.")
+        || lower.contains("_ff_")
+        || lower.ends_with(".linear1")
+        || lower.ends_with(".linear2")
+        || lower.ends_with("_linear1")
+        || lower.ends_with("_linear2")
+        || lower.ends_with(".fc1")
+        || lower.ends_with(".fc2")
+        || lower.ends_with("_fc1")
+        || lower.ends_with("_fc2")
+    {
+        LayerBlockClass::Mlp
+    } else if lower.contains("attn")
+        || lower.contains("attention")
+        || lower.ends_with("q_proj")
+        || lower.ends_with("k_proj")
+        || lower.ends_with("v_proj")
+        || lower.ends_with("o_proj")
+        || lower.contains(".to_q")
+        || lower.contains(".to_k")
+        || lower.contains(".to_v")
+        || lower.contains(".to_out")
+        || lower.contains("_to_q")
+        || lower.contains("_to_k")
+        || lower.contains("_to_v")
+        || lower.contains("_to_out")
+    {
+        LayerBlockClass::Attn
+    } else {
+        LayerBlockClass::Other
     }
+}
+
+fn layer_conflict_score(rep: &LayerInterferenceReport) -> f64 {
+    let geom_cos = (rep.max_left_principal_cos * rep.max_right_principal_cos).sqrt();
+    let mean_cos = 0.5 * (rep.max_left_principal_cos + rep.max_right_principal_cos);
+    let sign_penalty = (-rep.frobenius_cosine).max(0.0);
+    (0.5 * geom_cos + 0.5 * mean_cos + sign_penalty).clamp(0.0, 1.5)
+}
+
+fn snap_suggested_rank(raw_rank: usize, max_cap: usize) -> usize {
+    let capped = raw_rank.clamp(1, max_cap.max(1));
+    let buckets = [4usize, 8, 12, 16, 24, 32, 48, 64, 96, 128];
+    for &b in &buckets {
+        if b >= capped {
+            return b.min(max_cap.max(1));
+        }
+    }
+    capped
+}
+
+fn shell_quote_arg(s: &str) -> String {
+    if s.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn normalize_match_key(name: &str) -> &str {
+    name.strip_prefix("base_model.model.").unwrap_or(name)
+}
+
+/// Analyze interference across all matched layers of two LoRA adapters and generate an
+/// automated merge recommendation (`--mode`, `--rank`, `--layer-weights`, `--preserve-norm`).
+pub fn analyze_adapter_interference(
+    layers_a: &[LoraLayer],
+    layers_b: &[LoraLayer],
+    label_a: &str,
+    label_b: &str,
+) -> Result<InterferenceSummary, String> {
+    let mut map_b_exact: BTreeMap<&str, &LoraLayer> = BTreeMap::new();
+    let mut map_b_norm: BTreeMap<&str, &LoraLayer> = BTreeMap::new();
+    for lb in layers_b {
+        map_b_exact.insert(lb.base_name.as_str(), lb);
+        map_b_norm.insert(normalize_match_key(&lb.base_name), lb);
+    }
+
+    let mut reports = Vec::new();
+    let mut combined_energy_ranks = Vec::new();
+    let mut max_rank_sum = 1usize;
+    let mut min_dim_cap = usize::MAX;
+
+    for la in layers_a {
+        let matched = map_b_exact
+            .get(la.base_name.as_str())
+            .or_else(|| map_b_norm.get(normalize_match_key(&la.base_name)));
+        if let Some(&lb) = matched {
+            if la.d_out() != lb.d_out() || la.d_in() != lb.d_in() {
+                return Err(format!(
+                    "Incompatible layer dimensions for {}: ({}, {}) vs ({}, {})",
+                    la.base_name,
+                    la.d_out(),
+                    la.d_in(),
+                    lb.d_out(),
+                    lb.d_in()
+                ));
+            }
+            let (rep, k99_a, k99_b) = analyze_layer_interference_with_ranks(la, lb);
+            let grassmann_avg = 0.5 * (rep.grassmann_left_overlap + rep.grassmann_right_overlap);
+            let needed_k =
+                k99_a + ((1.0 - 0.5 * grassmann_avg) * (k99_b as f64)).ceil() as usize;
+            combined_energy_ranks.push(needed_k.max(1));
+            max_rank_sum = max_rank_sum.max(la.rank() + lb.rank());
+            min_dim_cap = min_dim_cap.min(la.d_out().min(la.d_in()));
+            reports.push(rep);
+        }
+    }
+
+    if reports.is_empty() {
+        return Err("No matching LoRA layer pairs found between the two adapters".to_string());
+    }
+
+    let n = reports.len() as f64;
+    let mut max_principal_cos = 0.0_f64;
+    let mut sum_principal_cos = 0.0_f64;
+    let mut sum_frob_cos = 0.0_f64;
+    let mut min_frobenius_cosine = 1.0_f64;
+    let mut high_conflict_count = 0usize;
+    let mut moderate_overlap_count = 0usize;
+    let mut orthogonal_safe_count = 0usize;
+
+    let mut attn_conflicts = Vec::new();
+    let mut attn_frobs = Vec::new();
+    let mut attn_high = 0usize;
+    let mut attn_names = Vec::new();
+
+    let mut mlp_conflicts = Vec::new();
+    let mut mlp_frobs = Vec::new();
+    let mut mlp_high = 0usize;
+    let mut mlp_names = Vec::new();
+
+    for r in &reports {
+        let pair_max = r.max_left_principal_cos.max(r.max_right_principal_cos);
+        let pair_mean = 0.5 * (r.max_left_principal_cos + r.max_right_principal_cos);
+        max_principal_cos = max_principal_cos.max(pair_max);
+        sum_principal_cos += pair_mean;
+        sum_frob_cos += r.frobenius_cosine;
+        min_frobenius_cosine = min_frobenius_cosine.min(r.frobenius_cosine);
+
+        match r.conflict_severity {
+            "HIGH_INTERFERENCE" => high_conflict_count += 1,
+            "MODERATE_OVERLAP" => moderate_overlap_count += 1,
+            _ => orthogonal_safe_count += 1,
+        }
+
+        let c_score = layer_conflict_score(r);
+        match classify_layer_block(&r.base_name) {
+            LayerBlockClass::Attn => {
+                attn_conflicts.push(c_score);
+                attn_frobs.push(r.frobenius_cosine);
+                if r.conflict_severity == "HIGH_INTERFERENCE" {
+                    attn_high += 1;
+                }
+                attn_names.push(r.base_name.as_str());
+            }
+            LayerBlockClass::Mlp => {
+                mlp_conflicts.push(c_score);
+                mlp_frobs.push(r.frobenius_cosine);
+                if r.conflict_severity == "HIGH_INTERFERENCE" {
+                    mlp_high += 1;
+                }
+                mlp_names.push(r.base_name.as_str());
+            }
+            LayerBlockClass::Other => {}
+        }
+    }
+
+    let mean_principal_cos = sum_principal_cos / n;
+    let mean_frobenius_cosine = sum_frob_cos / n;
+
+    let attn_layer_count = attn_conflicts.len();
+    let mlp_layer_count = mlp_conflicts.len();
+    let attn_mean_conflict = if attn_layer_count > 0 {
+        attn_conflicts.iter().sum::<f64>() / (attn_layer_count as f64)
+    } else {
+        0.0
+    };
+    let mlp_mean_conflict = if mlp_layer_count > 0 {
+        mlp_conflicts.iter().sum::<f64>() / (mlp_layer_count as f64)
+    } else {
+        0.0
+    };
+    let attn_mean_frobenius_cos = if attn_layer_count > 0 {
+        attn_frobs.iter().sum::<f64>() / (attn_layer_count as f64)
+    } else {
+        0.0
+    };
+    let mlp_mean_frobenius_cos = if mlp_layer_count > 0 {
+        mlp_frobs.iter().sum::<f64>() / (mlp_layer_count as f64)
+    } else {
+        0.0
+    };
+
+    // 1. Select merge mode
+    let recommended_mode = if high_conflict_count > 0
+        || min_frobenius_cosine < -0.12
+        || max_principal_cos > 0.70
+    {
+        "ortho-svd"
+    } else if moderate_overlap_count > 0
+        && (mean_principal_cos >= 0.28
+            || (moderate_overlap_count as f64) / n >= 0.25
+            || min_frobenius_cosine < -0.03)
+    {
+        "ties"
+    } else {
+        "linear"
+    };
+
+    // 2. Estimate suggested target rank from 90th-percentile union 99%-energy rank
+    combined_energy_ranks.sort_unstable();
+    let idx_90 = (((combined_energy_ranks.len() as f64) * 0.90).ceil() as usize)
+        .saturating_sub(1)
+        .min(combined_energy_ranks.len() - 1);
+    let raw_target_rank = combined_energy_ranks[idx_90];
+    let rank_cap = max_rank_sum.min(min_dim_cap).min(128);
+    let suggested_rank = snap_suggested_rank(raw_target_rank, rank_cap);
+
+    // 3. Detect attn vs mlp localized conflict for --layer-weights
+    let attn_pat = if !attn_names.is_empty() && attn_names.iter().all(|s| s.contains("attn")) {
+        "attn"
+    } else {
+        "proj"
+    };
+    let mlp_pat = if !mlp_names.is_empty() && mlp_names.iter().all(|s| s.contains("mlp")) {
+        "mlp"
+    } else if !mlp_names.is_empty() && mlp_names.iter().all(|s| s.contains("ffn")) {
+        "ffn"
+    } else if !mlp_names.is_empty() && mlp_names.iter().all(|s| s.contains("ff")) {
+        "ff"
+    } else {
+        "linear"
+    };
+
+    let (conflict_localization, suggested_layer_weights) =
+        if attn_layer_count > 0 && mlp_layer_count > 0 {
+            let diff = attn_mean_conflict - mlp_mean_conflict;
+            if (diff >= 0.20 && (attn_mean_conflict >= 0.38 || attn_high > 0))
+                || (attn_high > 0 && mlp_high == 0 && diff >= 0.12)
+            {
+                let lw = if recommended_mode == "ortho-svd" {
+                    format!("{}=1.0:0.35,{}=1.0:1.0", attn_pat, mlp_pat)
+                } else {
+                    format!("{}=0.8:0.2,{}=0.5:0.5", attn_pat, mlp_pat)
+                };
+                ("LOCALIZED_ATTN", Some(lw))
+            } else if (-diff >= 0.20 && (mlp_mean_conflict >= 0.38 || mlp_high > 0))
+                || (mlp_high > 0 && attn_high == 0 && -diff >= 0.12)
+            {
+                let lw = if recommended_mode == "ortho-svd" {
+                    format!("{}=1.0:1.0,{}=1.0:0.35", attn_pat, mlp_pat)
+                } else {
+                    format!("{}=0.5:0.5,{}=0.8:0.2", attn_pat, mlp_pat)
+                };
+                ("LOCALIZED_MLP", Some(lw))
+            } else if high_conflict_count > 0 || moderate_overlap_count > 0 {
+                ("GLOBAL", None)
+            } else {
+                ("NONE", None)
+            }
+        } else if high_conflict_count > 0 || moderate_overlap_count > 0 {
+            ("GLOBAL", None)
+        } else {
+            ("NONE", None)
+        };
+
+    let preserve_norm = recommended_mode == "ortho-svd"
+        && (max_principal_cos > 0.60 || mean_frobenius_cosine > 0.20);
+
+    let mode_reason = match recommended_mode {
+        "ortho-svd" => format!(
+            "Detected {} high-interference layer(s) (max principal cos {:.3}, min Frobenius cos {:.3}); orthogonal subspace projection prevents destructive sign cancellation",
+            high_conflict_count, max_principal_cos, min_frobenius_cosine
+        ),
+        "ties" => format!(
+            "Detected {} moderate-overlap layer(s) (mean principal cos {:.3}) without severe sign opposition; TIES magnitude pruning trims diffuse parameter drift before QR-Core SVD",
+            moderate_overlap_count, mean_principal_cos
+        ),
+        _ => format!(
+            "Principal subspaces are nearly orthogonal (max cos {:.3}, mean cos {:.3}); linear low-rank concatenation + QR-Core SVD retains full fidelity",
+            max_principal_cos, mean_principal_cos
+        ),
+    };
+
+    let loc_reason = match conflict_localization {
+        "LOCALIZED_ATTN" => format!(
+            " Conflict is concentrated in attention blocks (attn {:.2} vs mlp {:.2}); attenuating adapter B in '{}' layers is recommended.",
+            attn_mean_conflict, mlp_mean_conflict, attn_pat
+        ),
+        "LOCALIZED_MLP" => format!(
+            " Conflict is concentrated in MLP blocks (mlp {:.2} vs attn {:.2}); attenuating adapter B in '{}' layers is recommended.",
+            mlp_mean_conflict, attn_mean_conflict, mlp_pat
+        ),
+        _ => String::new(),
+    };
+    let rationale = format!("{}.{}", mode_reason, loc_reason);
+
+    let mut cli_command = format!(
+        "loraspectra merge {} {} merged.safetensors --mode {} --rank {}",
+        shell_quote_arg(label_a),
+        shell_quote_arg(label_b),
+        recommended_mode,
+        suggested_rank
+    );
+    if let Some(ref lw) = suggested_layer_weights {
+        cli_command.push_str(&format!(" --layer-weights \"{}\"", lw));
+    }
+    if preserve_norm {
+        cli_command.push_str(" --preserve-norm");
+    }
+
+    Ok(InterferenceSummary {
+        layers: reports,
+        max_principal_cos,
+        mean_principal_cos,
+        mean_frobenius_cosine,
+        min_frobenius_cosine,
+        high_conflict_count,
+        moderate_overlap_count,
+        orthogonal_safe_count,
+        attn_layer_count,
+        mlp_layer_count,
+        attn_mean_conflict,
+        mlp_mean_conflict,
+        attn_mean_frobenius_cos,
+        mlp_mean_frobenius_cos,
+        recommendation: MergeRecommendation {
+            recommended_mode,
+            suggested_rank,
+            suggested_layer_weights,
+            preserve_norm,
+            conflict_localization,
+            rationale,
+            cli_command,
+        },
+    })
 }
 
 /// Concatenate two low-rank representations `[w1*B1 | w2*B2]` and `[A1; A2]` and compress

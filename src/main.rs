@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use loraspectra::audit::audit_adapter;
@@ -8,8 +8,9 @@ use loraspectra::compress::{
     compress_adapter, extract_lora_from_dense_models, CompressionPolicy,
 };
 use loraspectra::merge::{
-    analyze_layer_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
+    analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
+use loraspectra::remote::resolve_source_path;
 use loraspectra::safetensors::{
     bake_adapter_scaling, cast_layers_dtype, convert_layers_key_format, extract_dora_scales,
     extract_lora_alphas, extract_lora_layers, insert_dora_scales, insert_unit_alpha_tensors,
@@ -19,30 +20,60 @@ use loraspectra::safetensors::{
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v0.5.0 — Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+        "loraspectra v0.6.0 — Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+
+SOURCES:
+  All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
+  or direct https://.../*.safetensors URLs (cached automatically in ${{TMPDIR:-/tmp}}/loraspectra-cache/; respects HF_TOKEN).
 
 USAGE:
-  loraspectra info <adapter.safetensors> [--json]
-  loraspectra audit <adapter.safetensors> [--json]
-  loraspectra compress <input.safetensors> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
-  loraspectra extract <base.safetensors> <tuned.safetensors> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
-  loraspectra interference <adapter_a.safetensors> <adapter_b.safetensors>
-  loraspectra merge <in_1.safetensors> <in_2.safetensors> [in_3.safetensors ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]"
+  loraspectra info <adapter_or_hf_uri> [--json]
+  loraspectra audit <adapter_or_hf_uri> [--json]
+  loraspectra compress <input_or_hf_uri> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
+  loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
+  loraspectra interference <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
+  loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]"
     );
 }
 
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn resolve_input_or_exit(source_str: &str) -> PathBuf {
+    match resolve_source_path(source_str) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error resolving {}: {}", source_str, e);
+            process::exit(1);
+        }
+    }
+}
+
 fn load_layers_alphas_dora_or_exit(
-    path_str: &str,
+    source_str: &str,
 ) -> (
     Vec<LoraLayer>,
     BTreeMap<String, f64>,
     BTreeMap<String, (String, Tensor2D)>,
 ) {
-    let path = Path::new(path_str);
-    let tensors = match read_safetensors(path) {
+    let resolved_path = resolve_input_or_exit(source_str);
+    let tensors = match read_safetensors(&resolved_path) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Error reading {}: {}", path_str, e);
+            eprintln!("Error reading {} ({}): {}", source_str, resolved_path.display(), e);
             process::exit(1);
         }
     };
@@ -51,11 +82,11 @@ fn load_layers_alphas_dora_or_exit(
     match extract_lora_layers(&tensors) {
         Ok(layers) if !layers.is_empty() => (layers, alphas, dora_scales),
         Ok(_) => {
-            eprintln!("No matched (lora_A, lora_B) 2D tensor pairs found in {}", path_str);
+            eprintln!("No matched (lora_A, lora_B) 2D tensor pairs found in {}", source_str);
             process::exit(1);
         }
         Err(e) => {
-            eprintln!("Error extracting LoRA layers from {}: {}", path_str, e);
+            eprintln!("Error extracting LoRA layers from {}: {}", source_str, e);
             process::exit(1);
         }
     }
@@ -79,19 +110,25 @@ fn main() {
 
     match args[1].as_str() {
         "info" => {
-            if args.len() < 3 {
+            let json_mode = args[2..].iter().any(|a| a == "--json");
+            let pos: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
+            if pos.is_empty() {
                 print_usage();
                 process::exit(1);
             }
-            let json_mode = args.iter().any(|a| a == "--json");
-            let (layers, alphas) = load_layers_and_alphas_or_exit(&args[2]);
+            let source = pos[0];
+            let (layers, alphas) = load_layers_and_alphas_or_exit(source);
             let info = inspect_adapter_architecture(&layers, &alphas);
             let summary = audit_adapter(&layers);
 
             if json_mode {
                 println!("{{");
-                println!("  \"naming_format\": \"{}\",", info.naming_format);
-                println!("  \"inferred_architecture\": \"{}\",", info.inferred_architecture);
+                println!("  \"source\": \"{}\",", json_escape(source));
+                println!("  \"naming_format\": \"{}\",", json_escape(info.naming_format));
+                println!(
+                    "  \"inferred_architecture\": \"{}\",",
+                    json_escape(info.inferred_architecture)
+                );
                 println!("  \"layer_count\": {},", info.layer_count);
                 println!("  \"min_rank\": {},", info.min_rank);
                 println!("  \"max_rank\": {},", info.max_rank);
@@ -106,7 +143,7 @@ fn main() {
                 println!("  \"compressible_byte_ratio\": {:.6}", summary.compressible_byte_ratio);
                 println!("}}");
             } else {
-                println!("Checkpoint:             {}", args[2]);
+                println!("Checkpoint:             {}", source);
                 println!("Naming Convention:      {}", info.naming_format);
                 println!("Inferred Base Family:   {}", info.inferred_architecture);
                 println!("LoRA Layer Pairs:       {}", info.layer_count);
@@ -135,16 +172,19 @@ fn main() {
             }
         }
         "audit" => {
-            if args.len() < 3 {
+            let json_mode = args[2..].iter().any(|a| a == "--json");
+            let pos: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
+            if pos.is_empty() {
                 print_usage();
                 process::exit(1);
             }
-            let json_mode = args.iter().any(|a| a == "--json");
-            let layers = load_layers_or_exit(&args[2]);
+            let source = pos[0];
+            let layers = load_layers_or_exit(source);
             let summary = audit_adapter(&layers);
 
             if json_mode {
                 println!("{{");
+                println!("  \"source\": \"{}\",", json_escape(source));
                 println!("  \"layer_count\": {},", summary.layers.len());
                 println!("  \"total_nominal_bytes\": {},", summary.total_nominal_bytes);
                 println!("  \"total_optimal_99_bytes\": {},", summary.total_optimal_99_bytes);
@@ -366,8 +406,10 @@ fn main() {
                 }
             }
 
-            let base_tensors = read_safetensors(Path::new(base_path)).expect("Failed to read base .safetensors");
-            let tuned_tensors = read_safetensors(Path::new(tuned_path)).expect("Failed to read tuned .safetensors");
+            let resolved_base = resolve_input_or_exit(base_path);
+            let resolved_tuned = resolve_input_or_exit(tuned_path);
+            let base_tensors = read_safetensors(&resolved_base).expect("Failed to read base .safetensors");
+            let tuned_tensors = read_safetensors(&resolved_tuned).expect("Failed to read tuned .safetensors");
             let mut res = extract_lora_from_dense_models(&base_tensors, &tuned_tensors, policy, &target_format)
                 .expect("LoRA extraction failed");
             if let Some(dt) = target_dtype {
@@ -391,27 +433,128 @@ fn main() {
             );
         }
         "interference" => {
-            if args.len() < 4 {
+            let json_mode = args[2..].iter().any(|a| a == "--json");
+            let pos: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
+            if pos.len() < 2 {
                 print_usage();
                 process::exit(1);
             }
-            let layers_a = load_layers_or_exit(&args[2]);
-            let layers_b = load_layers_or_exit(&args[3]);
-            println!(
-                "{:<42} {:>9} {:>9} {:>10} {:<18}",
-                "LAYER", "COS_U_MAX", "COS_V_MAX", "FROB_COS", "SEVERITY"
-            );
-            println!("{}", "-".repeat(92));
-            for (la, lb) in layers_a.iter().zip(layers_b.iter()) {
-                let rep = analyze_layer_interference(la, lb);
+            let source_a = pos[0];
+            let source_b = pos[1];
+            let layers_a = load_layers_or_exit(source_a);
+            let layers_b = load_layers_or_exit(source_b);
+            let summary = match analyze_adapter_interference(&layers_a, &layers_b, source_a, source_b) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Interference analysis failed: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            if json_mode {
+                let lw_json = match &summary.recommendation.suggested_layer_weights {
+                    Some(lw) => format!("\"{}\"", json_escape(lw)),
+                    None => "null".to_string(),
+                };
+                println!("{{");
+                println!("  \"adapter_a\": \"{}\",", json_escape(source_a));
+                println!("  \"adapter_b\": \"{}\",", json_escape(source_b));
+                println!("  \"layer_count\": {},", summary.layers.len());
+                println!("  \"high_conflict_count\": {},", summary.high_conflict_count);
+                println!("  \"moderate_overlap_count\": {},", summary.moderate_overlap_count);
+                println!("  \"orthogonal_safe_count\": {},", summary.orthogonal_safe_count);
+                println!("  \"max_principal_cos\": {:.6},", summary.max_principal_cos);
+                println!("  \"mean_principal_cos\": {:.6},", summary.mean_principal_cos);
+                println!("  \"mean_frobenius_cosine\": {:.6},", summary.mean_frobenius_cosine);
+                println!("  \"min_frobenius_cosine\": {:.6},", summary.min_frobenius_cosine);
+                println!("  \"attn_layer_count\": {},", summary.attn_layer_count);
+                println!("  \"attn_mean_conflict\": {:.6},", summary.attn_mean_conflict);
+                println!("  \"attn_mean_frobenius_cos\": {:.6},", summary.attn_mean_frobenius_cos);
+                println!("  \"mlp_layer_count\": {},", summary.mlp_layer_count);
+                println!("  \"mlp_mean_conflict\": {:.6},", summary.mlp_mean_conflict);
+                println!("  \"mlp_mean_frobenius_cos\": {:.6},", summary.mlp_mean_frobenius_cos);
+                println!("  \"recommendation\": {{");
                 println!(
-                    "{:<42} {:>9.4} {:>9.4} {:>10.4} {:<18}",
-                    rep.base_name,
-                    rep.max_left_principal_cos,
-                    rep.max_right_principal_cos,
-                    rep.frobenius_cosine,
-                    rep.conflict_severity
+                    "    \"mode\": \"{}\",",
+                    summary.recommendation.recommended_mode
                 );
+                println!(
+                    "    \"suggested_rank\": {},",
+                    summary.recommendation.suggested_rank
+                );
+                println!("    \"suggested_layer_weights\": {},", lw_json);
+                println!("    \"preserve_norm\": {},", summary.recommendation.preserve_norm);
+                println!(
+                    "    \"conflict_localization\": \"{}\",",
+                    summary.recommendation.conflict_localization
+                );
+                println!(
+                    "    \"rationale\": \"{}\",",
+                    json_escape(&summary.recommendation.rationale)
+                );
+                println!(
+                    "    \"cli_command\": \"{}\"",
+                    json_escape(&summary.recommendation.cli_command)
+                );
+                println!("  }},");
+                println!("  \"layers\": [");
+                for (idx, rep) in summary.layers.iter().enumerate() {
+                    let comma = if idx + 1 < summary.layers.len() { "," } else { "" };
+                    println!(
+                        "    {{\"base_name\": \"{}\", \"max_left_principal_cos\": {:.6}, \"max_right_principal_cos\": {:.6}, \"grassmann_left_overlap\": {:.6}, \"grassmann_right_overlap\": {:.6}, \"frobenius_cosine\": {:.6}, \"conflict_severity\": \"{}\"}}{}",
+                        json_escape(&rep.base_name),
+                        rep.max_left_principal_cos,
+                        rep.max_right_principal_cos,
+                        rep.grassmann_left_overlap,
+                        rep.grassmann_right_overlap,
+                        rep.frobenius_cosine,
+                        rep.conflict_severity,
+                        comma
+                    );
+                }
+                println!("  ]");
+                println!("}}");
+            } else {
+                println!(
+                    "{:<42} {:>9} {:>9} {:>10} {:<18}",
+                    "LAYER", "COS_U_MAX", "COS_V_MAX", "FROB_COS", "SEVERITY"
+                );
+                println!("{}", "-".repeat(92));
+                for rep in &summary.layers {
+                    println!(
+                        "{:<42} {:>9.4} {:>9.4} {:>10.4} {:<18}",
+                        rep.base_name,
+                        rep.max_left_principal_cos,
+                        rep.max_right_principal_cos,
+                        rep.frobenius_cosine,
+                        rep.conflict_severity
+                    );
+                }
+                println!("{}", "-".repeat(92));
+                println!(
+                    "Summary: {} matched layers ({} high conflict, {} moderate overlap, {} orthogonal-safe) | max cos {:.4} | mean frob_cos {:+.4}",
+                    summary.layers.len(),
+                    summary.high_conflict_count,
+                    summary.moderate_overlap_count,
+                    summary.orthogonal_safe_count,
+                    summary.max_principal_cos,
+                    summary.mean_frobenius_cosine
+                );
+                if summary.attn_layer_count > 0 || summary.mlp_layer_count > 0 {
+                    println!(
+                        "Block Conflict Profile: attn={} layers (mean conflict {:.3}, frob {:+.3}) | mlp={} layers (mean conflict {:.3}, frob {:+.3}) [{}]",
+                        summary.attn_layer_count,
+                        summary.attn_mean_conflict,
+                        summary.attn_mean_frobenius_cos,
+                        summary.mlp_layer_count,
+                        summary.mlp_mean_conflict,
+                        summary.mlp_mean_frobenius_cos,
+                        summary.recommendation.conflict_localization
+                    );
+                }
+                println!("Automated Merge Recommendation:");
+                println!("  Rationale: {}", summary.recommendation.rationale);
+                println!("  Command:   {}", summary.recommendation.cli_command);
             }
         }
         "merge" => {
