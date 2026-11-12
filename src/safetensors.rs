@@ -877,6 +877,17 @@ pub fn inspect_adapter_architecture(
             || l.base_name.contains("down_blocks")
             || l.base_name.contains("transformer_blocks")
     });
+    let is_minicpm_omni = layers.iter().any(|l| {
+        l.base_name.contains("llm.model.")
+            || l.base_name.contains("vpm.")
+            || l.base_name.contains("apm.")
+            || l.base_name.contains("resampler.")
+    });
+    let is_vlm = layers.iter().any(|l| {
+        l.base_name.contains("language_model.")
+            || l.base_name.contains("vision_tower.")
+            || l.base_name.contains("multi_modal_projector.")
+    });
     let max_dim = max_d_in.max(max_d_out);
 
     let inferred_architecture = if is_diffusion {
@@ -895,6 +906,10 @@ pub fn inspect_adapter_architecture(
         } else {
             "Stable Diffusion 1.5 / 2.x UNet"
         }
+    } else if is_minicpm_omni {
+        "MiniCPM-o / MiniCPM-V Multimodal LLM"
+    } else if is_vlm {
+        "Gemma-3 / Multimodal VLM"
     } else if max_dim >= 16384 {
         "Llama-3-70B / Qwen2.5-72B class LLM"
     } else if max_dim >= 13824 {
