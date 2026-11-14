@@ -9,7 +9,7 @@ use loraspectra::compress::{
     compress_adapter_with_options, extract_lora_from_dense_models, parse_byte_budget, BudgetTarget,
     CompressionPolicy,
 };
-use loraspectra::diff::{diff_adapters, render_diff_json, render_diff_table};
+use loraspectra::diff::{diff_adapters_with_dora, render_diff_json, render_diff_table};
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
@@ -20,9 +20,10 @@ use loraspectra::merge_check::{
 use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
 use loraspectra::safetensors::{
     bake_adapter_scaling, cast_layers_dtype, compute_peft_alpha_pattern, convert_layers_key_format,
-    extract_dora_scales, extract_lora_alphas, extract_lora_layers, infer_peft_target_modules,
-    insert_dora_scales, insert_unit_alpha_tensors, inspect_adapter_architecture,
-    layers_to_tensor_map, read_peft_adapter_config, read_safetensors, resolve_layer_scaling_params,
+    extract_dora_scales, extract_lora_alphas, extract_lora_layers, filter_dora_scales_for_layers,
+    infer_peft_target_modules, insert_dora_scales, insert_unit_alpha_tensors,
+    inspect_adapter_architecture, layers_to_tensor_map, merge_dora_scales,
+    read_peft_adapter_config, read_safetensors, resolve_layer_scaling_params,
     strip_peft_base_prefix, write_peft_adapter_config, write_safetensors, DType, LoraLayer,
     PeftAdapterConfig, Tensor2D,
 };
@@ -30,7 +31,7 @@ use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif};
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.0.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+        "loraspectra v1.1.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -159,6 +160,9 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "-V" | "--version" | "version" => {
+            println!("loraspectra 1.1.0");
+        }
         "info" => {
             let json_mode = args[2..].iter().any(|a| a == "--json");
             let pos: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
@@ -265,7 +269,7 @@ fn main() {
             );
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.0.0");
+                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.1.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                 } else {
@@ -341,9 +345,10 @@ fn main() {
             }
             let source_a = pos[0];
             let source_b = pos[1];
-            let (layers_a, alphas_a) = load_layers_and_alphas_or_exit(source_a);
-            let (layers_b, alphas_b) = load_layers_and_alphas_or_exit(source_b);
-            let summary = diff_adapters(&layers_a, &alphas_a, &layers_b, &alphas_b);
+            let (layers_a, alphas_a, dora_a) = load_layers_alphas_dora_or_exit(source_a);
+            let (layers_b, alphas_b, dora_b) = load_layers_alphas_dora_or_exit(source_b);
+            let summary =
+                diff_adapters_with_dora(&layers_a, &alphas_a, &dora_a, &layers_b, &alphas_b, &dora_b);
 
             if json_mode {
                 println!("{}", render_diff_json(&summary));
@@ -617,13 +622,19 @@ fn main() {
             if let Some(dt) = target_dtype {
                 cast_layers_dtype(&mut res.layers, dt);
             }
+            let retained_dora = filter_dora_scales_for_layers(&dora_scales, &res.layers);
             let final_bytes: usize = res.layers.iter().map(|l| l.raw_byte_size()).sum();
             let mut out_map = layers_to_tensor_map(&res.layers);
             if !alphas.is_empty() {
                 insert_unit_alpha_tensors(&mut out_map, &res.layers);
             }
-            if !dora_scales.is_empty() {
-                insert_dora_scales(&mut out_map, &dora_scales, target_format.as_deref(), target_dtype);
+            if !retained_dora.is_empty() {
+                insert_dora_scales(
+                    &mut out_map,
+                    &retained_dora,
+                    target_format.as_deref(),
+                    target_dtype,
+                );
             }
             if let Some(parent) = Path::new(&output_path).parent() {
                 if !parent.as_os_str().is_empty() {
@@ -651,7 +662,7 @@ fn main() {
                     &alpha_pattern,
                     top_r,
                     out_use_rslora,
-                    !dora_scales.is_empty(),
+                    !retained_dora.is_empty(),
                     &inferred_targets,
                     source_peft_config.as_ref(),
                 )
@@ -1080,7 +1091,7 @@ fn main() {
             };
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_merge_check_sarif(&summary, "1.0.0");
+                let sarif_str = build_merge_check_sarif(&summary, "1.1.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                     process::exit(1);
@@ -1189,15 +1200,14 @@ fn main() {
 
             let mut adapters: Vec<Vec<LoraLayer>> = Vec::with_capacity(input_paths.len());
             let mut any_alphas = false;
-            let mut combined_dora: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
+            let mut adapter_doras: Vec<BTreeMap<String, (String, Tensor2D)>> =
+                Vec::with_capacity(input_paths.len());
             for p in input_paths {
                 let (mut l, alphas, dora) = load_layers_alphas_dora_or_exit(p);
                 if !alphas.is_empty() {
                     any_alphas = true;
                 }
-                for (k, v) in dora {
-                    combined_dora.entry(k).or_insert(v);
-                }
+                adapter_doras.push(dora);
                 if bake_alpha || !alphas.is_empty() {
                     bake_adapter_scaling(&mut l, &alphas, default_alpha, rslora);
                 }
@@ -1214,6 +1224,7 @@ fn main() {
                     vec![1.0; n_adapters]
                 }
             });
+            let combined_dora = merge_dora_scales(&adapter_doras, &weights);
 
             let mut merged = merge_multiple_adapters(
                 &adapters,

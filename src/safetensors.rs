@@ -511,8 +511,10 @@ pub fn write_safetensors(path: &Path, tensors: &BTreeMap<String, Tensor2D>) -> i
                 end
             ));
         } else if (name.ends_with(".lora_magnitude_vector")
+            || name.ends_with(".lora_magnitude_vector.weight")
             || name.ends_with(".lora_magnitude_vector.default.weight")
-            || name.ends_with(".dora_scale"))
+            || name.ends_with(".dora_scale")
+            || name.ends_with(".magnitude"))
             && tensor.cols == 1
         {
             header_parts.push(format!(
@@ -1094,6 +1096,87 @@ pub fn insert_dora_scales(
         };
         map.insert(out_key, t);
     }
+}
+
+/// Filter a DoRA magnitude vector map so only entries belonging to retained `layers` remain,
+/// preventing orphan `lora_magnitude_vector` tensors when `--exclude` prunes modules during compression.
+pub fn filter_dora_scales_for_layers(
+    dora_scales: &BTreeMap<String, (String, Tensor2D)>,
+    layers: &[LoraLayer],
+) -> BTreeMap<String, (String, Tensor2D)> {
+    let retained: std::collections::BTreeSet<&str> =
+        layers.iter().map(|l| l.base_name.as_str()).collect();
+    let mut out = BTreeMap::new();
+    for (base_name, entry) in dora_scales {
+        if retained.contains(base_name.as_str()) {
+            out.insert(base_name.clone(), entry.clone());
+        }
+    }
+    out
+}
+
+/// Combine per-layer DoRA magnitude vectors across multiple adapters using normalized non-negative
+/// adapter weights so merged DoRA checkpoints preserve scale invariance (`sum_p w_tilde_p = 1`).
+pub fn merge_dora_scales(
+    adapter_doras: &[BTreeMap<String, (String, Tensor2D)>],
+    weights: &[f64],
+) -> BTreeMap<String, (String, Tensor2D)> {
+    let mut all_bases = std::collections::BTreeSet::new();
+    for dmap in adapter_doras {
+        for k in dmap.keys() {
+            all_bases.insert(k.clone());
+        }
+    }
+
+    let mut merged = BTreeMap::new();
+    for base in all_bases {
+        let mut contributors: Vec<(f64, &String, &Tensor2D)> = Vec::new();
+        for (idx, dmap) in adapter_doras.iter().enumerate() {
+            if let Some((orig_key, tensor)) = dmap.get(&base) {
+                let w = weights.get(idx).copied().unwrap_or(1.0).abs();
+                contributors.push((w, orig_key, tensor));
+            }
+        }
+        if contributors.is_empty() {
+            continue;
+        }
+        let (_, first_key, first_t) = contributors[0];
+        let len = first_t.data.len();
+        if contributors.len() == 1 || contributors.iter().any(|(_, _, t)| t.data.len() != len) {
+            merged.insert(base, (first_key.clone(), first_t.clone()));
+            continue;
+        }
+        let weight_sum: f64 = contributors.iter().map(|(w, _, _)| *w).sum();
+        let mut combined = vec![0.0; len];
+        if weight_sum <= 1e-12 {
+            let inv = 1.0 / (contributors.len() as f64);
+            for (_, _, t) in &contributors {
+                for (dst, &v) in combined.iter_mut().zip(t.data.iter()) {
+                    *dst += inv * v;
+                }
+            }
+        } else {
+            for (w, _, t) in &contributors {
+                let wn = *w / weight_sum;
+                for (dst, &v) in combined.iter_mut().zip(t.data.iter()) {
+                    *dst += wn * v;
+                }
+            }
+        }
+        merged.insert(
+            base,
+            (
+                first_key.clone(),
+                Tensor2D {
+                    rows: first_t.rows,
+                    cols: first_t.cols,
+                    dtype: first_t.dtype,
+                    data: combined,
+                },
+            ),
+        );
+    }
+    merged
 }
 
 /// Convert `a_key` and `b_key` naming conventions across HuggingFace PEFT, Kohya/ComfyUI, and Diffusers.

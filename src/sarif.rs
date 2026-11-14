@@ -136,6 +136,20 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         full_description: "Shared module names map to mismatched (d_out, d_in) tensor shapes across adapters, preventing safe weight merging.",
         default_level: "error",
     },
+    SarifRuleDefinition {
+        id: "LS019",
+        name: "DoraMagnitudeCollapseOrMismatch",
+        short_description: "DoRA magnitude vector has invalid channels, shape mismatch, or partial coverage",
+        full_description: "A DoRA lora_magnitude_vector tensor has length mismatched with lora_B d_out, contains zero/negative/non-finite channel scales, or covers only a subset of adapted linear layers.",
+        default_level: "error",
+    },
+    SarifRuleDefinition {
+        id: "LS020",
+        name: "DoraMagnitudeDirectionalAnomaly",
+        short_description: "DoRA magnitude vector exhibits extreme channel dispersion or directional stagnation",
+        full_description: "DoRA output channel scales span an extreme >50x dynamic range (cv > 1.5) or diverge while the low-rank directional update B*A remains frozen across output rows.",
+        default_level: "warning",
+    },
 ];
 
 fn escape_json(s: &str) -> String {
@@ -158,10 +172,10 @@ fn map_issue_code_to_rule(code: &str) -> Option<(&'static str, &'static str)> {
     match code {
         "DEAD_LORA_LAYER" => Some(("LS001", "error")),
         "ZERO_NORM_EMBEDDING_ROWS" => Some(("LS002", "error")),
-        "DEAD_LORA_B_COLS" => Some(("LS003", "warning")),
+        "DEAD_LORA_B_COLS" | "DEAD_EMBEDDING_LORA_COLUMNS" => Some(("LS003", "warning")),
         "DEAD_LORA_A_ROWS" => Some(("LS004", "warning")),
-        "MISSING_CONFIG_ALPHA" => Some(("LS005", "warning")),
-        "MISSING_ALPHA_TENSORS" => Some(("LS006", "warning")),
+        "MISSING_CONFIG_ALPHA" | "MISSING_LORA_ALPHA" => Some(("LS005", "warning")),
+        "MISSING_ALPHA_TENSORS" | "MISMATCHED_ALPHA_TENSORS" => Some(("LS006", "warning")),
         "MISMATCHED_ALPHA_CONFIG" => Some(("LS007", "warning")),
         "NON_POSITIVE_ALPHA" => Some(("LS008", "error")),
         "EXTREME_ALPHA_UNDERSCALE" => Some(("LS009", "warning")),
@@ -170,6 +184,9 @@ fn map_issue_code_to_rule(code: &str) -> Option<(&'static str, &'static str)> {
         "MISSING_DORA_VECTORS" => Some(("LS012", "warning")),
         "RANK_COLLAPSED" => Some(("LS013", "error")),
         "OVER_PARAMETERIZED" => Some(("LS014", "note")),
+        "DORA_SHAPE_MISMATCH" | "INVALID_DORA_MAGNITUDE" => Some(("LS019", "error")),
+        "PARTIAL_DORA_COVERAGE" => Some(("LS019", "warning")),
+        "DORA_EXTREME_DISPERSION" | "DORA_DIRECTIONAL_STAGNATION" => Some(("LS020", "warning")),
         _ => None,
     }
 }

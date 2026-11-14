@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
+use crate::audit::pearson_correlation;
 use crate::linalg::{dot_slice, thin_qr_columns, transpose};
-use crate::safetensors::LoraLayer;
+use crate::safetensors::{LoraLayer, Tensor2D};
 
 #[derive(Debug, Clone)]
 pub struct LayerDiffReport {
@@ -18,6 +19,10 @@ pub struct LayerDiffReport {
     pub subspace_similarity_out: f64,
     pub subspace_similarity: f64,
     pub rank_delta: i64,
+    pub dora_l2_drift: Option<f64>,
+    pub dora_relative_drift: Option<f64>,
+    pub dora_max_channel_delta: Option<f64>,
+    pub dora_mag_dir_coupling: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +34,8 @@ pub struct AdapterDiffSummary {
     pub mean_subspace_similarity: f64,
     pub max_drift_layer: Option<String>,
     pub max_relative_drift: f64,
+    pub dora_shared_layers: usize,
+    pub mean_dora_relative_drift: Option<f64>,
 }
 
 fn compute_layer_scaling(base_name: &str, rank: usize, alphas: &BTreeMap<String, f64>) -> f64 {
@@ -48,6 +55,19 @@ pub fn diff_layer(
     scale_a: f64,
     layer_b: &LoraLayer,
     scale_b: f64,
+) -> Option<LayerDiffReport> {
+    diff_layer_with_dora(layer_a, scale_a, None, layer_b, scale_b, None)
+}
+
+/// Compute layer-level directional LoRA drift plus optional DoRA magnitude drift and
+/// per-channel magnitude-vs-directional coupling in `O(r^2 * (d_in + d_out))`.
+pub fn diff_layer_with_dora(
+    layer_a: &LoraLayer,
+    scale_a: f64,
+    dora_a: Option<&Tensor2D>,
+    layer_b: &LoraLayer,
+    scale_b: f64,
+    dora_b: Option<&Tensor2D>,
 ) -> Option<LayerDiffReport> {
     if layer_a.d_out() != layer_b.d_out() || layer_a.d_in() != layer_b.d_in() {
         return None;
@@ -188,6 +208,55 @@ pub fn diff_layer(
 
     let subspace_similarity = (subspace_sim_in * subspace_sim_out).sqrt().clamp(0.0, 1.0);
 
+    // 5. Optional DoRA magnitude drift & per-channel directional coupling
+    let (dora_l2_drift, dora_relative_drift, dora_max_channel_delta, dora_mag_dir_coupling) =
+        match (dora_a, dora_b) {
+            (Some(ta), Some(tb)) if ta.data.len() == d_out && tb.data.len() == d_out && d_out > 0 => {
+                let mut mag_a_sq = 0.0;
+                let mut mag_diff_sq = 0.0;
+                let mut max_delta = 0.0_f64;
+                let mut abs_mag_deltas = Vec::with_capacity(d_out);
+                let mut dir_row_deltas = Vec::with_capacity(d_out);
+
+                for k in 0..d_out {
+                    let ma_k = ta.data[k];
+                    let mb_k = tb.data[k];
+                    let dm = (mb_k - ma_k).abs();
+                    mag_a_sq += ma_k * ma_k;
+                    mag_diff_sq += dm * dm;
+                    max_delta = max_delta.max(dm);
+                    abs_mag_deltas.push(dm);
+
+                    // Exact ||(s_B B_B A_B - s_A B_A A_A)_{k,:}||_2 via Gram matrices ma, mb, p
+                    let ba_row = &layer_a.b.data[k * r_a..(k + 1) * r_a];
+                    let bb_row = &layer_b.b.data[k * r_b..(k + 1) * r_b];
+                    let mut ua_sq = 0.0;
+                    for i in 0..r_a {
+                        ua_sq += ba_row[i] * dot_slice(&ma[i * r_a..(i + 1) * r_a], ba_row);
+                    }
+                    let mut vb_sq = 0.0;
+                    for i in 0..r_b {
+                        vb_sq += bb_row[i] * dot_slice(&mb[i * r_b..(i + 1) * r_b], bb_row);
+                    }
+                    let mut cross_row = 0.0;
+                    for i in 0..r_a {
+                        cross_row += ba_row[i] * dot_slice(&p[i * r_b..(i + 1) * r_b], bb_row);
+                    }
+                    let row_diff_sq = (scale_a * scale_a * ua_sq
+                        + scale_b * scale_b * vb_sq
+                        - 2.0 * scale_a * scale_b * cross_row)
+                        .max(0.0);
+                    dir_row_deltas.push(row_diff_sq.sqrt());
+                }
+
+                let l2_d = mag_diff_sq.sqrt();
+                let rel_d = l2_d / mag_a_sq.sqrt().max(1e-12);
+                let coupling = pearson_correlation(&abs_mag_deltas, &dir_row_deltas);
+                (Some(l2_d), Some(rel_d), Some(max_delta), Some(coupling))
+            }
+            _ => (None, None, None, None),
+        };
+
     Some(LayerDiffReport {
         base_name: layer_a.base_name.clone(),
         rank_a: r_a,
@@ -202,6 +271,10 @@ pub fn diff_layer(
         subspace_similarity_out: subspace_sim_out,
         subspace_similarity,
         rank_delta: (r_b as i64) - (r_a as i64),
+        dora_l2_drift,
+        dora_relative_drift,
+        dora_max_channel_delta,
+        dora_mag_dir_coupling,
     })
 }
 
@@ -211,6 +284,27 @@ pub fn diff_adapters(
     alphas_a: &BTreeMap<String, f64>,
     layers_b: &[LoraLayer],
     alphas_b: &BTreeMap<String, f64>,
+) -> AdapterDiffSummary {
+    let empty_dora = BTreeMap::new();
+    diff_adapters_with_dora(
+        layers_a,
+        alphas_a,
+        &empty_dora,
+        layers_b,
+        alphas_b,
+        &empty_dora,
+    )
+}
+
+/// Diff two LoRA/DoRA adapters across all layers, decomposing directional `B*A` Frobenius/subspace
+/// drift from DoRA `lora_magnitude_vector` channel rescaling drift.
+pub fn diff_adapters_with_dora(
+    layers_a: &[LoraLayer],
+    alphas_a: &BTreeMap<String, f64>,
+    dora_a: &BTreeMap<String, (String, Tensor2D)>,
+    layers_b: &[LoraLayer],
+    alphas_b: &BTreeMap<String, f64>,
+    dora_b: &BTreeMap<String, (String, Tensor2D)>,
 ) -> AdapterDiffSummary {
     let mut map_a: BTreeMap<&str, &LoraLayer> = BTreeMap::new();
     for l in layers_a {
@@ -230,7 +324,9 @@ pub fn diff_adapters(
         if let Some(layer_b) = map_b.get(name) {
             let scale_a = compute_layer_scaling(name, layer_a.rank(), alphas_a);
             let scale_b = compute_layer_scaling(name, layer_b.rank(), alphas_b);
-            if let Some(report) = diff_layer(layer_a, scale_a, layer_b, scale_b) {
+            let da = dora_a.get(*name).map(|(_, t)| t);
+            let db = dora_b.get(*name).map(|(_, t)| t);
+            if let Some(report) = diff_layer_with_dora(layer_a, scale_a, da, layer_b, scale_b, db) {
                 shared_reports.push(report);
             }
         } else {
@@ -262,6 +358,17 @@ pub fn diff_adapters(
         (None, 0.0)
     };
 
+    let dora_rel_vals: Vec<f64> = shared_reports
+        .iter()
+        .filter_map(|r| r.dora_relative_drift)
+        .collect();
+    let dora_shared_layers = dora_rel_vals.len();
+    let mean_dora_relative_drift = if !dora_rel_vals.is_empty() {
+        Some(dora_rel_vals.iter().sum::<f64>() / (dora_rel_vals.len() as f64))
+    } else {
+        None
+    };
+
     AdapterDiffSummary {
         shared_layers: shared_reports,
         added_layers,
@@ -270,6 +377,8 @@ pub fn diff_adapters(
         mean_subspace_similarity,
         max_drift_layer,
         max_relative_drift,
+        dora_shared_layers,
+        mean_dora_relative_drift,
     }
 }
 
@@ -287,6 +396,13 @@ fn escape_json(s: &str) -> String {
         }
     }
     out
+}
+
+fn opt_json_f64(val: Option<f64>) -> String {
+    match val {
+        Some(v) if v.is_finite() => format!("{:.6}", v),
+        _ => "null".to_string(),
+    }
 }
 
 pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
@@ -308,7 +424,11 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
       "relative_drift": {:.6},
       "subspace_similarity_in": {:.6},
       "subspace_similarity_out": {:.6},
-      "subspace_similarity": {:.6}
+      "subspace_similarity": {:.6},
+      "dora_l2_drift": {},
+      "dora_relative_drift": {},
+      "dora_max_channel_delta": {},
+      "dora_mag_dir_coupling": {}
     }}"#,
                 escape_json(&r.base_name),
                 r.rank_a,
@@ -322,7 +442,11 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
                 r.relative_drift,
                 r.subspace_similarity_in,
                 r.subspace_similarity_out,
-                r.subspace_similarity
+                r.subspace_similarity,
+                opt_json_f64(r.dora_l2_drift),
+                opt_json_f64(r.dora_relative_drift),
+                opt_json_f64(r.dora_max_channel_delta),
+                opt_json_f64(r.dora_mag_dir_coupling),
             )
         })
         .collect();
@@ -348,6 +472,8 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
   "mean_subspace_similarity": {:.6},
   "max_drift_layer": {},
   "max_relative_drift": {:.6},
+  "dora_shared_layers": {},
+  "mean_dora_relative_drift": {},
   "layers": [
     {}
   ],
@@ -365,6 +491,8 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
             .as_ref()
             .map_or("null".to_string(), |s| format!("\"{}\"", escape_json(s))),
         summary.max_relative_drift,
+        summary.dora_shared_layers,
+        opt_json_f64(summary.mean_dora_relative_drift),
         layers_json.join(",\n    "),
         added_json.join(", "),
         removed_json.join(", ")
@@ -420,6 +548,12 @@ pub fn render_diff_table(summary: &AdapterDiffSummary) -> String {
         out.push_str(&format!(
             "  Maximum Drifting Layer: {} (rel_drift: {:.4})\n",
             max_l, summary.max_relative_drift
+        ));
+    }
+    if let Some(mean_dora) = summary.mean_dora_relative_drift {
+        out.push_str(&format!(
+            "  DoRA Magnitude Drift: {} shared DoRA layer(s), mean rel_drift {:.4}\n",
+            summary.dora_shared_layers, mean_dora
         ));
     }
 

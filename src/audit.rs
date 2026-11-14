@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::linalg::qr_core_singular_values;
-use crate::safetensors::{ LoraLayer, PeftAdapterConfig, Tensor2D };
+use crate::linalg::{dot_slice, qr_core_singular_values};
+use crate::safetensors::{LoraLayer, PeftAdapterConfig, Tensor2D};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerHealth {
@@ -308,13 +308,95 @@ pub struct AlphaScalingSummary {
     pub status: &'static str,
 }
 
+/// Per-layer DoRA (Weight-Decomposed Low-Rank Adaptation, Liu et al. ICML 2024) magnitude vs
+/// directional spectral diagnostics computed in `O(r^2 * (d_in + d_out))` without dense matrices.
+#[derive(Debug, Clone)]
+pub struct DoraLayerDiagnostics {
+    pub base_name: String,
+    pub d_out: usize,
+    pub mag_mean: f64,
+    pub mag_std: f64,
+    pub mag_min: f64,
+    pub mag_max: f64,
+    pub mag_cv: f64,
+    pub invalid_channels: usize,
+    pub directional_row_norm_mean: f64,
+    pub dead_directional_rows: usize,
+    pub mag_dir_correlation: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AdapterIntegrityReport {
     pub status: &'static str,
     pub dead_lora_layers: usize,
     pub embedding_entries: Vec<EmbeddingAuditEntry>,
     pub alpha_summary: AlphaScalingSummary,
+    pub dora_diagnostics: Vec<DoraLayerDiagnostics>,
     pub issues: Vec<IntegrityIssue>,
+}
+
+/// Compute exact output-channel directional Euclidean norms `||(B * A)_{i,:}||_2` for `i in 0..d_out`
+/// via the `r x r` Gram matrix `M_A = A * A^T` in `O(r^2 * (d_in + d_out))` time and `O(r^2)` memory.
+pub fn compute_layer_row_directional_norms(layer: &LoraLayer) -> Vec<f64> {
+    let r = layer.rank();
+    let d_in = layer.d_in();
+    let d_out = layer.d_out();
+    if r == 0 || d_in == 0 || d_out == 0 {
+        return vec![0.0; d_out];
+    }
+
+    let mut ma = vec![0.0; r * r];
+    for i in 0..r {
+        let row_i = &layer.a.data[i * d_in..(i + 1) * d_in];
+        for j in i..r {
+            let row_j = &layer.a.data[j * d_in..(j + 1) * d_in];
+            let dot = dot_slice(row_i, row_j);
+            ma[i * r + j] = dot;
+            ma[j * r + i] = dot;
+        }
+    }
+
+    let mut out = Vec::with_capacity(d_out);
+    for k in 0..d_out {
+        let b_row = &layer.b.data[k * r..(k + 1) * r];
+        let mut norm_sq = 0.0;
+        for i in 0..r {
+            let bi = b_row[i];
+            if bi == 0.0 {
+                continue;
+            }
+            let ma_row = &ma[i * r..(i + 1) * r];
+            norm_sq += bi * dot_slice(ma_row, b_row);
+        }
+        out.push(norm_sq.max(0.0).sqrt());
+    }
+    out
+}
+
+pub(crate) fn pearson_correlation(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len().min(ys.len());
+    if n < 2 {
+        return 0.0;
+    }
+    let nf = n as f64;
+    let mx: f64 = xs[..n].iter().sum::<f64>() / nf;
+    let my: f64 = ys[..n].iter().sum::<f64>() / nf;
+    let mut cov = 0.0;
+    let mut vx = 0.0;
+    let mut vy = 0.0;
+    for i in 0..n {
+        let dx = xs[i] - mx;
+        let dy = ys[i] - my;
+        cov += dx * dy;
+        vx += dx * dx;
+        vy += dy * dy;
+    }
+    let denom = (vx * vy).sqrt();
+    if !denom.is_finite() || denom <= 1e-24 {
+        0.0
+    } else {
+        (cov / denom).clamp(-1.0, 1.0)
+    }
 }
 
 /// Classify whether a tensor key or LoRA `base_name` targets a token embedding or unembedding head.
@@ -736,7 +818,7 @@ pub fn audit_adapter_integrity(
         }
     }
 
-    // 5. DoRA magnitude vector health check
+    // 5. DoRA magnitude vector & directional coupling diagnostics
     if peft_config.map_or(false, |c| c.use_dora) && dora_scales.is_empty() {
         alpha_anomaly = true;
         issues.push(IntegrityIssue {
@@ -749,7 +831,41 @@ pub fn audit_adapter_integrity(
 
     let layer_by_name: BTreeMap<&str, &LoraLayer> =
         layers.iter().map(|l| (l.base_name.as_str(), l)).collect();
+
+    let matched_dora_count = layers
+        .iter()
+        .filter(|l| dora_scales.contains_key(&l.base_name))
+        .count();
+    if matched_dora_count > 0 && matched_dora_count < layers.len() {
+        let non_embed_missing: Vec<&str> = layers
+            .iter()
+            .filter(|l| {
+                !dora_scales.contains_key(&l.base_name)
+                    && !l.a_key.contains("lora_embedding_")
+                    && classify_token_module(&l.base_name) != Some("embedding")
+            })
+            .map(|l| l.base_name.as_str())
+            .collect();
+        if !non_embed_missing.is_empty() {
+            alpha_anomaly = true;
+            issues.push(IntegrityIssue {
+                code: "PARTIAL_DORA_COVERAGE",
+                severity: IssueSeverity::Warning,
+                subject: non_embed_missing[0].to_string(),
+                message: format!(
+                    "Partial DoRA magnitude vector coverage: {}/{} LoRA layers carry lora_magnitude_vector ({} linear layer(s) missing, e.g. {})",
+                    matched_dora_count,
+                    layers.len(),
+                    non_embed_missing.len(),
+                    non_embed_missing[0]
+                ),
+            });
+        }
+    }
+
+    let mut dora_diagnostics: Vec<DoraLayerDiagnostics> = Vec::new();
     for (base_name, (_key, mag_tensor)) in dora_scales {
+        let mut shape_ok = false;
         if let Some(layer) = layer_by_name.get(base_name.as_str()) {
             if mag_tensor.data.len() != layer.d_out() {
                 alpha_anomaly = true;
@@ -763,6 +879,8 @@ pub fn audit_adapter_integrity(
                         layer.d_out()
                     ),
                 });
+            } else {
+                shape_ok = true;
             }
         }
         let bad_vals = mag_tensor
@@ -774,14 +892,112 @@ pub fn audit_adapter_integrity(
             alpha_anomaly = true;
             issues.push(IntegrityIssue {
                 code: "INVALID_DORA_MAGNITUDE",
-                severity: IssueSeverity::Warning,
+                severity: IssueSeverity::Critical,
                 subject: base_name.clone(),
                 message: format!(
-                    "DoRA magnitude vector contains {} zero, negative, or non-finite entries out of {}",
+                    "DoRA magnitude vector contains {} zero, negative, or non-finite entries out of {} (zeroes out or corrupts entire output channels)",
                     bad_vals,
                     mag_tensor.data.len()
                 ),
             });
+        }
+
+        if let Some(layer) = layer_by_name.get(base_name.as_str()) {
+            if shape_ok && !mag_tensor.data.is_empty() {
+                let d_out = layer.d_out();
+                let finite_vals: Vec<f64> = mag_tensor
+                    .data
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite() && *v > 1e-8)
+                    .collect();
+                let (mag_mean, mag_std, mag_min, mag_max, mag_cv) = if !finite_vals.is_empty() {
+                    let nf = finite_vals.len() as f64;
+                    let mean = finite_vals.iter().sum::<f64>() / nf;
+                    let var = finite_vals
+                        .iter()
+                        .map(|&v| {
+                            let d = v - mean;
+                            d * d
+                        })
+                        .sum::<f64>()
+                        / nf;
+                    let std = var.sqrt();
+                    let min_v = finite_vals.iter().copied().fold(f64::INFINITY, f64::min);
+                    let max_v = finite_vals
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let cv = if mean.abs() > 1e-12 {
+                        std / mean.abs()
+                    } else {
+                        0.0
+                    };
+                    (mean, std, min_v, max_v, cv)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0, 0.0)
+                };
+
+                let row_norms = compute_layer_row_directional_norms(layer);
+                let dir_mean = row_norms.iter().sum::<f64>() / (d_out.max(1) as f64);
+                let dead_dir_rows = row_norms
+                    .iter()
+                    .filter(|&&u| !u.is_finite() || u <= 1e-8)
+                    .count();
+                let corr = if bad_vals == 0 {
+                    pearson_correlation(&mag_tensor.data, &row_norms)
+                } else {
+                    0.0
+                };
+
+                if bad_vals == 0 && (mag_cv > 1.5 || (mag_min > 1e-8 && (mag_max / mag_min) > 50.0))
+                {
+                    alpha_anomaly = true;
+                    issues.push(IntegrityIssue {
+                        code: "DORA_EXTREME_DISPERSION",
+                        severity: IssueSeverity::Warning,
+                        subject: base_name.clone(),
+                        message: format!(
+                            "DoRA magnitude vector exhibits extreme channel dispersion (min={:.4}, max={:.4}, max/min={:.1}x, cv={:.3}), risking output channel saturation",
+                            mag_min,
+                            mag_max,
+                            mag_max / mag_min.max(1e-12),
+                            mag_cv
+                        ),
+                    });
+                } else if bad_vals == 0
+                    && (dir_mean <= 1e-7 || dead_dir_rows * 2 >= d_out)
+                    && mag_cv > 0.05
+                {
+                    alpha_anomaly = true;
+                    issues.push(IntegrityIssue {
+                        code: "DORA_DIRECTIONAL_STAGNATION",
+                        severity: IssueSeverity::Warning,
+                        subject: base_name.clone(),
+                        message: format!(
+                            "DoRA directional update B*A is stagnant ({}/{} dead output rows, mean row norm {:.2e}) while lora_magnitude_vector diverged (cv={:.3}); low-rank directional subspace failed to train",
+                            dead_dir_rows,
+                            d_out,
+                            dir_mean,
+                            mag_cv
+                        ),
+                    });
+                }
+
+                dora_diagnostics.push(DoraLayerDiagnostics {
+                    base_name: base_name.clone(),
+                    d_out,
+                    mag_mean,
+                    mag_std,
+                    mag_min,
+                    mag_max,
+                    mag_cv,
+                    invalid_channels: bad_vals,
+                    directional_row_norm_mean: dir_mean,
+                    dead_directional_rows: dead_dir_rows,
+                    mag_dir_correlation: corr,
+                });
+            }
         }
     }
 
@@ -813,6 +1029,7 @@ pub fn audit_adapter_integrity(
             dora_tensor_count: dora_scales.len(),
             status: alpha_status,
         },
+        dora_diagnostics,
         issues,
     }
 }
@@ -921,6 +1138,31 @@ pub fn render_audit_json(
             e.trailing_zero_rows,
             e.dead_lora_b_cols,
             e.dead_lora_a_rows,
+            comma
+        ));
+    }
+    lines.push("  ],".to_string());
+
+    lines.push("  \"dora_diagnostics\": [".to_string());
+    for (idx, d) in integrity.dora_diagnostics.iter().enumerate() {
+        let comma = if idx + 1 < integrity.dora_diagnostics.len() {
+            ","
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "    {{\"layer\": \"{}\", \"d_out\": {}, \"mag_mean\": {:.6}, \"mag_std\": {:.6}, \"mag_min\": {:.6}, \"mag_max\": {:.6}, \"mag_cv\": {:.6}, \"invalid_channels\": {}, \"directional_row_norm_mean\": {:.6}, \"dead_directional_rows\": {}, \"mag_dir_correlation\": {:.6}}}{}",
+            json_escape_audit(&d.base_name),
+            d.d_out,
+            d.mag_mean,
+            d.mag_std,
+            d.mag_min,
+            d.mag_max,
+            d.mag_cv,
+            d.invalid_channels,
+            d.directional_row_norm_mean,
+            d.dead_directional_rows,
+            d.mag_dir_correlation,
             comma
         ));
     }

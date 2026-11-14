@@ -2240,4 +2240,337 @@ mod tests {
         assert_eq!(res.rank_pattern.get("model.layers.0.down_proj"), Some(&6));
         assert!(res.global_retained_energy > 0.999999);
     }
+
+    #[test]
+    fn test_dora_1d_safetensors_roundtrip_filter_and_weighted_merge() {
+        let mut rng = Rng64::new(11001);
+        let d_out = 24;
+        let d_in = 16;
+        let r = 4;
+
+        let q_layer = LoraLayer {
+            base_name: "base_model.model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "base_model.model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "base_model.model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+        let k_layer = LoraLayer {
+            base_name: "base_model.model.layers.0.self_attn.k_proj".to_string(),
+            a_key: "base_model.model.layers.0.self_attn.k_proj.lora_A.weight".to_string(),
+            b_key: "base_model.model.layers.0.self_attn.k_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+
+        // True 1D [d_out] tensors represented with rows=d_out, cols=1
+        let dora_q = Tensor2D {
+            rows: d_out,
+            cols: 1,
+            dtype: DType::F32,
+            data: (0..d_out).map(|i| 1.0 + 0.05 * (i as f64)).collect(),
+        };
+        let dora_k = Tensor2D {
+            rows: d_out,
+            cols: 1,
+            dtype: DType::F32,
+            data: (0..d_out).map(|i| 2.0 + 0.02 * (i as f64)).collect(),
+        };
+
+        let mut map = layers_to_tensor_map(&[q_layer.clone(), k_layer]);
+        map.insert(
+            "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.weight".to_string(),
+            dora_q.clone(),
+        );
+        map.insert(
+            "base_model.model.layers.0.self_attn.k_proj.magnitude".to_string(),
+            dora_k,
+        );
+
+        let tmp = std::env::temp_dir().join("test_dora_1d_v110.safetensors");
+        write_safetensors(&tmp, &map).expect("write 1d dora safetensors");
+        let raw_bytes = std::fs::read(&tmp).expect("read raw bytes");
+        let header_len = u64::from_le_bytes(raw_bytes[0..8].try_into().unwrap()) as usize;
+        let header_str = std::str::from_utf8(&raw_bytes[8..8 + header_len]).unwrap();
+        assert!(
+            header_str.contains(
+                "\"base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.weight\":{\"dtype\":\"F32\",\"shape\":[24]"
+            ),
+            "expected 1D shape [24] in header, got {}",
+            header_str
+        );
+
+        let loaded = read_safetensors(&tmp).expect("reload 1d dora safetensors");
+        let _ = std::fs::remove_file(&tmp);
+        let extracted = extract_dora_scales(&loaded);
+        assert_eq!(extracted.len(), 2);
+
+        // Filtering against retained [q_layer] drops k_proj orphan DoRA vector
+        let filtered =
+            crate::safetensors::filter_dora_scales_for_layers(&extracted, std::slice::from_ref(&q_layer));
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.contains_key("base_model.model.layers.0.self_attn.q_proj"));
+
+        // Weighted merge preserves scale invariance on identical vectors and convex-combines distinct vectors
+        let mut d2 = BTreeMap::new();
+        let dora_q_shifted = Tensor2D {
+            rows: d_out,
+            cols: 1,
+            dtype: DType::F32,
+            data: dora_q.data.iter().map(|&v| v + 1.0).collect(),
+        };
+        d2.insert(
+            "base_model.model.layers.0.self_attn.q_proj".to_string(),
+            (
+                "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector".to_string(),
+                dora_q_shifted,
+            ),
+        );
+        let merged_dora = crate::safetensors::merge_dora_scales(&[filtered, d2], &[3.0, 1.0]);
+        let m_vec = &merged_dora["base_model.model.layers.0.self_attn.q_proj"].1;
+        for (idx, (&orig, &mv)) in dora_q.data.iter().zip(m_vec.data.iter()).enumerate() {
+            assert!(
+                (mv - (orig + 0.25)).abs() < 1e-6,
+                "channel {} expected {}, got {}",
+                idx,
+                orig + 0.25,
+                mv
+            );
+        }
+    }
+
+    #[test]
+    fn test_dora_audit_row_norms_ls019_ls020_sarif_diagnostics() {
+        let mut rng = Rng64::new(11002);
+        let d_out = 20;
+        let d_in = 16;
+        let r = 4;
+
+        let healthy_layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+
+        // Verify O(r^2 d) Gram-matrix row norms match exact dense B*A row Euclidean norms
+        let fast_norms = crate::audit::compute_layer_row_directional_norms(&healthy_layer);
+        let dense = matmul(&healthy_layer.b, &healthy_layer.a);
+        for row in 0..d_out {
+            let slice = &dense.data[row * d_in..(row + 1) * d_in];
+            let dense_norm = slice.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            assert!(
+                (fast_norms[row] - dense_norm).abs() < 1e-11,
+                "row {} norm mismatch: fast={} vs dense={}",
+                row,
+                fast_norms[row],
+                dense_norm
+            );
+        }
+
+        // Layer 2: dead directional B*A (75% zero rows) with diverging DoRA magnitude -> LS020
+        let mut stag_b = random_matrix(d_out, r, &mut rng, DType::F32);
+        for row in 0..15 {
+            for col in 0..r {
+                stag_b.set(row, col, 0.0);
+            }
+        }
+        let stagnant_layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.k_proj".to_string(),
+            a_key: "model.layers.0.self_attn.k_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.k_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: stag_b,
+        };
+
+        // Layer 3: invalid collapsed zero channel in DoRA magnitude -> LS019
+        let collapsed_mag_layer = LoraLayer {
+            base_name: "model.layers.0.mlp.up_proj".to_string(),
+            a_key: "model.layers.0.mlp.up_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.up_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+
+        let layers = vec![healthy_layer, stagnant_layer, collapsed_mag_layer];
+        let all_tensors = layers_to_tensor_map(&layers);
+        let mut dora_scales = BTreeMap::new();
+        // Extreme 100x channel dispersion on q_proj -> LS020 (DORA_EXTREME_DISPERSION)
+        let mut disp_data = vec![1.0; d_out];
+        disp_data[0] = 100.0;
+        dora_scales.insert(
+            "model.layers.0.self_attn.q_proj".to_string(),
+            (
+                "model.layers.0.self_attn.q_proj.lora_magnitude_vector".to_string(),
+                Tensor2D {
+                    rows: d_out,
+                    cols: 1,
+                    dtype: DType::F32,
+                    data: disp_data,
+                },
+            ),
+        );
+        // Stagnant directional layer k_proj -> LS020 (DORA_DIRECTIONAL_STAGNATION)
+        dora_scales.insert(
+            "model.layers.0.self_attn.k_proj".to_string(),
+            (
+                "model.layers.0.self_attn.k_proj.lora_magnitude_vector".to_string(),
+                Tensor2D {
+                    rows: d_out,
+                    cols: 1,
+                    dtype: DType::F32,
+                    data: (0..d_out).map(|i| 0.8 + 0.05 * (i as f64)).collect(),
+                },
+            ),
+        );
+        // Zero channel on up_proj -> LS019 (INVALID_DORA_MAGNITUDE)
+        let mut zero_ch = vec![1.0; d_out];
+        zero_ch[3] = 0.0;
+        dora_scales.insert(
+            "model.layers.0.mlp.up_proj".to_string(),
+            (
+                "model.layers.0.mlp.up_proj.lora_magnitude_vector".to_string(),
+                Tensor2D {
+                    rows: d_out,
+                    cols: 1,
+                    dtype: DType::F32,
+                    data: zero_ch,
+                },
+            ),
+        );
+
+        let summary = audit_adapter(&layers);
+        let integrity =
+            audit_adapter_integrity(&layers, &all_tensors, &BTreeMap::new(), &dora_scales, None);
+        assert_eq!(integrity.dora_diagnostics.len(), 3);
+        assert!(integrity.issues.iter().any(|i| i.code == "DORA_EXTREME_DISPERSION"));
+        assert!(integrity
+            .issues
+            .iter()
+            .any(|i| i.code == "DORA_DIRECTIONAL_STAGNATION"));
+        assert!(integrity
+            .issues
+            .iter()
+            .any(|i| i.code == "INVALID_DORA_MAGNITUDE"));
+
+        let audit_json = crate::audit::render_audit_json("dora.safetensors", &summary, &integrity);
+        assert!(audit_json.contains("\"dora_diagnostics\": ["));
+        assert!(!audit_json.contains('\u{2014}'));
+
+        let sarif =
+            crate::sarif::build_audit_sarif(Some(&summary), Some(&integrity), "dora.safetensors", "1.1.0");
+        assert!(sarif.contains("\"ruleId\": \"LS019\""));
+        assert!(sarif.contains("\"ruleId\": \"LS020\""));
+        assert!(sarif.contains("\"version\": \"1.1.0\""));
+        assert!(!sarif.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn test_diff_adapters_with_dora_directional_vs_magnitude_coupling() {
+        let mut rng = Rng64::new(11003);
+        let d_out = 18;
+        let d_in = 16;
+        let r = 4;
+
+        let a1 = random_matrix(r, d_in, &mut rng, DType::F32);
+        let b1 = random_matrix(d_out, r, &mut rng, DType::F32);
+        // Adapter B scales each row k of B by (1 + 0.1 * k) so directional row delta grows monotonically with k
+        let mut b2 = b1.clone();
+        for k in 0..d_out {
+            let mult = 1.0 + 0.1 * (k as f64);
+            for col in 0..r {
+                b2.set(k, col, b1.get(k, col) * mult);
+            }
+        }
+        let l1 = LoraLayer {
+            base_name: "model.layers.0.self_attn.v_proj".to_string(),
+            a_key: "model.layers.0.self_attn.v_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.v_proj.lora_B.weight".to_string(),
+            a: a1.clone(),
+            b: b1,
+        };
+        let l2 = LoraLayer {
+            base_name: "model.layers.0.self_attn.v_proj".to_string(),
+            a_key: "model.layers.0.self_attn.v_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.v_proj.lora_B.weight".to_string(),
+            a: a1,
+            b: b2,
+        };
+
+        // Construct DoRA magnitude vectors where |m_B[k] - m_A[k]| decreases with k (negative coupling, as in DoRA ICML 2024)
+        let mag_a = vec![2.0; d_out];
+        let mut mag_b = Vec::with_capacity(d_out);
+        for k in 0..d_out {
+            let dense_row_delta = {
+                let dw1 = matmul(&l1.b, &l1.a);
+                let dw2 = matmul(&l2.b, &l2.a);
+                let s1 = &dw1.data[k * d_in..(k + 1) * d_in];
+                let s2 = &dw2.data[k * d_in..(k + 1) * d_in];
+                s1.iter()
+                    .zip(s2.iter())
+                    .map(|(x, y)| (y - x) * (y - x))
+                    .sum::<f64>()
+                    .sqrt()
+            };
+            mag_b.push(2.0 + (2.0 - dense_row_delta).max(0.05));
+        }
+
+        let mut dora_a = BTreeMap::new();
+        dora_a.insert(
+            l1.base_name.clone(),
+            (
+                format!("{}.lora_magnitude_vector", l1.base_name),
+                Tensor2D {
+                    rows: d_out,
+                    cols: 1,
+                    dtype: DType::F32,
+                    data: mag_a.clone(),
+                },
+            ),
+        );
+        let mut dora_b = BTreeMap::new();
+        dora_b.insert(
+            l2.base_name.clone(),
+            (
+                format!("{}.lora_magnitude_vector", l2.base_name),
+                Tensor2D {
+                    rows: d_out,
+                    cols: 1,
+                    dtype: DType::F32,
+                    data: mag_b.clone(),
+                },
+            ),
+        );
+
+        let summary = crate::diff::diff_adapters_with_dora(
+            &[l1],
+            &BTreeMap::new(),
+            &dora_a,
+            &[l2],
+            &BTreeMap::new(),
+            &dora_b,
+        );
+        assert_eq!(summary.dora_shared_layers, 1);
+        let rep = &summary.shared_layers[0];
+        let expected_l2 = mag_a
+            .iter()
+            .zip(mag_b.iter())
+            .map(|(a, b)| (b - a) * (b - a))
+            .sum::<f64>()
+            .sqrt();
+        assert!((rep.dora_l2_drift.unwrap() - expected_l2).abs() < 1e-11);
+        assert!(
+            rep.dora_mag_dir_coupling.unwrap() < -0.95,
+            "expected strong negative coupling, got {}",
+            rep.dora_mag_dir_coupling.unwrap()
+        );
+
+        let diff_json = crate::diff::render_diff_json(&summary);
+        let diff_table = crate::diff::render_diff_table(&summary);
+        assert!(diff_json.contains("\"dora_shared_layers\": 1"));
+        assert!(diff_table.contains("DoRA Magnitude Drift:"));
+        assert!(!diff_json.contains('\u{2014}'));
+        assert!(!diff_table.contains('\u{2014}'));
+    }
 }
