@@ -12,6 +12,10 @@ use loraspectra::diff::{diff_adapters, render_diff_json, render_diff_table};
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
+use loraspectra::merge_check::{
+    analyze_multi_adapter_merge, render_merge_check_json, render_merge_check_table,
+    AdapterMergeInput,
+};
 use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
 use loraspectra::safetensors::{
     bake_adapter_scaling, cast_layers_dtype, convert_layers_key_format, extract_dora_scales,
@@ -20,11 +24,11 @@ use loraspectra::safetensors::{
     write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, PeftAdapterConfig,
     Tensor2D,
 };
-use loraspectra::sarif::build_audit_sarif;
+use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif};
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v0.8.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+        "loraspectra v0.9.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -38,6 +42,7 @@ USAGE:
   loraspectra compress <input_or_hf_uri> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
+  loraspectra merge-check <in_1> <in_2> [in_3 ...] [--weights W1:W2[:W3...]] [--json] [--sarif <output.sarif>] [--fail-on-conflict]
   loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]"
     );
 }
@@ -258,7 +263,7 @@ fn main() {
             );
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "0.8.0");
+                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "0.9.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                 } else {
@@ -722,6 +727,110 @@ fn main() {
                 println!("Automated Merge Recommendation:");
                 println!("  Rationale: {}", summary.recommendation.rationale);
                 println!("  Command:   {}", summary.recommendation.cli_command);
+            }
+        }
+        "merge-check" => {
+            let mut positional: Vec<String> = Vec::new();
+            let mut custom_weights: Option<Vec<f64>> = None;
+            let mut json_mode = false;
+            let mut sarif_opt: Option<String> = None;
+            let mut fail_on_conflict = false;
+
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--weights" if i + 1 < args.len() => {
+                        let parsed: Vec<f64> = args[i + 1]
+                            .split(':')
+                            .map(|s| s.parse::<f64>().expect("Invalid float in --weights"))
+                            .collect();
+                        custom_weights = Some(parsed);
+                        i += 2;
+                    }
+                    "--json" => {
+                        json_mode = true;
+                        i += 1;
+                    }
+                    "--sarif" if i + 1 < args.len() => {
+                        sarif_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--fail-on-conflict" => {
+                        fail_on_conflict = true;
+                        i += 1;
+                    }
+                    arg if !arg.starts_with("--") => {
+                        positional.push(arg.to_string());
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+
+            if positional.len() < 2 {
+                print_usage();
+                process::exit(1);
+            }
+
+            let weights = match custom_weights {
+                Some(w) => {
+                    if w.len() != positional.len() {
+                        eprintln!(
+                            "Error: --weights count ({}) must match adapter count ({})",
+                            w.len(),
+                            positional.len()
+                        );
+                        process::exit(1);
+                    }
+                    w
+                }
+                None => vec![1.0; positional.len()],
+            };
+
+            let mut inputs = Vec::with_capacity(positional.len());
+            for (src, &w) in positional.iter().zip(weights.iter()) {
+                let (_, layers, alphas, _, peft_config) =
+                    load_full_adapter_bundle_or_exit(src, None);
+                inputs.push(AdapterMergeInput {
+                    name: src.clone(),
+                    layers,
+                    alphas,
+                    peft_config,
+                    weight: w,
+                });
+            }
+
+            let summary = match analyze_multi_adapter_merge(&inputs) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("merge-check failed: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            if let Some(ref s_path) = sarif_opt {
+                let sarif_str = build_merge_check_sarif(&summary, "0.9.0");
+                if let Err(e) = std::fs::write(s_path, &sarif_str) {
+                    eprintln!("Error writing SARIF report to {}: {}", s_path, e);
+                    process::exit(1);
+                }
+            }
+
+            if json_mode {
+                println!("{}", render_merge_check_json(&summary));
+            } else {
+                print!("{}", render_merge_check_table(&summary));
+                if let Some(ref s_path) = sarif_opt {
+                    println!("Saved OASIS SARIF v2.1.0 merge-check report to {}", s_path);
+                }
+            }
+
+            if fail_on_conflict
+                && (!summary.incompatible_shapes.is_empty()
+                    || summary.destructive_layer_count > 0
+                    || summary.advisor.risk_level == "HIGH")
+            {
+                process::exit(2);
             }
         }
         "merge" => {

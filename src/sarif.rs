@@ -1,4 +1,5 @@
 use crate::audit::{AdapterAuditSummary, AdapterIntegrityReport, IssueSeverity, LayerHealth};
+use crate::merge_check::MultiMergeCheckSummary;
 
 pub struct SarifRuleDefinition {
     pub id: &'static str,
@@ -106,6 +107,34 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         short_description: "LoRA layer is over-parameterized and compressible",
         full_description: "The layer requires 55% or fewer nominal rank modes to retain 99% spectral energy, indicating excessive rank allocation.",
         default_level: "note",
+    },
+    SarifRuleDefinition {
+        id: "LS015",
+        name: "MultiAdapterSubspaceCollision",
+        short_description: "High cross-adapter singular subspace collision prior to merging",
+        full_description: "Multiple LoRA adapters project onto overlapping singular subspaces, risking mode interference unless merged with orthogonalized SVD.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS016",
+        name: "MergeNormInflation",
+        short_description: "Multi-adapter linear merge inflates Frobenius or spectral norm",
+        full_description: "Summing weighted adapter updates inflates layer Frobenius or operator norm well above constituent adapters, risking logit saturation without --preserve-norm.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS017",
+        name: "DestructiveSignCancellation",
+        short_description: "Opposing adapter updates cause destructive sign cancellation",
+        full_description: "Shared LoRA layers exhibit negative Frobenius cosine similarity, causing linear merging to cancel task-specific updates.",
+        default_level: "error",
+    },
+    SarifRuleDefinition {
+        id: "LS018",
+        name: "IncompatibleMergeShape",
+        short_description: "Incompatible LoRA layer dimensions across adapters",
+        full_description: "Shared module names map to mismatched (d_out, d_in) tensor shapes across adapters, preventing safe weight merging.",
+        default_level: "error",
     },
 ];
 
@@ -259,6 +288,184 @@ pub fn build_audit_sarif(
                 issue.severity.as_str()
             ));
         }
+    }
+
+    let rules_rendered: Vec<String> = LORASPECTRA_SARIF_RULES
+        .iter()
+        .map(|r| {
+            format!(
+                r#"{{
+            "id": "{}",
+            "name": "{}",
+            "shortDescription": {{ "text": "{}" }},
+            "fullDescription": {{ "text": "{}" }},
+            "defaultConfiguration": {{ "level": "{}" }},
+            "helpUri": "https://github.com/SalyyS1/loraspectra#sarif-diagnostics"
+          }}"#,
+                r.id,
+                r.name,
+                escape_json(r.short_description),
+                escape_json(r.full_description),
+                r.default_level
+            )
+        })
+        .collect();
+
+    format!(
+        r#"{{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {{
+      "tool": {{
+        "driver": {{
+          "name": "loraspectra",
+          "version": "{}",
+          "informationUri": "https://github.com/SalyyS1/loraspectra",
+          "rules": [
+            {}
+          ]
+        }}
+      }},
+      "results": [
+        {}
+      ]
+    }}
+  ]
+}}
+"#,
+        escape_json(tool_version),
+        rules_rendered.join(",\n            "),
+        results_json.join(",\n        ")
+    )
+}
+
+pub fn build_merge_check_sarif(
+    summary: &MultiMergeCheckSummary,
+    tool_version: &str,
+) -> String {
+    let mut results_json = Vec::new();
+    let primary_uri = summary
+        .adapter_names
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("merged_adapter.safetensors");
+
+    for inc in &summary.incompatible_shapes {
+        let msg = format!(
+            "Layer '{}' has incompatible shapes: {} ({}x{}) vs {} ({}x{})",
+            inc.base_name,
+            inc.adapter_a,
+            inc.shape_a.0,
+            inc.shape_a.1,
+            inc.adapter_b,
+            inc.shape_b.0,
+            inc.shape_b.1
+        );
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "LS018",
+        "level": "error",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ]
+      }}"#,
+            escape_json(&msg),
+            escape_json(&inc.adapter_b),
+            escape_json(&inc.base_name)
+        ));
+    }
+
+    for l in &summary.shared_layers {
+        let (rule_id, level, msg) = match l.status {
+            "DESTRUCTIVE_CANCELLATION" => (
+                "LS017",
+                "error",
+                format!(
+                    "Layer '{}' has destructive cross-adapter sign cancellation (min Frobenius cosine {:+.4}, orthogonal norm ratio {:.2}x)",
+                    l.base_name, l.min_pair_frobenius_cosine, l.orthogonal_inflation_ratio
+                ),
+            ),
+            "NORM_INFLATION" => (
+                "LS016",
+                "warning",
+                format!(
+                    "Layer '{}' inflates peak Frobenius norm by {:.2}x and spectral norm by {:.2}x across {} adapters",
+                    l.base_name,
+                    l.peak_inflation_ratio,
+                    l.spectral_inflation_ratio,
+                    l.adapter_indices.len()
+                ),
+            ),
+            "HIGH_SUBSPACE_COLLISION" => (
+                "LS015",
+                "warning",
+                format!(
+                    "Layer '{}' exhibits {:.1}% multi-adapter singular subspace collision (union 99% rank {})",
+                    l.base_name,
+                    l.subspace_collision_ratio * 100.0,
+                    l.union_rank_99
+                ),
+            ),
+            _ => continue,
+        };
+
+        let worst_uri = summary
+            .adapter_names
+            .get(l.worst_pair_indices.1)
+            .map(|s| s.as_str())
+            .unwrap_or(primary_uri);
+
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "{}",
+        "level": "{}",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ],
+        "properties": {{
+          "adapterCount": {},
+          "subspaceCollisionRatio": {:.6},
+          "peakInflationRatio": {:.6},
+          "spectralInflationRatio": {:.6},
+          "minPairFrobeniusCosine": {:.6},
+          "unionRank99": {}
+        }}
+      }}"#,
+            rule_id,
+            level,
+            escape_json(&msg),
+            escape_json(worst_uri),
+            escape_json(&l.base_name),
+            l.adapter_indices.len(),
+            l.subspace_collision_ratio,
+            l.peak_inflation_ratio,
+            l.spectral_inflation_ratio,
+            l.min_pair_frobenius_cosine,
+            l.union_rank_99
+        ));
     }
 
     let rules_rendered: Vec<String> = LORASPECTRA_SARIF_RULES

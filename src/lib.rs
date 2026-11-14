@@ -4,6 +4,7 @@ pub mod compress;
 pub mod diff;
 pub mod linalg;
 pub mod merge;
+pub mod merge_check;
 pub mod remote;
 pub mod safetensors;
 pub mod sarif;
@@ -1612,5 +1613,258 @@ mod tests {
         assert!(sarif_str.contains("\"level\": \"error\""));
         assert!(sarif_str.contains("\"uri\": \"adapter_model.safetensors\""));
         assert!(!sarif_str.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn test_multi_adapter_merge_check_orthogonal_three_way() {
+        let d_out = 24;
+        let d_in = 24;
+        let r = 4;
+
+        // Construct 3 mutually orthogonal rank-4 adapters occupying disjoint coordinate slices
+        let mut inputs = Vec::new();
+        for idx in 0..3 {
+            let mut a = Tensor2D::zeros(r, d_in, DType::F32);
+            let mut b = Tensor2D::zeros(d_out, r, DType::F32);
+            for k in 0..r {
+                let col = idx * r + k;
+                let row = idx * r + k;
+                a.set(k, col, 1.0 + 0.2 * (k as f64));
+                b.set(row, k, 1.5 - 0.1 * (idx as f64));
+            }
+            let layer = LoraLayer {
+                base_name: "model.layers.0.self_attn.q_proj".to_string(),
+                a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+                a,
+                b,
+            };
+            inputs.push(crate::merge_check::AdapterMergeInput {
+                name: format!("adapter_{}.safetensors", idx),
+                layers: vec![layer],
+                alphas: BTreeMap::new(),
+                peft_config: None,
+                weight: 1.0,
+            });
+        }
+
+        let summary = crate::merge_check::analyze_multi_adapter_merge(&inputs).expect("merge check");
+        assert_eq!(summary.shared_layers.len(), 1);
+        let rep = &summary.shared_layers[0];
+        assert!(rep.subspace_collision_ratio < 1e-9);
+        assert!((rep.orthogonal_inflation_ratio - 1.0).abs() < 1e-9);
+        assert_eq!(rep.union_rank_99, 12);
+        assert_eq!(summary.pairwise.len(), 3);
+        assert_eq!(summary.advisor.risk_level, "LOW");
+        assert_eq!(summary.advisor.recommended_mode, "linear");
+
+        // Verify exact match against dense sum Frobenius & spectral norm
+        let mut dense_sum = Tensor2D::zeros(d_out, d_in, DType::F32);
+        for inp in &inputs {
+            let prod = matmul(&inp.layers[0].b, &inp.layers[0].a);
+            for i in 0..dense_sum.data.len() {
+                dense_sum.data[i] += prod.data[i];
+            }
+        }
+        let dense_frob = dense_sum.frobenius_norm_sq().sqrt();
+        let dense_s1 = jacobi_svd(&dense_sum).sigma[0];
+        assert!((rep.linear_merged_norm - dense_frob).abs() < 1e-9);
+        assert!((rep.merged_spectral_norm - dense_s1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_multi_adapter_merge_check_collinear_inflation_and_alpha_scaling() {
+        let mut rng = Rng64::new(9001);
+        let d_out = 20;
+        let d_in = 20;
+        let r = 4;
+        let base_a = random_matrix(r, d_in, &mut rng, DType::F32);
+        let base_b = random_matrix(d_out, r, &mut rng, DType::F32);
+
+        let mut cfg = crate::safetensors::PeftAdapterConfig::default();
+        cfg.lora_alpha = Some(16.0); // scale = 16 / 4 = 4.0
+
+        let mut inputs = Vec::new();
+        for idx in 0..3 {
+            let layer = LoraLayer {
+                base_name: "model.layers.0.mlp.up_proj".to_string(),
+                a_key: "model.layers.0.mlp.up_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.mlp.up_proj.lora_B.weight".to_string(),
+                a: base_a.clone(),
+                b: base_b.clone(),
+            };
+            inputs.push(crate::merge_check::AdapterMergeInput {
+                name: format!("collinear_{}.safetensors", idx),
+                layers: vec![layer],
+                alphas: BTreeMap::new(),
+                peft_config: Some(cfg.clone()),
+                weight: 1.0,
+            });
+        }
+
+        let summary = crate::merge_check::analyze_multi_adapter_merge(&inputs).expect("merge check");
+        let rep = &summary.shared_layers[0];
+        assert!((rep.subspace_collision_ratio - 1.0).abs() < 1e-6);
+        assert!((rep.peak_inflation_ratio - 3.0).abs() < 1e-6);
+        assert!((rep.spectral_inflation_ratio - 3.0).abs() < 1e-6);
+        assert_eq!(rep.status, "NORM_INFLATION");
+        assert!(summary.advisor.preserve_norm);
+        assert!(summary.advisor.suggested_weights[0] < 0.40);
+    }
+
+    #[test]
+    fn test_multi_adapter_merge_check_destructive_sign_cancellation() {
+        let mut rng = Rng64::new(9002);
+        let d_out = 18;
+        let d_in = 18;
+        let r = 4;
+        let base_a = random_matrix(r, d_in, &mut rng, DType::F32);
+        let base_b = random_matrix(d_out, r, &mut rng, DType::F32);
+        let mut neg_b = base_b.clone();
+        for v in &mut neg_b.data {
+            *v = -*v;
+        }
+        let third_a = random_matrix(r, d_in, &mut rng, DType::F32);
+        let third_b = random_matrix(d_out, r, &mut rng, DType::F32);
+
+        let mk = |name: &str, a: Tensor2D, b: Tensor2D| crate::merge_check::AdapterMergeInput {
+            name: name.to_string(),
+            layers: vec![LoraLayer {
+                base_name: "model.layers.1.self_attn.v_proj".to_string(),
+                a_key: "model.layers.1.self_attn.v_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.1.self_attn.v_proj.lora_B.weight".to_string(),
+                a,
+                b,
+            }],
+            alphas: BTreeMap::new(),
+            peft_config: None,
+            weight: 1.0,
+        };
+
+        let inputs = vec![
+            mk("task_pos.safetensors", base_a.clone(), base_b),
+            mk("task_neg.safetensors", base_a, neg_b),
+            mk("task_aux.safetensors", third_a, third_b),
+        ];
+
+        let summary = crate::merge_check::analyze_multi_adapter_merge(&inputs).expect("merge check");
+        let rep = &summary.shared_layers[0];
+        assert!((rep.min_pair_frobenius_cosine - (-1.0)).abs() < 1e-6);
+        assert_eq!(rep.worst_pair_indices, (0, 1));
+        assert_eq!(rep.status, "DESTRUCTIVE_CANCELLATION");
+        assert_eq!(summary.destructive_layer_count, 1);
+        assert_eq!(summary.advisor.recommended_mode, "ties");
+        assert_eq!(summary.advisor.risk_level, "HIGH");
+    }
+
+    #[test]
+    fn test_multi_adapter_merge_check_overcomplete_rank_and_disjoint_modules() {
+        let mut rng = Rng64::new(9003);
+        let d_out = 12;
+        let d_in = 12;
+        let r = 5; // 4 adapters * 5 = 20 > 12 (overcomplete stacked rank)
+
+        let mut inputs = Vec::new();
+        let mut dense_sum = Tensor2D::zeros(d_out, d_in, DType::F32);
+        let weights = [0.7, 0.5, 0.9, 0.4];
+
+        for (idx, &w) in weights.iter().enumerate() {
+            let a = random_matrix(r, d_in, &mut rng, DType::F32);
+            let b = random_matrix(d_out, r, &mut rng, DType::F32);
+            let prod = matmul(&b, &a);
+            for k in 0..dense_sum.data.len() {
+                dense_sum.data[k] += w * prod.data[k];
+            }
+            let mut layers = vec![LoraLayer {
+                base_name: "model.layers.0.self_attn.o_proj".to_string(),
+                a_key: "model.layers.0.self_attn.o_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.self_attn.o_proj.lora_B.weight".to_string(),
+                a,
+                b,
+            }];
+            if idx == 3 {
+                layers.push(LoraLayer {
+                    base_name: "model.layers.0.mlp.down_proj".to_string(),
+                    a_key: "model.layers.0.mlp.down_proj.lora_A.weight".to_string(),
+                    b_key: "model.layers.0.mlp.down_proj.lora_B.weight".to_string(),
+                    a: random_matrix(r, d_in, &mut rng, DType::F32),
+                    b: random_matrix(d_out, r, &mut rng, DType::F32),
+                });
+            }
+            inputs.push(crate::merge_check::AdapterMergeInput {
+                name: format!("over_{}.safetensors", idx),
+                layers,
+                alphas: BTreeMap::new(),
+                peft_config: None,
+                weight: w,
+            });
+        }
+
+        let summary = crate::merge_check::analyze_multi_adapter_merge(&inputs).expect("merge check");
+        assert_eq!(summary.shared_layers.len(), 1);
+        assert_eq!(summary.single_adapter_layers.len(), 1);
+
+        let rep = &summary.shared_layers[0];
+        let dense_frob = dense_sum.frobenius_norm_sq().sqrt();
+        let dense_s1 = jacobi_svd(&dense_sum).sigma[0];
+        assert!(
+            (rep.linear_merged_norm - dense_frob).abs() < 1e-7,
+            "frob mismatch: {} vs {}",
+            rep.linear_merged_norm,
+            dense_frob
+        );
+        assert!(
+            (rep.merged_spectral_norm - dense_s1).abs() < 1e-7,
+            "s1 mismatch: {} vs {}",
+            rep.merged_spectral_norm,
+            dense_s1
+        );
+
+        let json_out = crate::merge_check::render_merge_check_json(&summary);
+        let table_out = crate::merge_check::render_merge_check_table(&summary);
+        assert!(json_out.contains("\"single_adapter_layer_count\": 1"));
+        assert!(!json_out.contains('\u{2014}'));
+        assert!(!table_out.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn test_merge_check_incompatible_shapes_and_sarif_export() {
+        let mut rng = Rng64::new(9004);
+        let inp_a = crate::merge_check::AdapterMergeInput {
+            name: "llama8b_lora.safetensors".to_string(),
+            layers: vec![LoraLayer {
+                base_name: "model.layers.0.self_attn.q_proj".to_string(),
+                a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+                a: random_matrix(4, 16, &mut rng, DType::F32),
+                b: random_matrix(16, 4, &mut rng, DType::F32),
+            }],
+            alphas: BTreeMap::new(),
+            peft_config: None,
+            weight: 1.0,
+        };
+        let inp_b = crate::merge_check::AdapterMergeInput {
+            name: "qwen7b_lora.safetensors".to_string(),
+            layers: vec![LoraLayer {
+                base_name: "model.layers.0.self_attn.q_proj".to_string(),
+                a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+                a: random_matrix(4, 24, &mut rng, DType::F32),
+                b: random_matrix(24, 4, &mut rng, DType::F32),
+            }],
+            alphas: BTreeMap::new(),
+            peft_config: None,
+            weight: 1.0,
+        };
+
+        let summary =
+            crate::merge_check::analyze_multi_adapter_merge(&[inp_a, inp_b]).expect("merge check");
+        assert_eq!(summary.incompatible_shapes.len(), 1);
+        assert_eq!(summary.advisor.risk_level, "INCOMPATIBLE");
+
+        let sarif = crate::sarif::build_merge_check_sarif(&summary, "0.9.0");
+        assert!(sarif.contains("\"ruleId\": \"LS018\""));
+        assert!(sarif.contains("\"version\": \"0.9.0\""));
+        assert!(!sarif.contains('\u{2014}'));
     }
 }

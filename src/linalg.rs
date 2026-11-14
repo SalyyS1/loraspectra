@@ -117,7 +117,8 @@ pub fn thin_qr_columns(m: &Tensor2D) -> (Vec<Vec<f64>>, Tensor2D) {
         } else {
             r_mat.set(j, j, 0.0);
             q_cols[j].fill(0.0);
-            // Pick a deterministic unit vector orthogonal to previous columns
+            // Pick a deterministic unit vector orthogonal to previous columns when rank < rows
+            let mut found = false;
             for basis_idx in 0..rows {
                 q_cols[j].fill(0.0);
                 q_cols[j][basis_idx] = 1.0;
@@ -129,8 +130,12 @@ pub fn thin_qr_columns(m: &Tensor2D) -> (Vec<Vec<f64>>, Tensor2D) {
                 let bnorm = dot_slice(&q_cols[j], &q_cols[j]).sqrt();
                 if bnorm > 1e-7 {
                     scale_slice(&mut q_cols[j], 1.0 / bnorm);
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                q_cols[j].fill(0.0);
             }
         }
     }

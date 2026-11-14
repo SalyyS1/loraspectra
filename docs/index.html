@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v0.7.0 - Interactive .safetensors LoRA Spectral SVD &amp; Rank-Collapse Inspector</title>
-  <meta name="description" content="100% client-side in-browser .safetensors LoRA spectral SVD inspector + zero-dependency Rust CLI (v0.7.0). Audit rank collapse, Gavish-Donoho Marchenko-Pastur noise floors, compress LoRAs by -83.8%, and inspect hf://org/repo adapters.">
-  <meta property="og:title" content="loraspectra v0.7.0 - Interactive .safetensors Spectral SVD Inspector &amp; Rust Engine">
+  <title>loraspectra v0.9.0 - Interactive .safetensors Header, Spectral SVD &amp; Multi-Adapter Merge Inspector</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA spectral SVD auditor, and multi-adapter merge-check analyzer + zero-dependency Rust CLI (v0.9.0).">
+  <meta property="og:title" content="loraspectra v0.9.0 - Interactive .safetensors Header, Spectral SVD &amp; Merge Inspector">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -419,10 +419,10 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v0.7.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v0.9.0</span></h1>
         <p class="lead">
-          Spectral SVD Auditor, Eckart-Young Dynamic Rank Compressor, and Orthogonal Subspace Merger for
-          <code>.safetensors</code> LoRA Adapters &mdash; powered by exact QR-Core SVD
+          Spectral SVD Auditor, Zero-Copy <code>.safetensors</code> Header Inspector, Dynamic Rank Compressor, and Multi-Adapter Merge Conflict Analyzer
+          - powered by exact QR-Core SVD
           (<code>O(r&sup2;d + r&sup3;)</code>) in your browser or native Rust CLI without PyTorch or GPU VRAM.
         </p>
         <div class="cta-row">
@@ -436,29 +436,135 @@
     <!-- Interactive Browser Inspector -->
     <div class="card">
       <div class="card-header">
-        <h2 class="card-title">Interactive <code>.safetensors</code> Spectral SVD &amp; Rank-Collapse Inspector</h2>
-        <span class="privacy-tag">&#128274; 100% Local Web File API &mdash; Your weights never leave your device</span>
+        <h2 class="card-title">Interactive <code>.safetensors</code> Header, Spectral SVD &amp; Multi-Adapter <code>merge-check</code> Inspector</h2>
+        <span class="privacy-tag">100% Local Web File API - Zero Uploads</span>
       </div>
 
-      <input type="file" id="file-input" accept=".safetensors" class="hidden">
-      <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Drop a .safetensors LoRA file or click to browse">
-        <p class="dropzone-title">Drop any <code>.safetensors</code> LoRA file here, or click to select from disk</p>
+      <input type="file" id="file-input" accept=".safetensors" multiple class="hidden">
+      <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Drop one or more .safetensors files or click to browse">
+        <p class="dropzone-title">Drop 1 <code>.safetensors</code> file (Header + Spectral SVD) or 2+ files (Multi-Adapter <code>merge-check</code>)</p>
         <p class="dropzone-sub">
-          Decodes <code>F32</code>, IEEE-754 <code>F16</code>, and <code>BF16</code> 2D <code>(lora_A, lora_B)</code> pairs + <code>.alpha</code> scalars across PEFT, Kohya/ComfyUI, FLUX, Diffusers &amp; OneTrainer
+          Reads 8-byte header slices in &lt;5 ms for any dense or LoRA checkpoint, decodes <code>F32</code>/<code>F16</code>/<code>BF16</code> <code>(lora_A, lora_B)</code> pairs, and analyzes multi-adapter subspace collisions
         </p>
         <div class="demo-bar" id="demo-bar">
           <button type="button" class="btn btn-accent btn-sm" id="btn-demo-peft">
-            &#9889; Load Demo: Rank-64 Collapsed Transformer LoRA (PEFT)
+            Load Demo: Rank-64 Collapsed Transformer LoRA (PEFT)
           </button>
           <button type="button" class="btn btn-sm" id="btn-demo-flux">
-            &#10024; Load Demo: Healthy Rank-16 FLUX/Kohya Style LoRA
+            Load Demo: Healthy Rank-16 FLUX/Kohya Style LoRA
+          </button>
+          <button type="button" class="btn btn-sm" id="btn-demo-merge">
+            Load Demo: 3-Adapter Merge Conflict Check
           </button>
           <button type="button" class="btn btn-sm hidden" id="btn-export-demo" title="Download the active synthetic demo as a real .safetensors binary file">
-            &#11015; Export Demo <code>.safetensors</code>
+            Export Demo <code>.safetensors</code>
           </button>
         </div>
         <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
-        <div class="status-line" id="status-line">Ready &mdash; drop a local .safetensors adapter or click a 1-click preset above.</div>
+        <div class="status-line" id="status-line">Ready - drop 1 or more local .safetensors files or click a preset above.</div>
+      </div>
+
+      <!-- Zero-Copy .safetensors Header & Tensor Manifest Inspector -->
+      <div id="header-inspector-box" style="margin-top: 22px;" class="hidden">
+        <div class="card-header" style="margin-bottom: 10px;">
+          <h3 class="card-title" style="font-size: 16px;">Zero-Copy <code>.safetensors</code> Binary Header &amp; Tensor Manifest</h3>
+          <span class="badge" id="hdr-alignment-badge">CONTIGUOUS_VALID</span>
+        </div>
+        <div class="kpi-grid" style="margin-bottom: 14px;">
+          <div class="kpi-card">
+            <div class="kpi-label">Header JSON Slice</div>
+            <div class="kpi-value text-sm" id="hdr-size">-</div>
+            <div class="kpi-sub" id="hdr-payload-size">-</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Tensor Entries</div>
+            <div class="kpi-value" id="hdr-tensor-count">-</div>
+            <div class="kpi-sub" id="hdr-total-params">-</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">DType Breakdown</div>
+            <div class="kpi-value text-sm accent" id="hdr-dtypes">-</div>
+            <div class="kpi-sub" id="hdr-meta-count">-</div>
+          </div>
+        </div>
+        <div id="hdr-metadata-wrap" class="cli-block" style="margin-bottom: 12px; display: none;">
+          <div class="cli-block-head"><span><code>__metadata__</code> Key-Value Entries</span></div>
+          <pre class="cli-code" id="hdr-metadata-pre" style="max-height: 120px; overflow: auto;"></pre>
+        </div>
+        <details style="margin-bottom: 8px;">
+          <summary style="cursor: pointer; color: var(--accent); font-size: 13.5px; font-weight: 600;">
+            Inspect Raw Tensor Shape &amp; Byte-Offset Manifest (<span id="hdr-manifest-count">0</span> tensors)
+          </summary>
+          <div class="table-toolbar" style="margin-top: 10px;">
+            <input type="text" id="hdr-tensor-filter" class="search-input" placeholder="Filter tensor keys (e.g. lora_A, alpha, embed_tokens, q_proj)...">
+          </div>
+          <div class="table-scroll" style="max-height: 240px;">
+            <table class="audit-table">
+              <thead>
+                <tr>
+                  <th>TENSOR KEY</th>
+                  <th>DTYPE</th>
+                  <th>SHAPE</th>
+                  <th class="num">ELEMENTS</th>
+                  <th class="num">BYTE OFFSETS</th>
+                </tr>
+              </thead>
+              <tbody id="hdr-manifest-tbody"></tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+
+      <!-- Multi-Adapter Merge-Check Output Area -->
+      <div id="merge-check-box" style="margin-top: 22px;" class="hidden">
+        <div class="card-header" style="margin-bottom: 10px;">
+          <h3 class="card-title" style="font-size: 16px;">Multi-Adapter <code>merge-check</code> Interference &amp; Norm Inflation Report</h3>
+          <span class="badge" id="mc-risk-badge">LOW RISK</span>
+        </div>
+        <div class="kpi-grid" style="margin-bottom: 14px;">
+          <div class="kpi-card">
+            <div class="kpi-label">Adapters Compared</div>
+            <div class="kpi-value" id="mc-adapter-count">-</div>
+            <div class="kpi-sub" id="mc-shared-layers">-</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Mean Subspace Collision</div>
+            <div class="kpi-value accent" id="mc-subspace">-</div>
+            <div class="kpi-sub" id="mc-subspace-max">-</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Max Spectral Inflation</div>
+            <div class="kpi-value purple" id="mc-spec-infl">-</div>
+            <div class="kpi-sub" id="mc-peak-infl">-</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Destructive / Inflated Layers</div>
+            <div class="kpi-value" id="mc-conflicts">-</div>
+            <div class="kpi-sub" id="mc-mode-rec">-</div>
+          </div>
+        </div>
+        <div class="table-scroll" style="max-height: 240px; margin-bottom: 14px;">
+          <table class="audit-table">
+            <thead>
+              <tr>
+                <th>SHARED LAYER</th>
+                <th class="num">SUBSPACE</th>
+                <th class="num">SPEC_INFL</th>
+                <th class="num">PEAK_INFL</th>
+                <th class="num">MIN_FROB_COS</th>
+                <th>STATUS</th>
+              </tr>
+            </thead>
+            <tbody id="mc-layers-tbody"></tbody>
+          </table>
+        </div>
+        <div class="cli-block">
+          <div class="cli-block-head">
+            <span id="mc-rationale">Recommended Multi-Adapter Merge Command</span>
+            <button type="button" class="btn btn-sm" data-copy="mc-cli-cmd">Copy</button>
+          </div>
+          <pre class="cli-code" id="mc-cli-cmd"></pre>
+        </div>
       </div>
 
       <!-- Inspector Output Area -->
@@ -467,33 +573,33 @@
         <div class="kpi-grid">
           <div class="kpi-card">
             <div class="kpi-label">Architecture &amp; Format</div>
-            <div class="kpi-value text-sm" id="kpi-arch">&mdash;</div>
-            <div class="kpi-sub" id="kpi-format">&mdash;</div>
+            <div class="kpi-value text-sm" id="kpi-arch">-</div>
+            <div class="kpi-sub" id="kpi-format">-</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Nominal Rank</div>
-            <div class="kpi-value" id="kpi-rank">&mdash;</div>
-            <div class="kpi-sub" id="kpi-params">&mdash;</div>
+            <div class="kpi-value" id="kpi-rank">-</div>
+            <div class="kpi-sub" id="kpi-params">-</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Mean Effective Rank (r<sub>eff</sub>)</div>
-            <div class="kpi-value accent" id="kpi-reff">&mdash;</div>
-            <div class="kpi-sub" id="kpi-rstable">&mdash;</div>
+            <div class="kpi-value accent" id="kpi-reff">-</div>
+            <div class="kpi-sub" id="kpi-rstable">-</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label" id="kpi-ke-label">Mean K_99.0%</div>
-            <div class="kpi-value" id="kpi-ke">&mdash;</div>
+            <div class="kpi-value" id="kpi-ke">-</div>
             <div class="kpi-sub" id="kpi-ke-sub">Eckart-Young energy rank</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Mean Gavish-Donoho K_MP</div>
-            <div class="kpi-value purple" id="kpi-kmp">&mdash;</div>
+            <div class="kpi-value purple" id="kpi-kmp">-</div>
             <div class="kpi-sub">Marchenko-Pastur signal rank</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Compressible Size Savings</div>
-            <div class="kpi-value green" id="kpi-savings">&mdash;</div>
-            <div class="kpi-sub" id="kpi-bytes">&mdash;</div>
+            <div class="kpi-value green" id="kpi-savings">-</div>
+            <div class="kpi-sub" id="kpi-bytes">-</div>
           </div>
         </div>
 
@@ -525,7 +631,7 @@
           <div class="chart-header">
             <div>
               <div class="chart-layer-name" id="chart-layer-title">Select a layer below</div>
-              <div class="chart-meta" id="chart-layer-meta">&mdash;</div>
+              <div class="chart-meta" id="chart-layer-meta">-</div>
             </div>
             <div class="legend-row">
               <span class="legend-item"><span class="swatch" style="background:#58a6ff;"></span> Kept Modes (&le; K<sub>E%</sub>)</span>
@@ -603,8 +709,8 @@ loraspectra audit hf://org/llama3-lora/adapter_model.safetensors
 # Compress a rank-collapsed LoRA at 99% Frobenius energy and emit PEFT rank_pattern config
 loraspectra compress adapter_model.safetensors adapter_slim.safetensors --energy 0.99 --peft-config adapter_config.json
 
-# Analyze attn vs mlp subspace conflict and get an exact merge command recommendation
-loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
+# Analyze N-adapter subspace collision and norm inflation prior to TIES/DARE/linear merging
+loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora --sarif merge.sarif</pre>
       </div>
     </div>
 
@@ -1112,6 +1218,65 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
       return out;
     }
 
+    function buildHeaderManifest(headerObj, headerLen, fileSize) {
+      const metadata = {};
+      if (headerObj.__metadata__ && typeof headerObj.__metadata__ === "object") {
+        for (const [mk, mv] of Object.entries(headerObj.__metadata__)) {
+          metadata[mk] = String(mv);
+        }
+      }
+      const dtypeCounts = {};
+      const tensors = [];
+      let totalElements = 0;
+      let maxEndOffset = 0;
+      let alignmentStatus = "CONTIGUOUS_VALID";
+      const intervals = [];
+
+      for (const [key, meta] of Object.entries(headerObj)) {
+        if (key === "__metadata__" || !meta || typeof meta !== "object") continue;
+        const rawDtype = String(meta.dtype || "UNKNOWN").toUpperCase();
+        dtypeCounts[rawDtype] = (dtypeCounts[rawDtype] || 0) + 1;
+        const shape = Array.isArray(meta.shape) ? meta.shape : [];
+        let numel = 1;
+        for (const dim of shape) numel *= dim;
+        if (shape.length === 0 && rawDtype === "UNKNOWN") numel = 0;
+        totalElements += numel;
+        const offsets = Array.isArray(meta.data_offsets) && meta.data_offsets.length === 2
+          ? meta.data_offsets
+          : [0, 0];
+        if (offsets[0] < 0 || offsets[1] < offsets[0]) {
+          alignmentStatus = "INVALID_OFFSET_RANGE";
+        } else {
+          intervals.push(offsets);
+          if (offsets[1] > maxEndOffset) maxEndOffset = offsets[1];
+        }
+        tensors.push({ key, dtype: rawDtype, shape, numel, start: offsets[0], end: offsets[1] });
+      }
+
+      intervals.sort((a, b) => a[0] - b[0]);
+      for (let i = 1; i < intervals.length; i++) {
+        if (intervals[i][0] < intervals[i - 1][1]) {
+          alignmentStatus = "OVERLAPPING_OFFSETS";
+          break;
+        }
+      }
+      if (fileSize > 0 && (8 + headerLen + maxEndOffset > fileSize)) {
+        alignmentStatus = "TRUNCATED_PAYLOAD";
+      }
+
+      return {
+        headerLen,
+        payloadBytes: maxEndOffset,
+        fileSize,
+        tensorCount: tensors.length,
+        totalElements,
+        dtypeCounts,
+        metadata,
+        alignmentStatus,
+        tensors
+      };
+    }
+
     async function parseSafetensorsFile(file) {
       if (file.size < 16) throw new Error("File is too small to be a valid .safetensors checkpoint.");
       const lenBuf = await file.slice(0, 8).arrayBuffer();
@@ -1132,6 +1297,7 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
         throw new Error("Malformed JSON in .safetensors header: " + err.message);
       }
 
+      const headerManifest = buildHeaderManifest(headerObj, headerLen, file.size);
       const bodyOffset = 8 + headerLen;
       const aEntries = new Map();
       const bEntries = new Map();
@@ -1182,7 +1348,16 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
 
       const matchedBases = Array.from(aEntries.keys()).filter((b) => bEntries.has(b)).sort();
       if (matchedBases.length === 0) {
-        throw new Error("No matched 2D (lora_A, lora_B) / (lora_down, lora_up) tensor pairs found in checkpoint.");
+        return {
+          fileName: file.name,
+          records: [],
+          rawLayers: new Map(),
+          headerManifest,
+          alphaCount: 0,
+          doraCount,
+          elapsedMs: 0.5,
+          syntheticTensors: null
+        };
       }
 
       // Decode .alpha scalars
@@ -1194,6 +1369,7 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
       }
 
       const records = [];
+      const rawLayers = new Map();
       const t0 = performance.now();
       let lastYield = t0;
 
@@ -1211,7 +1387,6 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
         let dOut = bInfo.rows;
 
         if (aInfo.rows !== bInfo.cols) {
-          // Support transposed factor convention if encountered
           if (aInfo.cols === bInfo.rows) {
             r = aInfo.cols;
             dIn = aInfo.rows;
@@ -1233,6 +1408,8 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
 
         const sigma = qrCoreSingularValues(bData, dOut, r, aData, dIn);
         const alphaVal = alphaValues.has(baseName) ? alphaValues.get(baseName) : null;
+        const scale = (alphaVal !== null && alphaVal > 0) ? (alphaVal / Math.max(r, 1)) : 1.0;
+        rawLayers.set(baseName, { aData, bData, dOut, dIn, r, scale, s1: sigma[0] || 0.0 });
         records.push(buildLayerAuditRecord(baseName, aInfo.key, dOut, dIn, r, aInfo.dtype, sigma, alphaVal));
 
         const now = performance.now();
@@ -1247,6 +1424,8 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
       return {
         fileName: file.name,
         records,
+        rawLayers,
+        headerManifest,
         alphaCount: alphaValues.size,
         doraCount,
         elapsedMs,
@@ -1301,9 +1480,26 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
       return { bData, aData };
     }
 
+    function buildSyntheticHeaderManifest(tensors, metaExtra) {
+      const headerObj = { __metadata__: Object.assign({ format: "pt", generator: "loraspectra-web-v0.9.0" }, metaExtra || {}) };
+      let offset = 0;
+      for (const t of tensors) {
+        const byteLen = t.data.length * 2;
+        headerObj[t.key] = {
+          dtype: "BF16",
+          shape: t.isScalar ? [] : [t.rows, t.cols],
+          data_offsets: [offset, offset + byteLen]
+        };
+        offset += byteLen;
+      }
+      const headerLen = new TextEncoder().encode(JSON.stringify(headerObj)).length;
+      return buildHeaderManifest(headerObj, headerLen, 8 + headerLen + offset);
+    }
+
     async function generateDemoPreset(kind) {
       const t0 = performance.now();
       const records = [];
+      const rawLayers = new Map();
       const exportTensors = [];
 
       if (kind === "peft-collapsed") {
@@ -1347,6 +1543,7 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
               rng
             );
             const sigma = qrCoreSingularValues(bData, p.dOut, r, aData, p.dIn);
+            rawLayers.set(baseName, { aData, bData, dOut: p.dOut, dIn: p.dIn, r, scale: 1.0, s1: sigma[0] || 0.0 });
             records.push(buildLayerAuditRecord(baseName, aKey, p.dOut, p.dIn, r, "BF16", sigma, null));
             exportTensors.push({ key: aKey, rows: r, cols: p.dIn, data: aData, isScalar: false });
             exportTensors.push({ key: bKey, rows: p.dOut, cols: r, data: bData, isScalar: false });
@@ -1356,6 +1553,8 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
         return {
           fileName: "demo_llama_r64_collapsed_peft.safetensors",
           records,
+          rawLayers,
+          headerManifest: buildSyntheticHeaderManifest(exportTensors, { peft_type: "LORA", base_model: "Llama-3-8B-Instruct" }),
           alphaCount: 0,
           doraCount: 0,
           elapsedMs: performance.now() - t0,
@@ -1394,6 +1593,7 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
             rng
           );
           const sigma = qrCoreSingularValues(bData, sp.dOut, r, aData, sp.dIn);
+          rawLayers.set(sp.base, { aData, bData, dOut: sp.dOut, dIn: sp.dIn, r, scale: 1.0, s1: sigma[0] || 0.0 });
           records.push(buildLayerAuditRecord(sp.base, aKey, sp.dOut, sp.dIn, r, "BF16", sigma, 16.0));
           exportTensors.push({ key: alphaKey, rows: 1, cols: 1, data: new Float64Array([16.0]), isScalar: true });
           exportTensors.push({ key: aKey, rows: r, cols: sp.dIn, data: aData, isScalar: false });
@@ -1402,6 +1602,8 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
         return {
           fileName: "demo_flux_style_r16_kohya.safetensors",
           records,
+          rawLayers,
+          headerManifest: buildSyntheticHeaderManifest(exportTensors, { ss_network_module: "networks.lora_flux", ss_network_dim: "16", ss_network_alpha: "16" }),
           alphaCount: specs.length,
           doraCount: 0,
           elapsedMs: performance.now() - t0,
@@ -1728,10 +1930,276 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
       });
     }
 
+    const headerBox = document.getElementById("header-inspector-box");
+    const mergeCheckBox = document.getElementById("merge-check-box");
+    let currentManifestTensors = [];
+
+    function renderManifestRows() {
+      const q = (document.getElementById("hdr-tensor-filter").value || "").trim().toLowerCase();
+      const tbody = document.getElementById("hdr-manifest-tbody");
+      const filtered = currentManifestTensors.filter((t) => !q || t.key.toLowerCase().includes(q));
+      const slice = filtered.slice(0, 200);
+      tbody.innerHTML = slice.map((t) =>
+        "<tr><td class=\"layer-col\" title=\"" + t.key.replace(/"/g, "&quot;") + "\">" + t.key + "</td>" +
+        "<td>" + t.dtype + "</td>" +
+        "<td>[" + t.shape.join(", ") + "]</td>" +
+        "<td class=\"num\">" + t.numel.toLocaleString() + "</td>" +
+        "<td class=\"num\">" + t.start + ".." + t.end + "</td></tr>"
+      ).join("");
+    }
+
+    function renderHeaderInspector(hm) {
+      if (!hm) {
+        headerBox.classList.add("hidden");
+        return;
+      }
+      headerBox.classList.remove("hidden");
+      document.getElementById("hdr-alignment-badge").textContent = hm.alignmentStatus;
+      document.getElementById("hdr-size").textContent = formatBytes(hm.headerLen);
+      document.getElementById("hdr-payload-size").textContent = "Payload: " + formatBytes(hm.payloadBytes);
+      document.getElementById("hdr-tensor-count").textContent = hm.tensorCount.toLocaleString();
+      document.getElementById("hdr-total-params").textContent = (hm.totalElements / 1e6).toFixed(2) + "M elements";
+      const dtParts = Object.entries(hm.dtypeCounts).map(([k, v]) => k + ": " + v);
+      document.getElementById("hdr-dtypes").textContent = dtParts.join(", ") || "None";
+      const metaEntries = Object.entries(hm.metadata || {});
+      document.getElementById("hdr-meta-count").textContent = metaEntries.length + " __metadata__ keys";
+      const metaWrap = document.getElementById("hdr-metadata-wrap");
+      if (metaEntries.length > 0) {
+        metaWrap.style.display = "block";
+        document.getElementById("hdr-metadata-pre").textContent =
+          metaEntries.map(([k, v]) => k + " = " + v).join("\n");
+      } else {
+        metaWrap.style.display = "none";
+      }
+      currentManifestTensors = hm.tensors || [];
+      document.getElementById("hdr-manifest-count").textContent = currentManifestTensors.length.toString();
+      renderManifestRows();
+    }
+
+    function lowRankFrobInnerJs(lp, lq) {
+      const rp = lp.r, rq = lq.r, dIn = lp.dIn, dOut = lp.dOut;
+      const pMat = new Float64Array(rp * rq);
+      for (let i = 0; i < rp; i++) {
+        const offP = i * dIn;
+        for (let j = 0; j < rq; j++) {
+          const offQ = j * dIn;
+          let dot = 0.0;
+          for (let k = 0; k < dIn; k++) dot += lp.aData[offP + k] * lq.aData[offQ + k];
+          pMat[i * rq + j] = dot;
+        }
+      }
+      const qMat = new Float64Array(rp * rq);
+      for (let k = 0; k < dOut; k++) {
+        const bpOff = k * rp;
+        const bqOff = k * rq;
+        for (let i = 0; i < rp; i++) {
+          const bpi = lp.bData[bpOff + i];
+          if (bpi === 0.0) continue;
+          const qRow = i * rq;
+          for (let j = 0; j < rq; j++) qMat[qRow + j] += bpi * lq.bData[bqOff + j];
+        }
+      }
+      let tr = 0.0;
+      for (let idx = 0; idx < rp * rq; idx++) tr += pMat[idx] * qMat[idx];
+      return lp.scale * lq.scale * tr;
+    }
+
+    function activeRowBasisJs(aData, r, dIn) {
+      const cols = [];
+      for (let c = 0; c < r; c++) {
+        const v = new Float64Array(dIn);
+        const off = c * dIn;
+        for (let k = 0; k < dIn; k++) v[k] = aData[off + k];
+        cols.push(v);
+      }
+      const rMat = thinQrFromCols(cols, dIn);
+      const active = [];
+      for (let c = 0; c < r; c++) {
+        if (Math.abs(rMat[c * r + c]) > 1e-10) active.push(cols[c]);
+      }
+      return active;
+    }
+
+    function activeColBasisJs(bData, dOut, r) {
+      const cols = [];
+      for (let c = 0; c < r; c++) {
+        const v = new Float64Array(dOut);
+        for (let row = 0; row < dOut; row++) v[row] = bData[row * r + c];
+        cols.push(v);
+      }
+      const rMat = thinQrFromCols(cols, dOut);
+      const active = [];
+      for (let c = 0; c < r; c++) {
+        if (Math.abs(rMat[c * r + c]) > 1e-10) active.push(cols[c]);
+      }
+      return active;
+    }
+
+    function basisOverlapSqJs(qa, qb) {
+      let sum = 0.0;
+      for (const u of qa) {
+        for (const v of qb) {
+          const d = dotVec(u, v);
+          sum += d * d;
+        }
+      }
+      return sum;
+    }
+
+    function applyMultiMergeCheck(payloads) {
+      resultsBox.classList.add("hidden");
+      btnExportDemo.classList.add("hidden");
+      renderHeaderInspector(payloads[0] ? payloads[0].headerManifest : null);
+
+      const allNames = new Set();
+      for (const p of payloads) {
+        if (p.rawLayers) {
+          for (const k of p.rawLayers.keys()) allNames.add(k);
+        }
+      }
+      const sortedNames = Array.from(allNames).sort();
+      const layerRows = [];
+      let sumSubspace = 0, maxSubspace = 0, maxSpecInfl = 0, maxPeakInfl = 0;
+      let destructiveCount = 0, inflationCount = 0, collisionCount = 0, maxUnionRank = 16;
+
+      for (const baseName of sortedNames) {
+        const present = [];
+        for (let i = 0; i < payloads.length; i++) {
+          const l = payloads[i].rawLayers && payloads[i].rawLayers.get(baseName);
+          if (l) present.push(l);
+        }
+        if (present.length < 2) continue;
+        const dOut = present[0].dOut, dIn = present[0].dIn;
+        if (present.some((l) => l.dOut !== dOut || l.dIn !== dIn)) continue;
+
+        const m = present.length;
+        const gram = new Float64Array(m * m);
+        const norms = new Float64Array(m);
+        let sumDiag = 0, sumAll = 0, maxSingle = 0, maxSingleS1 = 0;
+        for (let p = 0; p < m; p++) {
+          const diag = Math.max(0.0, lowRankFrobInnerJs(present[p], present[p]));
+          gram[p * m + p] = diag;
+          norms[p] = Math.sqrt(diag);
+          sumDiag += diag;
+          if (norms[p] > maxSingle) maxSingle = norms[p];
+          const s1 = present[p].s1 * Math.abs(present[p].scale);
+          if (s1 > maxSingleS1) maxSingleS1 = s1;
+          for (let q = p + 1; q < m; q++) {
+            const cross = lowRankFrobInnerJs(present[p], present[q]);
+            gram[p * m + q] = cross;
+            gram[q * m + p] = cross;
+          }
+        }
+        for (let i = 0; i < m * m; i++) sumAll += gram[i];
+        const linearNorm = Math.sqrt(Math.max(0.0, sumAll));
+        const orthoNorm = Math.sqrt(sumDiag);
+        const orthoInfl = orthoNorm > 1e-12 ? linearNorm / orthoNorm : 1.0;
+        const peakInfl = maxSingle > 1e-12 ? linearNorm / maxSingle : 1.0;
+
+        let rSum = 0;
+        for (const l of present) rSum += l.r;
+        const bCat = new Float64Array(dOut * rSum);
+        const aCat = new Float64Array(rSum * dIn);
+        let cOff = 0;
+        for (const l of present) {
+          for (let row = 0; row < dOut; row++) {
+            for (let c = 0; c < l.r; c++) bCat[row * rSum + cOff + c] = l.bData[row * l.r + c] * l.scale;
+          }
+          for (let c = 0; c < l.r; c++) {
+            for (let col = 0; col < dIn; col++) aCat[(cOff + c) * dIn + col] = l.aData[c * l.dIn + col];
+          }
+          cOff += l.r;
+        }
+        const mergedSigma = qrCoreSingularValues(bCat, dOut, rSum, aCat, dIn);
+        const mergedS1 = mergedSigma[0] || 0.0;
+        const specInfl = maxSingleS1 > 1e-12 ? mergedS1 / maxSingleS1 : 1.0;
+        let totE = 0.0;
+        for (let i = 0; i < mergedSigma.length; i++) totE += mergedSigma[i] * mergedSigma[i];
+        const uRank = computeEnergyRank(mergedSigma, totE, 0.99);
+        if (uRank > maxUnionRank) maxUnionRank = uRank;
+
+        const inBases = present.map((l) => activeRowBasisJs(l.aData, l.r, dIn));
+        const outBases = present.map((l) => activeColBasisJs(l.bData, dOut, l.r));
+        let inSum = 0, inDen = 0, outSum = 0, outDen = 0, minCos = 1.0;
+        for (let p = 0; p < m; p++) {
+          for (let q = p + 1; q < m; q++) {
+            inSum += basisOverlapSqJs(inBases[p], inBases[q]);
+            inDen += Math.min(inBases[p].length, inBases[q].length);
+            outSum += basisOverlapSqJs(outBases[p], outBases[q]);
+            outDen += Math.min(outBases[p].length, outBases[q].length);
+            const fc = (norms[p] * norms[q] > 1e-14) ? (gram[p * m + q] / (norms[p] * norms[q])) : 0.0;
+            if (fc < minCos) minCos = fc;
+          }
+        }
+        const subRatio = 0.5 * ((inDen > 0 ? inSum / inDen : 0) + (outDen > 0 ? outSum / outDen : 0));
+        let status = "ORTHOGONAL_SAFE";
+        if (minCos < -0.10 || orthoInfl < 0.85) { status = "DESTRUCTIVE_CANCELLATION"; destructiveCount++; }
+        else if (specInfl > 1.30 || orthoInfl > 1.15) { status = "NORM_INFLATION"; inflationCount++; }
+        else if (subRatio >= 0.45) { status = "HIGH_SUBSPACE_COLLISION"; collisionCount++; }
+
+        sumSubspace += subRatio;
+        if (subRatio > maxSubspace) maxSubspace = subRatio;
+        if (specInfl > maxSpecInfl) maxSpecInfl = specInfl;
+        if (peakInfl > maxPeakInfl) maxPeakInfl = peakInfl;
+        layerRows.push({ baseName, subRatio, specInfl, peakInfl, minCos, status });
+      }
+
+      const nL = Math.max(layerRows.length, 1);
+      const meanSub = sumSubspace / nL;
+      let mode = "linear", risk = "LOW RISK";
+      if (destructiveCount > 0) { mode = "ties"; risk = "HIGH RISK"; }
+      else if (collisionCount > 0 || meanSub >= 0.30) { mode = "ortho-svd"; risk = "HIGH RISK"; }
+      else if (inflationCount > 0) { mode = "ortho-svd"; risk = "MODERATE RISK"; }
+
+      const preserveNorm = inflationCount > 0 || maxSpecInfl > 1.25;
+      const wVal = maxSpecInfl > 1.30 ? (1.0 / maxSpecInfl) : 1.0;
+      const wStr = payloads.map(() => wVal.toFixed(2)).join(":");
+      const fNames = payloads.map((p) => p.fileName).join(" ");
+
+      mergeCheckBox.classList.remove("hidden");
+      document.getElementById("mc-risk-badge").textContent = risk;
+      document.getElementById("mc-adapter-count").textContent = payloads.length + " adapters";
+      document.getElementById("mc-shared-layers").textContent = layerRows.length + " shared layers";
+      document.getElementById("mc-subspace").textContent = (meanSub * 100).toFixed(1) + "%";
+      document.getElementById("mc-subspace-max").textContent = "Max layer: " + (maxSubspace * 100).toFixed(1) + "%";
+      document.getElementById("mc-spec-infl").textContent = maxSpecInfl.toFixed(2) + "x";
+      document.getElementById("mc-peak-infl").textContent = "Peak Frob: " + maxPeakInfl.toFixed(2) + "x";
+      document.getElementById("mc-conflicts").textContent = (destructiveCount + inflationCount + collisionCount).toString();
+      document.getElementById("mc-mode-rec").textContent = "Recommended: --mode " + mode;
+
+      document.getElementById("mc-layers-tbody").innerHTML = layerRows.map((r) =>
+        "<tr><td class=\"layer-col\">" + r.baseName + "</td>" +
+        "<td class=\"num\">" + (r.subRatio * 100).toFixed(1) + "%</td>" +
+        "<td class=\"num\">" + r.specInfl.toFixed(2) + "x</td>" +
+        "<td class=\"num\">" + r.peakInfl.toFixed(2) + "x</td>" +
+        "<td class=\"num\">" + r.minCos.toFixed(4) + "</td>" +
+        "<td><span class=\"status-pill\">" + r.status + "</span></td></tr>"
+      ).join("");
+
+      document.getElementById("mc-cli-cmd").textContent =
+        "loraspectra merge-check " + fNames + " --sarif merge-audit.sarif\n" +
+        "loraspectra merge " + fNames + " merged_adapter.safetensors --mode " + mode +
+        " --rank " + Math.min(Math.max(maxUnionRank, 4), 128) + " --weights " + wStr +
+        (preserveNorm ? " --preserve-norm" : "");
+
+      clearProgress("Completed multi-adapter merge-check across " + payloads.length + " adapters (" + layerRows.length + " shared layers).");
+    }
+
     function applyLoadedAdapter(payload) {
+      mergeCheckBox.classList.add("hidden");
+      renderHeaderInspector(payload.headerManifest || null);
       state.fileName = payload.fileName;
       state.records = payload.records;
       state.syntheticTensors = payload.syntheticTensors || null;
+
+      if (state.records.length === 0) {
+        btnExportDemo.classList.add("hidden");
+        resultsBox.classList.add("hidden");
+        clearProgress("Inspected .safetensors header for " + state.fileName + " (" +
+          (payload.headerManifest ? payload.headerManifest.tensorCount : 0) + " dense/non-LoRA tensors, zero payload bytes loaded).");
+        return;
+      }
+
       recomputeForTargetEnergy();
       state.meta = inferAdapterMetadata(state.records, payload.alphaCount, payload.doraCount);
       state.selectedBaseName = state.records.length > 0 ? state.records[0].baseName : null;
@@ -1744,23 +2212,36 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
 
       clearProgress(
         "Audited " + state.records.length + " LoRA layers in " + payload.elapsedMs.toFixed(1) +
-        " ms (" + state.fileName + ") \u2014 click any layer row below to inspect its singular value spectrum."
+        " ms (" + state.fileName + ") - click any layer row below to inspect its singular value spectrum."
       );
     }
 
-    async function handleFileSelection(file) {
-      if (!file) return;
+    async function handleFileSelection(files) {
+      if (!files || files.length === 0) return;
       try {
-        setProgress(8, "Reading .safetensors header from " + file.name + "...");
-        await new Promise((r) => setTimeout(r, 0));
-        const payload = await parseSafetensorsFile(file);
-        applyLoadedAdapter(payload);
+        if (files.length >= 2) {
+          const payloads = [];
+          for (let i = 0; i < files.length; i++) {
+            setProgress(((i + 1) / files.length) * 80, "Parsing adapter " + (i + 1) + " / " + files.length + " (" + files[i].name + ")...");
+            await new Promise((r) => setTimeout(r, 0));
+            payloads.push(await parseSafetensorsFile(files[i]));
+          }
+          applyMultiMergeCheck(payloads);
+        } else {
+          const file = files[0];
+          setProgress(8, "Reading .safetensors header slice from " + file.name + "...");
+          await new Promise((r) => setTimeout(r, 0));
+          const payload = await parseSafetensorsFile(file);
+          applyLoadedAdapter(payload);
+        }
       } catch (err) {
         clearProgress("Error: " + (err && err.message ? err.message : String(err)));
       }
     }
 
     // Event bindings
+    document.getElementById("hdr-tensor-filter").addEventListener("input", renderManifestRows);
+
     dropzone.addEventListener("click", (ev) => {
       if (ev.target.closest("button")) return;
       fileInput.click();
@@ -1773,7 +2254,7 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
       }
     });
     fileInput.addEventListener("change", () => {
-      if (fileInput.files && fileInput.files[0]) handleFileSelection(fileInput.files[0]);
+      if (fileInput.files && fileInput.files.length > 0) handleFileSelection(fileInput.files);
     });
 
     dropzone.addEventListener("dragover", (ev) => {
@@ -1784,8 +2265,8 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
     dropzone.addEventListener("drop", (ev) => {
       ev.preventDefault();
       dropzone.classList.remove("dragover");
-      if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0]) {
-        handleFileSelection(ev.dataTransfer.files[0]);
+      if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length > 0) {
+        handleFileSelection(ev.dataTransfer.files);
       }
     });
 
@@ -1803,6 +2284,32 @@ loraspectra interference hf://org/code-lora hf://org/math-lora</pre>
       await new Promise((r) => setTimeout(r, 0));
       const payload = await generateDemoPreset("flux-healthy");
       applyLoadedAdapter(payload);
+    });
+
+    document.getElementById("btn-demo-merge").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      setProgress(20, "Synthesizing 3-Adapter Merge Conflict Benchmark...");
+      await new Promise((r) => setTimeout(r, 0));
+      const base = await generateDemoPreset("peft-collapsed");
+      const adapt2 = { fileName: "math_reasoning_lora.safetensors", rawLayers: new Map(), headerManifest: base.headerManifest };
+      const adapt3 = { fileName: "sql_agent_lora.safetensors", rawLayers: new Map(), headerManifest: base.headerManifest };
+      const rng = createDeterministicRng(77123);
+      let idx = 0;
+      for (const [k, l] of base.rawLayers.entries()) {
+        const b2 = new Float64Array(l.bData.length);
+        for (let i = 0; i < b2.length; i++) {
+          b2[i] = (idx % 4 === 0 ? -0.9 : 0.85) * l.bData[i];
+        }
+        adapt2.rawLayers.set(k, { aData: l.aData, bData: b2, dOut: l.dOut, dIn: l.dIn, r: l.r, scale: 1.0, s1: l.s1 * 0.88 });
+        const a3 = new Float64Array(l.aData.length);
+        const b3 = new Float64Array(l.bData.length);
+        for (let i = 0; i < a3.length; i++) a3[i] = 0.6 * l.aData[i] + 0.04 * rng.nextGaussian();
+        for (let i = 0; i < b3.length; i++) b3[i] = 0.7 * l.bData[i] + 0.04 * rng.nextGaussian();
+        adapt3.rawLayers.set(k, { aData: a3, bData: b3, dOut: l.dOut, dIn: l.dIn, r: l.r, scale: 1.0, s1: l.s1 * 0.75 });
+        idx++;
+      }
+      base.fileName = "code_instruct_lora.safetensors";
+      applyMultiMergeCheck([base, adapt2, adapt3]);
     });
 
     btnExportDemo.addEventListener("click", (ev) => {
