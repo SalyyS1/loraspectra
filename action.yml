@@ -1,0 +1,62 @@
+name: 'LoRA Adapter Spectral Audit'
+description: 'Fast spectral SVD audit, rank collapse checks, and silent SFT bug diagnostics with OASIS SARIF v2.1.0 output for .safetensors LoRA adapters'
+author: 'SalyyS1'
+branding:
+  icon: 'activity'
+  color: 'purple'
+
+inputs:
+  checkpoint:
+    description: 'Path or pattern to .safetensors LoRA checkpoint'
+    required: true
+    default: 'adapter_model.safetensors'
+  config:
+    description: 'Optional path to adapter_config.json'
+    required: false
+    default: ''
+  sarif:
+    description: 'Output SARIF v2.1.0 report path'
+    required: false
+    default: 'loraspectra-audit.sarif'
+  fail-on-critical:
+    description: 'Fail CI if critical bugs (dead layers, zero-norm embedding rows, inverted alpha) are found'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Ensure Rust toolchain
+      shell: bash
+      run: |
+        if ! command -v cargo >/dev/null 2>&1; then
+          echo "Rust/Cargo is required to build loraspectra"
+          exit 1
+        fi
+
+    - name: Build loraspectra CLI
+      shell: bash
+      run: |
+        cargo build --release --manifest-path "${{ github.action_path }}/Cargo.toml"
+
+    - name: Run Spectral SVD Audit
+      shell: bash
+      run: |
+        BIN="${{ github.action_path }}/target/release/loraspectra"
+        CONFIG_FLAG=""
+        if [ -n "${{ inputs.config }}" ] && [ -f "${{ inputs.config }}" ]; then
+          CONFIG_FLAG="--config ${{ inputs.config }}"
+        fi
+        echo "Running loraspectra audit on ${{ inputs.checkpoint }}..."
+        "$BIN" audit "${{ inputs.checkpoint }}" $CONFIG_FLAG --sarif "${{ inputs.sarif }}"
+
+    - name: Validate Critical Findings
+      shell: bash
+      run: |
+        if [ "${{ inputs.fail-on-critical }}" = "true" ] && [ -f "${{ inputs.sarif }}" ]; then
+          CRIT_COUNT=$(grep -c '"level": "error"' "${{ inputs.sarif }}" || true)
+          if [ "$CRIT_COUNT" -gt 0 ]; then
+            echo "::error::LoRASpectra detected $CRIT_COUNT critical adapter integrity failure(s) in ${{ inputs.checkpoint }}."
+            exit 1
+          fi
+        fi

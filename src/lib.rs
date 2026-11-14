@@ -1,8 +1,12 @@
 pub mod audit;
+pub mod card;
 pub mod compress;
+pub mod diff;
 pub mod linalg;
 pub mod merge;
+pub mod remote;
 pub mod safetensors;
+pub mod sarif;
 
 /// Deterministic SplitMix64 pseudo-random generator for reproducible synthetic LoRA benchmarks and tests.
 #[derive(Debug, Clone)]
@@ -41,7 +45,8 @@ impl Rng64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::{audit_layer, LayerHealth};
+    use std::collections::BTreeMap;
+    use crate::audit::{audit_adapter, audit_adapter_integrity, audit_layer, LayerHealth};
     use crate::compress::{compress_layer, extract_lora_from_dense_models, CompressionPolicy};
     use crate::linalg::{
         jacobi_svd, matmul, qr_core_singular_values, thin_qr_columns,
@@ -1474,7 +1479,138 @@ mod tests {
         assert!(md.contains("`RANK_COLLAPSED`"));
         assert!(!md.contains('\u{2014}'), "model card must not contain em-dashes");
     }
-}
 
-pub mod card;
-pub mod remote;
+    #[test]
+    fn test_diff_adapters_exact_frobenius_and_subspace_overlap() {
+        let mut rng = Rng64::new(42);
+        let d_out = 64;
+        let d_in = 64;
+        let rank = 8;
+
+        // Base layer A
+        let mut a = Tensor2D::zeros(rank, d_in, DType::F32);
+        let mut b = Tensor2D::zeros(d_out, rank, DType::F32);
+        for x in a.data.iter_mut() {
+            *x = rng.next_gaussian();
+        }
+        for x in b.data.iter_mut() {
+            *x = rng.next_gaussian();
+        }
+
+        let layer_a = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: a.clone(),
+            b: b.clone(),
+        };
+
+        // Case 1: Identical adapter -> relative drift = 0, subspace similarity = 1.0
+        let mut alphas = BTreeMap::new();
+        alphas.insert("model.layers.0.self_attn.q_proj".to_string(), 16.0);
+
+        let layers_a = vec![layer_a.clone()];
+        let layers_b = vec![layer_a.clone()];
+
+        let diff = crate::diff::diff_adapters(&layers_a, &alphas, &layers_b, &alphas);
+        assert_eq!(diff.shared_layers.len(), 1);
+        let rep = &diff.shared_layers[0];
+        assert!(rep.relative_drift < 1e-10, "identical drift should be 0, got {}", rep.relative_drift);
+        assert!((rep.subspace_similarity - 1.0).abs() < 1e-5, "identical subspace similarity should be 1.0, got {}", rep.subspace_similarity);
+        assert_eq!(rep.rank_delta, 0);
+
+        // Case 2: Inverted adapter -> relative drift = 2.0, subspace similarity = 1.0
+        let mut b_inv = b.clone();
+        for x in b_inv.data.iter_mut() {
+            *x = -*x;
+        }
+        let layer_inv = LoraLayer {
+            b: b_inv,
+            ..layer_a.clone()
+        };
+        let layers_inv = vec![layer_inv];
+        let diff_inv = crate::diff::diff_adapters(&layers_a, &alphas, &layers_inv, &alphas);
+        let rep_inv = &diff_inv.shared_layers[0];
+        assert!((rep_inv.relative_drift - 2.0).abs() < 1e-5, "inverted relative drift should be 2.0, got {}", rep_inv.relative_drift);
+        assert!((rep_inv.subspace_similarity - 1.0).abs() < 1e-5);
+
+        // Case 3: Added and removed layers
+        let layer_c = LoraLayer {
+            base_name: "model.layers.0.mlp.down_proj".to_string(),
+            a_key: "model.layers.0.mlp.down_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.down_proj.lora_B.weight".to_string(),
+            a: a.clone(),
+            b: b.clone(),
+        };
+        let layers_mixed_a = vec![layer_a.clone()];
+        let layers_mixed_b = vec![layer_c.clone()];
+        let diff_mixed = crate::diff::diff_adapters(&layers_mixed_a, &alphas, &layers_mixed_b, &alphas);
+        assert_eq!(diff_mixed.shared_layers.len(), 0);
+        assert_eq!(diff_mixed.removed_layers, vec!["model.layers.0.self_attn.q_proj"]);
+        assert_eq!(diff_mixed.added_layers, vec!["model.layers.0.mlp.down_proj"]);
+
+        // Render json and table
+        let json = crate::diff::render_diff_json(&diff);
+        assert!(json.contains("\"total_shared_layers\": 1"));
+        assert!(json.contains("\"subspace_similarity\": 1.0"));
+        assert!(!json.contains('\u{2014}'));
+
+        let table = crate::diff::render_diff_table(&diff);
+        assert!(table.contains("model.layers.0.self_attn.q_proj"));
+        assert!(table.contains("RelDrift"));
+        assert!(!table.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn test_sarif_v210_schema_generation_and_rule_mapping() {
+        let d = 32;
+        let r = 8;
+        let zero_b = Tensor2D::zeros(d, r, DType::F32);
+        let rand_a = Tensor2D::zeros(r, d, DType::F32);
+
+        let dead_layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: rand_a,
+            b: zero_b,
+        };
+
+        let layers = vec![dead_layer];
+        let summary = audit_adapter(&layers);
+
+        let mut tensors = BTreeMap::new();
+        tensors.insert(layers[0].a_key.clone(), layers[0].a.clone());
+        tensors.insert(layers[0].b_key.clone(), layers[0].b.clone());
+
+        // Add an embedding tensor with trailing zero rows
+        let mut embed = Tensor2D::zeros(16, d, DType::F32);
+        for row in 0..8 {
+            for col in 0..d {
+                embed.data[row * d + col] = 0.5;
+            }
+        }
+        tensors.insert("model.embed_tokens.weight".to_string(), embed);
+
+        let alphas = BTreeMap::new();
+        let dora = BTreeMap::new();
+        let integrity = audit_adapter_integrity(&layers, &tensors, &alphas, &dora, None);
+
+        let sarif_str = crate::sarif::build_audit_sarif(
+            Some(&summary),
+            Some(&integrity),
+            "adapter_model.safetensors",
+            "0.8.0",
+        );
+
+        assert!(sarif_str.contains("\"$schema\": \"https://json.schemastore.org/sarif-2.1.0.json\""));
+        assert!(sarif_str.contains("\"version\": \"2.1.0\""));
+        assert!(sarif_str.contains("\"name\": \"loraspectra\""));
+        assert!(sarif_str.contains("\"version\": \"0.8.0\""));
+        assert!(sarif_str.contains("\"ruleId\": \"LS001\""));
+        assert!(sarif_str.contains("\"ruleId\": \"LS002\""));
+        assert!(sarif_str.contains("\"level\": \"error\""));
+        assert!(sarif_str.contains("\"uri\": \"adapter_model.safetensors\""));
+        assert!(!sarif_str.contains('\u{2014}'));
+    }
+}

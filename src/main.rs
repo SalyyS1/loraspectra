@@ -8,6 +8,7 @@ use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
     compress_adapter, extract_lora_from_dense_models, CompressionPolicy,
 };
+use loraspectra::diff::{diff_adapters, render_diff_json, render_diff_table};
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
@@ -19,10 +20,11 @@ use loraspectra::safetensors::{
     write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, PeftAdapterConfig,
     Tensor2D,
 };
+use loraspectra::sarif::build_audit_sarif;
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v0.7.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+        "loraspectra v0.8.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -30,7 +32,8 @@ SOURCES:
 
 USAGE:
   loraspectra info <adapter_or_hf_uri> [--json]
-  loraspectra audit <adapter_or_hf_uri> [--json] [--config <adapter_config.json>]
+  loraspectra audit <adapter_or_hf_uri> [--json] [--config <adapter_config.json>] [--sarif <output.sarif>]
+  loraspectra diff <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
   loraspectra card <adapter_or_hf_uri> [-o <model_card.md>] [--config <adapter_config.json>]
   loraspectra compress <input_or_hf_uri> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
@@ -214,6 +217,7 @@ fn main() {
         "audit" => {
             let mut json_mode = false;
             let mut config_opt: Option<String> = None;
+            let mut sarif_opt: Option<String> = None;
             let mut pos: Vec<String> = Vec::new();
             let mut i = 2;
             while i < args.len() {
@@ -221,6 +225,10 @@ fn main() {
                     "--json" => {
                         json_mode = true;
                         i += 1;
+                    }
+                    "--sarif" if i + 1 < args.len() => {
+                        sarif_opt = Some(args[i + 1].clone());
+                        i += 2;
                     }
                     "--config" | "--peft-config" if i + 1 < args.len() => {
                         config_opt = Some(args[i + 1].clone());
@@ -248,6 +256,15 @@ fn main() {
                 &dora_scales,
                 peft_config.as_ref(),
             );
+
+            if let Some(ref s_path) = sarif_opt {
+                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "0.8.0");
+                if let Err(e) = std::fs::write(s_path, &sarif_str) {
+                    eprintln!("Error writing SARIF report to {}: {}", s_path, e);
+                } else {
+                    println!("Saved OASIS SARIF v2.1.0 report to {}", s_path);
+                }
+            }
 
             if json_mode {
                 println!("{}", render_audit_json(source, &summary, &integrity));
@@ -306,6 +323,25 @@ fn main() {
                         issue.message
                     );
                 }
+            }
+        }
+        "diff" => {
+            let json_mode = args[2..].iter().any(|a| a == "--json");
+            let pos: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
+            if pos.len() < 2 {
+                print_usage();
+                process::exit(1);
+            }
+            let source_a = pos[0];
+            let source_b = pos[1];
+            let (layers_a, alphas_a) = load_layers_and_alphas_or_exit(source_a);
+            let (layers_b, alphas_b) = load_layers_and_alphas_or_exit(source_b);
+            let summary = diff_adapters(&layers_a, &alphas_a, &layers_b, &alphas_b);
+
+            if json_mode {
+                println!("{}", render_diff_json(&summary));
+            } else {
+                println!("{}", render_diff_table(&summary));
             }
         }
         "card" => {

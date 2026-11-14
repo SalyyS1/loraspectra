@@ -5,7 +5,7 @@
 > **[Launch the Interactive Browser `.safetensors` Spectral SVD Inspector -> `https://salyys1.github.io/loraspectra/`](https://salyys1.github.io/loraspectra/)**
 > *Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers `.safetensors` LoRA directly into your browser - 100% client-side QR-Core SVD, zero file uploads, interactive Target Energy slider (`90%` to `99.9%`), Gavish-Donoho Marchenko-Pastur noise floor visualization, and 1-click synthetic demos.*
 
-`loraspectra` (`v0.7.0`) is a zero-dependency Rust engine, CLI, and client-side Web Inspector for auditing, diagnosing, compressing, and merging Low-Rank Adaptation (LoRA / DoRA) weights stored in HuggingFace `.safetensors` format (`F32`, `F16`, and `BF16`) without loading a multi-gigabyte PyTorch or GPU runtime.
+`loraspectra` (`v0.8.0`) is a zero-dependency Rust engine, CLI, and client-side Web Inspector for auditing, diagnosing, comparing, compressing, and merging Low-Rank Adaptation (LoRA / DoRA) weights stored in HuggingFace `.safetensors` format (`F32`, `F16`, and `BF16`) without loading a multi-gigabyte PyTorch or GPU runtime.
 
 Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ and running cubic $O(d^3)$ Singular Value Decomposition, `loraspectra` factors $B = Q_B R_B$ and $A^T = Q_A R_A$ via Modified Gram-Schmidt with Daniel-Gragg-Kaufman-Stewart (DGKS) re-orthogonalization and solves the exact SVD on the tiny $r \times r$ core matrix $M = R_B R_A^T$. This reduces per-layer spectral complexity from $O(d^3)$ to $O(r^2(d_{\text{out}} + d_{\text{in}}) + r^3)$ - delivering a **1,050x to 2,680x speedup** over full dense SVD while matching singular values to within **$1.08 \times 10^{-13}$** (IEEE 754 `f64` machine precision).
 
@@ -46,17 +46,27 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
    - Implements **N-Adapter ($N \ge 2$) Orthogonal Subspace Projection Merge (`--mode ortho-svd`)**, **Layer-Block Weighting (`--layer-weights`)**, **Spectral Norm Bounding (`--preserve-norm`)**, **DoRA 1D Tensor Preservation**, **Cross-Ecosystem Key Format Conversion (`--format peft|kohya|diffusers`)**, and **`.alpha` / `rsLoRA` Scale Baking (`--bake-alpha`, `--rslora`)** - folding $\alpha/r$ or $\alpha/\sqrt{r}$ directly into $(B, A)$ so heterogeneous `rank_pattern` and `rsLoRA` adapters serve accurately on `vLLM`, `llama.cpp`, `ComfyUI`, and `InvokeAI`.
    - Includes **`loraspectra info <adapter_or_hf_uri>`** to reverse-engineer the naming convention and base model family without requiring `adapter_config.json`, plus **`loraspectra extract`** to extract an optimal low-rank LoRA adapter directly from two dense `.safetensors` checkpoints ($\Delta W = W_{\text{tuned}} - W_{\text{base}}$).
 
+8. **OASIS SARIF v2.1.0 Code Scanning & CI Gate (`audit --sarif <file>` / `action.yml`)**
+   - Exports spectral health and adapter integrity findings into standard OASIS SARIF v2.1.0 format (`$schema: sarif-2.1.0.json`), mapping rules `LS001` through `LS014` (dead LoRA layers, zero-norm embedding rows, collapsed rank, extreme alpha scaling).
+   - Integrates directly with GitHub Code Scanning (`github/codeql-action/upload-sarif`) and provides the composite GitHub Action `SalyyS1/loraspectra@v0.8.0` (`action.yml`) to fail CI on critical fine-tuning bugs.
+
+9. **LoRA Checkpoint Differential Drift & Subspace Overlap (`loraspectra diff <a_uri> <b_uri> [--json]`)**
+   - Compares two fine-tuning checkpoints (e.g. across training steps or different hyperparameter runs) in $O(r^2(d_{\text{in}} + d_{\text{out}}))$ time without dense matrix allocations.
+   - Computes exact layer-by-layer Frobenius drift $\|\Delta W_B - \Delta W_A\|_F$, relative drift, and Grassmannian principal subspace cosine similarity $S_{\text{subspace}} \in [0, 1]$, highlighting top drifting layers and rank migrations.
+
 ---
 
 ## Comparison with Existing Tools
 
-| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v0.7.0`) |
+| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v0.8.0`) |
 | :--- | :---: | :---: | :---: | :---: |
 | **SVD Algorithm & Complexity** | Dense $O(d^3)$ (`torch.linalg.svd(B @ A)`) | Dense / Low-rank approx | Dense $O(d^3)$ on delta weights | **Exact QR-Core SVD $O(r^2 d + r^3)$ (`1,050x-2,680x` faster)** |
 | **Runtime Dependencies** | Python + PyTorch + CUDA (`~4 GB`) | Python + PyTorch + Transformers | Python + PyTorch (`~4 GB`) | **Zero-dependency Rust binary (`< 1 MB`) + Local Web UI** |
 | **Client-Side Browser `.safetensors` Inspector** | No | No | No | **[Yes (100% local JS SVD, 0 uploads)](https://salyys1.github.io/loraspectra/)** |
 | **Direct `hf://org/repo` Remote Inspection** | No | Python API only | Partial | **Yes (`hf://org/repo` + `${TMPDIR:-/tmp}/loraspectra-cache/` + `HF_TOKEN`)** |
 | **Silent SFT Bug & Integrity Audit (`audit`)** | No | No | No | **Yes (dead `<tool_call>` embedding rows, missing/extreme `alpha/r`, DoRA checks)** |
+| **OASIS SARIF v2.1.0 & GitHub Actions Gate** | No | No | No | **Yes (`--sarif report.sarif` + `action.yml` rules `LS001-LS014`)** |
+| **Checkpoint Differential Drift (`diff`)** | No | No | No | **Yes (`loraspectra diff`, Frobenius drift + subspace similarity)** |
 | **HuggingFace Model Card Generator (`card`)** | No | Basic template | No | **Yes (`loraspectra card`, shields.io badges + spectral & bottleneck tables)** |
 | **Checkpoint Architecture Reverse-Engineering** | No | Requires `adapter_config.json` | No | **Yes (`loraspectra info`, detects PEFT/Kohya/Flux/SDXL/Llama/Qwen)** |
 | **Spectral Entropy & Rank-Collapse Audit** | No | No | No | **Yes (`r_eff`, `r_stable`, `K_99%`, `K_MP`)** |
@@ -145,6 +155,9 @@ loraspectra audit hf://org/repo/adapter_model.safetensors
 # Audit a local checkpoint with companion adapter_config.json (add --json for CI pipelines)
 loraspectra audit ./checkpoint-1000/adapter_model.safetensors
 loraspectra audit ./checkpoint-1000/adapter_model.safetensors --json
+
+# Export OASIS SARIF v2.1.0 report for GitHub Code Scanning
+loraspectra audit ./checkpoint-1000/adapter_model.safetensors --sarif audit.sarif
 ```
 
 Output:
@@ -161,7 +174,17 @@ Integrity: ISSUES_DETECTED | Alpha/DoRA: HEALTHY (alpha/r=2.00, .alpha=0, dora=0
   [CRITICAL] ZERO_NORM_EMBEDDING_ROWS (base_model.model.lm_head.modules_to_save.default.weight): 4 of 152064 token rows are zero/near-zero (4 trailing rows 152060..152064; added special tokens such as <tool_call> likely received zero SFT gradients)
 ```
 
-### 2. Generate a Ready-to-Paste HuggingFace `README.md` Model Card (`loraspectra card`)
+### 2. Compare LoRA Checkpoint Drift & Subspace Overlap (`loraspectra diff`)
+
+```bash
+# Compare two training checkpoints or fine-tuning variants
+loraspectra diff ./checkpoint-500/adapter_model.safetensors ./checkpoint-1000/adapter_model.safetensors
+
+# Machine-readable output for automated regression checks
+loraspectra diff hf://org/adapter-v1 hf://org/adapter-v2 --json
+```
+
+### 3. Generate a Ready-to-Paste HuggingFace `README.md` Model Card (`loraspectra card`)
 
 ```bash
 # Print Markdown Spectral Audit Report + shields.io badges to stdout (or save via -o)
@@ -186,7 +209,7 @@ Generated Markdown snippet:
 | **DoRA / Alpha & SFT Health** | HEALTHY (alpha/r=2.00; Standard LoRA (no DoRA vectors)) |
 ```
 
-### 3. Compress a LoRA Adapter via Eckart-Young Energy or Marchenko-Pastur Denoising
+### 4. Compress a LoRA Adapter via Eckart-Young Energy or Marchenko-Pastur Denoising
 
 ```bash
 # Retain 99.0% Frobenius spectral energy per layer and export PEFT rank_pattern config
@@ -199,7 +222,7 @@ loraspectra compress hf://org/bloated-lora adapter_denoised.safetensors --mp-den
 loraspectra compress adapter_model.safetensors adapter_baked.safetensors --rslora --alpha 32 --bake-alpha
 ```
 
-### 4. Automated Subspace Interference Merge Advisor (`interference [--json]`) & `ortho-svd` Merge
+### 5. Automated Subspace Interference Merge Advisor (`interference [--json]`) & `ortho-svd` Merge
 
 ```bash
 # Analyze attn vs mlp subspace cosines + Frobenius sign conflict and get an exact merge command recommendation
@@ -231,6 +254,23 @@ loraspectra merge code_lora.safetensors math_lora.safetensors sql_lora.safetenso
 # Extract a low-rank LoRA adapter directly from two dense .safetensors checkpoints (W_tuned - W_base)
 loraspectra extract base_model.safetensors fine_tuned.safetensors extracted_lora.safetensors \
   --mp-denoise --dtype bf16 --format peft --peft-config adapter_config.json
+```
+
+### 6. GitHub Actions CI Integration (`action.yml`)
+
+```yaml
+- name: Audit LoRA Checkpoint
+  uses: SalyyS1/loraspectra@v0.8.0
+  with:
+    checkpoint: './checkpoints/adapter_model.safetensors'
+    sarif: 'loraspectra-audit.sarif'
+    fail-on-critical: 'true'
+
+- name: Upload SARIF to GitHub Code Scanning
+  uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: 'loraspectra-audit.sarif'
 ```
 
 ### Run Unit Tests and Reproducible Benchmarks
