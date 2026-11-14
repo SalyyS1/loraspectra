@@ -1157,6 +1157,324 @@ mod tests {
         let lw = rep.recommendation.suggested_layer_weights.unwrap();
         assert!(lw.contains("ff=1.0:0.35"), "unexpected lw: {}", lw);
     }
+
+    #[test]
+    fn test_integrity_detects_zero_norm_special_token_embedding_rows_and_dead_lora_columns() {
+        use crate::audit::{audit_adapter, audit_adapter_integrity, render_audit_json};
+        use crate::safetensors::{extract_dora_scales, extract_lora_alphas};
+
+        let mut rng = Rng64::new(2027);
+        let d_model = 32;
+        let vocab = 64;
+        let r = 8;
+
+        // 1. Healthy q_proj LoRA layer
+        let q_layer = LoraLayer {
+            base_name: "base_model.model.model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_model, &mut rng, DType::F32),
+            b: random_matrix(d_model, r, &mut rng, DType::F32),
+        };
+
+        // 2. PEFT Embedding LoRA (embed_tokens.lora_embedding_A: r x vocab, lora_embedding_B: d_model x r)
+        // Simulate 4 newly added <tool_call> special tokens at indices 60..64 that never received gradients,
+        // plus 2 dead columns in lora_embedding_B.
+        let mut emb_a = random_matrix(r, vocab, &mut rng, DType::F32);
+        for tok in 60..vocab {
+            for row in 0..r {
+                emb_a.set(row, tok, 0.0);
+            }
+        }
+        let mut emb_b = random_matrix(d_model, r, &mut rng, DType::F32);
+        for row in 0..d_model {
+            emb_b.set(row, 6, 0.0);
+            emb_b.set(row, 7, 0.0);
+        }
+
+        // 3. Dense saved lm_head (modules_to_save) with 4 trailing zero-norm special-token rows
+        let mut dense_lm_head = random_matrix(vocab, d_model, &mut rng, DType::F32);
+        for tok in 60..vocab {
+            for col in 0..d_model {
+                dense_lm_head.set(tok, col, 0.0);
+            }
+        }
+
+        let mut tensors = layers_to_tensor_map(&[q_layer]);
+        tensors.insert(
+            "base_model.model.model.embed_tokens.lora_embedding_A".to_string(),
+            emb_a,
+        );
+        tensors.insert(
+            "base_model.model.model.embed_tokens.lora_embedding_B".to_string(),
+            emb_b,
+        );
+        tensors.insert(
+            "base_model.model.lm_head.modules_to_save.default.weight".to_string(),
+            dense_lm_head,
+        );
+
+        let layers = extract_lora_layers(&tensors).expect("extract layers with lora_embedding_A/B");
+        assert_eq!(layers.len(), 2);
+        let alphas = extract_lora_alphas(&tensors);
+        let dora = extract_dora_scales(&tensors);
+
+        let summary = audit_adapter(&layers);
+        let integrity = audit_adapter_integrity(&layers, &tensors, &alphas, &dora, None);
+
+        assert_eq!(integrity.status, "ISSUES_DETECTED");
+        assert_eq!(integrity.embedding_entries.len(), 2);
+
+        let dense_entry = integrity
+            .embedding_entries
+            .iter()
+            .find(|e| e.kind == "dense_tensor")
+            .expect("dense lm_head entry");
+        assert_eq!(dense_entry.zero_norm_rows, 4);
+        assert_eq!(dense_entry.trailing_zero_rows, 4);
+
+        let lora_emb_entry = integrity
+            .embedding_entries
+            .iter()
+            .find(|e| e.kind == "lora_embedding")
+            .expect("lora_embedding entry");
+        assert_eq!(lora_emb_entry.zero_norm_rows, 4);
+        assert_eq!(lora_emb_entry.trailing_zero_rows, 4);
+        assert_eq!(lora_emb_entry.dead_lora_b_cols, 2);
+
+        assert!(integrity
+            .issues
+            .iter()
+            .any(|i| i.code == "ZERO_NORM_EMBEDDING_ROWS" && i.message.contains("<tool_call>")));
+        assert!(integrity
+            .issues
+            .iter()
+            .any(|i| i.code == "DEAD_EMBEDDING_LORA_COLUMNS"));
+
+        let json_out = render_audit_json("qwen_coder_sft.safetensors", &summary, &integrity);
+        assert!(json_out.contains("\"integrity_status\": \"ISSUES_DETECTED\""));
+        assert!(json_out.contains("\"ZERO_NORM_EMBEDDING_ROWS\""));
+        assert!(json_out.contains("\"trailing_zero_rows\": 4"));
+    }
+
+    #[test]
+    fn test_integrity_detects_wte_and_lm_head_lora_zero_rows_and_dead_layers() {
+        use crate::audit::audit_adapter_integrity;
+
+        let mut rng = Rng64::new(3031);
+        let d = 24;
+        let vocab = 40;
+        let r = 4;
+
+        // GPT-2 / StarCoder style wte + lm_head LoRA where lm_head has 3 trailing dead rows
+        // and v_proj is completely dead (lora_B = 0).
+        let mut lm_b = random_matrix(vocab, r, &mut rng, DType::F32);
+        for tok in 37..vocab {
+            for col in 0..r {
+                lm_b.set(tok, col, 0.0);
+            }
+        }
+        let lm_layer = LoraLayer {
+            base_name: "transformer.lm_head".to_string(),
+            a_key: "transformer.lm_head.lora_A.weight".to_string(),
+            b_key: "transformer.lm_head.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: lm_b,
+        };
+        let dead_v = LoraLayer {
+            base_name: "transformer.h.0.attn.v_proj".to_string(),
+            a_key: "transformer.h.0.attn.v_proj.lora_A.weight".to_string(),
+            b_key: "transformer.h.0.attn.v_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: Tensor2D::zeros(d, r, DType::F32),
+        };
+        let mut tensors = layers_to_tensor_map(&[lm_layer.clone(), dead_v.clone()]);
+        let mut wte = random_matrix(vocab, d, &mut rng, DType::F32);
+        for col in 0..d {
+            wte.set(39, col, 0.0);
+        }
+        tensors.insert("transformer.wte.weight".to_string(), wte);
+
+        let rep = audit_adapter_integrity(
+            &[lm_layer, dead_v],
+            &tensors,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            None,
+        );
+        assert_eq!(rep.dead_lora_layers, 1);
+        assert!(rep.issues.iter().any(|i| i.code == "DEAD_LORA_LAYER"));
+        assert_eq!(rep.embedding_entries.len(), 2);
+        assert!(rep
+            .embedding_entries
+            .iter()
+            .any(|e| e.name == "transformer.wte.weight" && e.trailing_zero_rows == 1));
+        assert!(rep
+            .embedding_entries
+            .iter()
+            .any(|e| e.name == "transformer.lm_head" && e.trailing_zero_rows == 3));
+    }
+
+    #[test]
+    fn test_integrity_detects_alpha_and_dora_scaling_anomalies() {
+        use crate::audit::audit_adapter_integrity;
+        use crate::safetensors::parse_peft_adapter_config;
+
+        let mut rng = Rng64::new(4041);
+        let d = 32;
+        let r = 16;
+
+        let l1 = LoraLayer {
+            base_name: "base_model.model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "base_model.model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "base_model.model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+        let l2 = LoraLayer {
+            base_name: "base_model.model.layers.0.self_attn.k_proj".to_string(),
+            a_key: "base_model.model.layers.0.self_attn.k_proj.lora_A.weight".to_string(),
+            b_key: "base_model.model.layers.0.self_attn.k_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::F32),
+            b: random_matrix(d, r, &mut rng, DType::F32),
+        };
+        let layers = vec![l1, l2];
+        let tensors = layers_to_tensor_map(&layers);
+        let empty_alphas = std::collections::BTreeMap::new();
+        let empty_dora = std::collections::BTreeMap::new();
+
+        // Case 1: Missing lora_alpha in adapter_config.json when .alpha tensors are absent
+        let cfg_missing =
+            parse_peft_adapter_config(r#"{"peft_type": "LORA", "r": 16, "use_dora": true}"#)
+                .expect("parse config missing lora_alpha");
+        let rep_missing = audit_adapter_integrity(
+            &layers,
+            &tensors,
+            &empty_alphas,
+            &empty_dora,
+            Some(&cfg_missing),
+        );
+        assert_eq!(rep_missing.alpha_summary.status, "ANOMALY_DETECTED");
+        assert!(rep_missing
+            .issues
+            .iter()
+            .any(|i| i.code == "MISSING_LORA_ALPHA"));
+        assert!(rep_missing
+            .issues
+            .iter()
+            .any(|i| i.code == "MISSING_DORA_VECTORS"));
+
+        // Case 2: Partial .alpha scalar tensors across layers + extreme underscale (< 0.1)
+        let mut partial_alphas = std::collections::BTreeMap::new();
+        partial_alphas.insert(
+            "base_model.model.layers.0.self_attn.q_proj".to_string(),
+            0.5, // alpha/r = 0.5 / 16 = 0.03125 < 0.1
+        );
+        let rep_partial =
+            audit_adapter_integrity(&layers, &tensors, &partial_alphas, &empty_dora, None);
+        assert!(rep_partial
+            .issues
+            .iter()
+            .any(|i| i.code == "MISMATCHED_ALPHA_TENSORS"));
+        assert!(rep_partial
+            .issues
+            .iter()
+            .any(|i| i.code == "EXTREME_ALPHA_UNDERSCALE"));
+
+        // Case 3: Extreme overscale (alpha/r > 16.0) via adapter_config.json
+        let cfg_overscale = parse_peft_adapter_config(
+            r#"{"peft_type": "LORA", "r": 16, "lora_alpha": 512, "alpha_pattern": {"layers.0.self_attn.k_proj": 1024}}"#,
+        )
+        .expect("parse overscale config");
+        let rep_over = audit_adapter_integrity(
+            &layers,
+            &tensors,
+            &empty_alphas,
+            &empty_dora,
+            Some(&cfg_overscale),
+        );
+        assert!(rep_over
+            .issues
+            .iter()
+            .any(|i| i.code == "EXTREME_ALPHA_OVERSCALE"));
+        assert!((rep_over.alpha_summary.max_alpha_r_ratio.unwrap() - 64.0).abs() < 1e-6);
+
+        // Case 4: Healthy scaling (alpha = 32, r = 16 -> alpha/r = 2.0)
+        let cfg_healthy =
+            parse_peft_adapter_config(r#"{"peft_type": "LORA", "r": 16, "lora_alpha": 32}"#)
+                .expect("parse healthy config");
+        let rep_ok = audit_adapter_integrity(
+            &layers,
+            &tensors,
+            &empty_alphas,
+            &empty_dora,
+            Some(&cfg_healthy),
+        );
+        assert_eq!(rep_ok.status, "HEALTHY");
+        assert_eq!(rep_ok.alpha_summary.status, "HEALTHY");
+        assert!(rep_ok.issues.is_empty());
+    }
+
+    #[test]
+    fn test_huggingface_model_card_markdown_generator_and_backlink_badge() {
+        use crate::audit::{audit_adapter, audit_adapter_integrity};
+        use crate::card::generate_model_card;
+        use crate::safetensors::parse_peft_adapter_config;
+
+        let mut rng = Rng64::new(5051);
+        let d = 64;
+        let r = 16;
+
+        // High-utilization bottleneck layer + rank-collapsed over-parameterized layer
+        let full_q = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng, DType::BF16),
+            b: random_matrix(d, r, &mut rng, DType::BF16),
+        };
+
+        let u_vec = random_matrix(d, 1, &mut rng, DType::BF16);
+        let v_vec = random_matrix(1, d, &mut rng, DType::BF16);
+        let mut b_col = Tensor2D::zeros(d, r, DType::BF16);
+        let mut a_col = Tensor2D::zeros(r, d, DType::BF16);
+        for idx in 0..d {
+            b_col.set(idx, 0, u_vec.get(idx, 0) * 4.0);
+            a_col.set(0, idx, v_vec.get(0, idx) * 4.0);
+        }
+        let collapsed_down = LoraLayer {
+            base_name: "model.layers.0.mlp.down_proj".to_string(),
+            a_key: "model.layers.0.mlp.down_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.down_proj.lora_B.weight".to_string(),
+            a: a_col,
+            b: b_col,
+        };
+
+        let layers = vec![full_q, collapsed_down];
+        let tensors = layers_to_tensor_map(&layers);
+        let alphas = std::collections::BTreeMap::new();
+        let dora = std::collections::BTreeMap::new();
+        let cfg = parse_peft_adapter_config(r#"{"peft_type": "LORA", "r": 16, "lora_alpha": 32}"#)
+            .expect("parse peft config");
+
+        let arch = inspect_adapter_architecture(&layers, &alphas);
+        let summary = audit_adapter(&layers);
+        let integrity = audit_adapter_integrity(&layers, &tensors, &alphas, &dora, Some(&cfg));
+
+        let md = generate_model_card("hf://SalyyS1/demo-qwen-lora", &arch, &summary, &integrity);
+        assert!(md.contains("https://img.shields.io/badge/LoRASpectra-99%25_Rank_r%3D"));
+        assert!(md.contains("](https://github.com/SalyyS1/loraspectra)"));
+        assert!(md.contains("| **Total LoRA Parameters** |"));
+        assert!(md.contains("| **Mean Energy Utilization (99% Frobenius)** |"));
+        assert!(md.contains("| **Optimal Eckart-Young Rank (99% Energy)** |"));
+        assert!(md.contains("| **DoRA / Alpha & SFT Health** | HEALTHY (alpha/r=2.00; Standard LoRA (no DoRA vectors)) |"));
+        assert!(md.contains("### Top Bottleneck & Over-Parameterized Target Modules"));
+        assert!(md.contains("`model.layers.0.self_attn.q_proj`"));
+        assert!(md.contains("`model.layers.0.mlp.down_proj`"));
+        assert!(md.contains("`RANK_COLLAPSED`"));
+        assert!(!md.contains('\u{2014}'), "model card must not contain em-dashes");
+    }
 }
 
+pub mod card;
 pub mod remote;

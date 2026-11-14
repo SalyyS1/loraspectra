@@ -8,13 +8,13 @@ use std::process::{self, Command};
 pub enum RemoteSpec {
     /// Local filesystem path.
     LocalPath(PathBuf),
-    /// `hf://<org>/<repo>[@<revision>]` — auto-discovers the `.safetensors` LoRA file via HF Hub API.
+    /// `hf://<org>/<repo>[@<revision>]` - auto-discovers the `.safetensors` LoRA file via HF Hub API.
     HuggingFaceRepo {
         org: String,
         repo: String,
         revision: String,
     },
-    /// `hf://<org>/<repo>[@<revision>]/<filename.safetensors>` — resolves directly on HF Hub.
+    /// `hf://<org>/<repo>[@<revision>]/<filename.safetensors>` - resolves directly on HF Hub.
     HuggingFaceFile {
         org: String,
         repo: String,
@@ -616,6 +616,83 @@ pub fn resolve_source_path_with_cache(
             }
             curl_download_to_cache(&url, &cached, hf_token)?;
             Ok(cached)
+        }
+    }
+}
+
+/// Locate an optional companion `adapter_config.json` alongside a local or `hf://` `.safetensors`
+/// checkpoint without failing if the checkpoint is a standalone Kohya/Diffusers archive.
+pub fn resolve_companion_config_path(
+    source_str: &str,
+    resolved_safetensors: &Path,
+) -> Option<PathBuf> {
+    let spec = parse_source_spec(source_str).ok()?;
+    match spec {
+        RemoteSpec::LocalPath(_) => {
+            let parent = resolved_safetensors.parent()?;
+            // Avoid picking up stray files directly inside the shared system /tmp root unless
+            // the user placed the checkpoint inside its own directory.
+            if parent == env::temp_dir() {
+                return None;
+            }
+            let candidate = parent.join("adapter_config.json");
+            if candidate.is_file() {
+                Some(candidate)
+            } else {
+                None
+            }
+        }
+        RemoteSpec::HuggingFaceRepo {
+            org,
+            repo,
+            revision,
+        } => fetch_optional_hf_config(&org, &repo, &revision, "adapter_config.json", resolved_safetensors),
+        RemoteSpec::HuggingFaceFile {
+            org,
+            repo,
+            revision,
+            filename,
+        } => {
+            let cfg_rel = match filename.rsplit_once('/') {
+                Some((dir, _)) if !dir.is_empty() => format!("{}/adapter_config.json", dir),
+                _ => "adapter_config.json".to_string(),
+            };
+            fetch_optional_hf_config(&org, &repo, &revision, &cfg_rel, resolved_safetensors)
+        }
+        RemoteSpec::DirectUrl { .. } => None,
+    }
+}
+
+fn fetch_optional_hf_config(
+    org: &str,
+    repo: &str,
+    revision: &str,
+    cfg_rel: &str,
+    resolved_safetensors: &Path,
+) -> Option<PathBuf> {
+    let parent = resolved_safetensors.parent()?;
+    let dest = parent.join("adapter_config.json");
+    if dest.is_file() {
+        return Some(dest);
+    }
+    let neg_marker = parent.join(".no_adapter_config");
+    if neg_marker.exists() {
+        return None;
+    }
+    let url = hf_resolve_url(org, repo, revision, cfg_rel);
+    let hf_token = read_hf_token_from_env();
+    match curl_fetch_string(&url, hf_token.as_deref()) {
+        Ok(body) if body.trim_start().starts_with('{') => {
+            let _ = fs::write(&dest, body.as_bytes());
+            if dest.is_file() {
+                Some(dest)
+            } else {
+                None
+            }
+        }
+        _ => {
+            let _ = fs::write(&neg_marker, b"");
+            None
         }
     }
 }

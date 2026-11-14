@@ -584,6 +584,10 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
         if let Some(raw_base) = key
             .strip_suffix(".lora_A.weight")
             .or_else(|| key.strip_suffix(".lora_A.default.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_A.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_A.default.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_A.default"))
+            .or_else(|| key.strip_suffix(".lora_embedding_A"))
             .or_else(|| key.strip_suffix(".lora_down.weight"))
             .or_else(|| key.strip_suffix(".lora.down.weight"))
             .or_else(|| key.strip_suffix(".lora_linear_layer.down.weight"))
@@ -597,6 +601,10 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
         } else if let Some(raw_base) = key
             .strip_suffix(".lora_B.weight")
             .or_else(|| key.strip_suffix(".lora_B.default.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_B.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_B.default.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_B.default"))
+            .or_else(|| key.strip_suffix(".lora_embedding_B"))
             .or_else(|| key.strip_suffix(".lora_up.weight"))
             .or_else(|| key.strip_suffix(".lora.up.weight"))
             .or_else(|| key.strip_suffix(".lora_linear_layer.up.weight"))
@@ -846,6 +854,7 @@ pub fn inspect_adapter_architecture(
         "SimpleTuner / LyCORIS"
     } else if first_a.ends_with(".lora_A.weight")
         || first_a.ends_with(".lora_A.default.weight")
+        || first_a.contains(".lora_embedding_A")
     {
         "HuggingFace PEFT"
     } else if first_a.ends_with(".lora_down.weight") {
@@ -950,4 +959,271 @@ pub fn inspect_adapter_architecture(
         primary_dtype,
         alpha_tensor_count: alphas.len(),
     }
+}
+
+/// Parsed scaling and module metadata from a HuggingFace PEFT `adapter_config.json`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PeftAdapterConfig {
+    pub r: Option<usize>,
+    pub lora_alpha: Option<f64>,
+    pub use_rslora: bool,
+    pub use_dora: bool,
+    pub rank_pattern: BTreeMap<String, usize>,
+    pub alpha_pattern: BTreeMap<String, f64>,
+    pub modules_to_save: Vec<String>,
+}
+
+/// Parse a HuggingFace PEFT `adapter_config.json` document without external crates.
+pub fn parse_peft_adapter_config(json_str: &str) -> Result<PeftAdapterConfig, String> {
+    let bytes = json_str.as_bytes();
+    let mut i = 0usize;
+
+    let skip_ws = |idx: &mut usize| {
+        while *idx < bytes.len() && matches!(bytes[*idx], b' ' | b'\t' | b'\r' | b'\n') {
+            *idx += 1;
+        }
+    };
+
+    let parse_str = |idx: &mut usize| -> Result<String, String> {
+        skip_ws(idx);
+        if *idx >= bytes.len() || bytes[*idx] != b'"' {
+            return Err(format!("Expected '\"' at byte {}", *idx));
+        }
+        *idx += 1;
+        let mut out = String::new();
+        while *idx < bytes.len() {
+            let b = bytes[*idx];
+            *idx += 1;
+            if b == b'"' {
+                return Ok(out);
+            } else if b == b'\\' {
+                if *idx >= bytes.len() {
+                    return Err("Unexpected EOF in JSON escape".to_string());
+                }
+                let esc = bytes[*idx];
+                *idx += 1;
+                match esc {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    other => out.push(other as char),
+                }
+            } else {
+                out.push(b as char);
+            }
+        }
+        Err("Unterminated JSON string".to_string())
+    };
+
+    let parse_opt_f64 = |idx: &mut usize| -> Result<Option<f64>, String> {
+        skip_ws(idx);
+        if *idx + 4 <= bytes.len() && &bytes[*idx..*idx + 4] == b"null" {
+            *idx += 4;
+            return Ok(None);
+        }
+        let start = *idx;
+        while *idx < bytes.len()
+            && (bytes[*idx].is_ascii_digit()
+                || matches!(bytes[*idx], b'-' | b'+' | b'.' | b'e' | b'E'))
+        {
+            *idx += 1;
+        }
+        if start == *idx {
+            return Err(format!("Expected JSON number at byte {}", start));
+        }
+        let val = json_str[start..*idx]
+            .parse::<f64>()
+            .map_err(|e| format!("Invalid number '{}': {}", &json_str[start..*idx], e))?;
+        Ok(Some(val))
+    };
+
+    let parse_bool_or_null = |idx: &mut usize| -> Result<bool, String> {
+        skip_ws(idx);
+        if *idx + 4 <= bytes.len() && &bytes[*idx..*idx + 4] == b"true" {
+            *idx += 4;
+            Ok(true)
+        } else if *idx + 5 <= bytes.len() && &bytes[*idx..*idx + 5] == b"false" {
+            *idx += 5;
+            Ok(false)
+        } else if *idx + 4 <= bytes.len() && &bytes[*idx..*idx + 4] == b"null" {
+            *idx += 4;
+            Ok(false)
+        } else {
+            Err(format!("Expected boolean at byte {}", *idx))
+        }
+    };
+
+    let skip_val = |idx: &mut usize| -> Result<(), String> {
+        skip_ws(idx);
+        let mut depth = 0usize;
+        let mut in_str = false;
+        while *idx < bytes.len() {
+            let b = bytes[*idx];
+            if in_str {
+                if b == b'\\' {
+                    *idx += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    in_str = false;
+                }
+            } else {
+                match b {
+                    b'"' => in_str = true,
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                        if depth == 0 {
+                            *idx += 1;
+                            break;
+                        }
+                    }
+                    b',' if depth == 0 => break,
+                    _ => {}
+                }
+            }
+            *idx += 1;
+        }
+        Ok(())
+    };
+
+    skip_ws(&mut i);
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return Err("adapter_config.json must be a JSON object".to_string());
+    }
+    i += 1;
+
+    let mut cfg = PeftAdapterConfig::default();
+    loop {
+        skip_ws(&mut i);
+        if i < bytes.len() && bytes[i] == b'}' {
+            break;
+        }
+        if i >= bytes.len() {
+            return Err("Unexpected EOF in adapter_config.json".to_string());
+        }
+        let key = parse_str(&mut i)?;
+        skip_ws(&mut i);
+        if i >= bytes.len() || bytes[i] != b':' {
+            return Err("Expected ':' after key in adapter_config.json".to_string());
+        }
+        i += 1;
+        skip_ws(&mut i);
+
+        match key.as_str() {
+            "r" => {
+                if let Some(v) = parse_opt_f64(&mut i)? {
+                    if v >= 1.0 {
+                        cfg.r = Some(v.round() as usize);
+                    }
+                }
+            }
+            "lora_alpha" => {
+                cfg.lora_alpha = parse_opt_f64(&mut i)?;
+            }
+            "use_rslora" => {
+                cfg.use_rslora = parse_bool_or_null(&mut i)?;
+            }
+            "use_dora" => {
+                cfg.use_dora = parse_bool_or_null(&mut i)?;
+            }
+            "rank_pattern" => {
+                if i < bytes.len() && bytes[i] == b'{' {
+                    i += 1;
+                    loop {
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b'}' {
+                            i += 1;
+                            break;
+                        }
+                        let pat_key = parse_str(&mut i)?;
+                        skip_ws(&mut i);
+                        if i >= bytes.len() || bytes[i] != b':' {
+                            return Err("Expected ':' in rank_pattern".to_string());
+                        }
+                        i += 1;
+                        if let Some(v) = parse_opt_f64(&mut i)? {
+                            if v >= 1.0 {
+                                cfg.rank_pattern.insert(pat_key, v.round() as usize);
+                            }
+                        }
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b',' {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    skip_val(&mut i)?;
+                }
+            }
+            "alpha_pattern" => {
+                if i < bytes.len() && bytes[i] == b'{' {
+                    i += 1;
+                    loop {
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b'}' {
+                            i += 1;
+                            break;
+                        }
+                        let pat_key = parse_str(&mut i)?;
+                        skip_ws(&mut i);
+                        if i >= bytes.len() || bytes[i] != b':' {
+                            return Err("Expected ':' in alpha_pattern".to_string());
+                        }
+                        i += 1;
+                        if let Some(v) = parse_opt_f64(&mut i)? {
+                            cfg.alpha_pattern.insert(pat_key, v);
+                        }
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b',' {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    skip_val(&mut i)?;
+                }
+            }
+            "modules_to_save" => {
+                if i < bytes.len() && bytes[i] == b'[' {
+                    i += 1;
+                    loop {
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b']' {
+                            i += 1;
+                            break;
+                        }
+                        let m = parse_str(&mut i)?;
+                        cfg.modules_to_save.push(m);
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b',' {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    skip_val(&mut i)?;
+                }
+            }
+            _ => {
+                skip_val(&mut i)?;
+            }
+        }
+        skip_ws(&mut i);
+        if i < bytes.len() && bytes[i] == b',' {
+            i += 1;
+        }
+    }
+    Ok(cfg)
+}
+
+/// Read and parse a HuggingFace PEFT `adapter_config.json` from disk.
+pub fn read_peft_adapter_config(path: &Path) -> Result<PeftAdapterConfig, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    parse_peft_adapter_config(&content)
 }

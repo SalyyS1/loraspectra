@@ -3,24 +3,26 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use loraspectra::audit::audit_adapter;
+use loraspectra::audit::{audit_adapter, audit_adapter_integrity, render_audit_json};
+use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
     compress_adapter, extract_lora_from_dense_models, CompressionPolicy,
 };
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
-use loraspectra::remote::resolve_source_path;
+use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
 use loraspectra::safetensors::{
     bake_adapter_scaling, cast_layers_dtype, convert_layers_key_format, extract_dora_scales,
     extract_lora_alphas, extract_lora_layers, insert_dora_scales, insert_unit_alpha_tensors,
-    inspect_adapter_architecture, layers_to_tensor_map, read_safetensors,
-    write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, Tensor2D,
+    inspect_adapter_architecture, layers_to_tensor_map, read_peft_adapter_config, read_safetensors,
+    write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, PeftAdapterConfig,
+    Tensor2D,
 };
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v0.6.0 — Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+        "loraspectra v0.7.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -28,7 +30,8 @@ SOURCES:
 
 USAGE:
   loraspectra info <adapter_or_hf_uri> [--json]
-  loraspectra audit <adapter_or_hf_uri> [--json]
+  loraspectra audit <adapter_or_hf_uri> [--json] [--config <adapter_config.json>]
+  loraspectra card <adapter_or_hf_uri> [-o <model_card.md>] [--config <adapter_config.json>]
   loraspectra compress <input_or_hf_uri> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
@@ -62,6 +65,62 @@ fn resolve_input_or_exit(source_str: &str) -> PathBuf {
     }
 }
 
+fn load_full_adapter_bundle_or_exit(
+    source_str: &str,
+    explicit_config: Option<&str>,
+) -> (
+    BTreeMap<String, Tensor2D>,
+    Vec<LoraLayer>,
+    BTreeMap<String, f64>,
+    BTreeMap<String, (String, Tensor2D)>,
+    Option<PeftAdapterConfig>,
+) {
+    let resolved_path = resolve_input_or_exit(source_str);
+    let tensors = match read_safetensors(&resolved_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "Error reading {} ({}): {}",
+                source_str,
+                resolved_path.display(),
+                e
+            );
+            process::exit(1);
+        }
+    };
+    let alphas = extract_lora_alphas(&tensors);
+    let dora_scales = extract_dora_scales(&tensors);
+    let layers = match extract_lora_layers(&tensors) {
+        Ok(layers) if !layers.is_empty() => layers,
+        Ok(_) => {
+            eprintln!(
+                "No matched (lora_A, lora_B) 2D tensor pairs found in {}",
+                source_str
+            );
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error extracting LoRA layers from {}: {}", source_str, e);
+            process::exit(1);
+        }
+    };
+
+    let peft_config = if let Some(cfg_str) = explicit_config {
+        match read_peft_adapter_config(Path::new(cfg_str)) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                eprintln!("Error reading {}: {}", cfg_str, e);
+                process::exit(1);
+            }
+        }
+    } else {
+        resolve_companion_config_path(source_str, &resolved_path)
+            .and_then(|p| read_peft_adapter_config(&p).ok())
+    };
+
+    (tensors, layers, alphas, dora_scales, peft_config)
+}
+
 fn load_layers_alphas_dora_or_exit(
     source_str: &str,
 ) -> (
@@ -69,27 +128,8 @@ fn load_layers_alphas_dora_or_exit(
     BTreeMap<String, f64>,
     BTreeMap<String, (String, Tensor2D)>,
 ) {
-    let resolved_path = resolve_input_or_exit(source_str);
-    let tensors = match read_safetensors(&resolved_path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error reading {} ({}): {}", source_str, resolved_path.display(), e);
-            process::exit(1);
-        }
-    };
-    let alphas = extract_lora_alphas(&tensors);
-    let dora_scales = extract_dora_scales(&tensors);
-    match extract_lora_layers(&tensors) {
-        Ok(layers) if !layers.is_empty() => (layers, alphas, dora_scales),
-        Ok(_) => {
-            eprintln!("No matched (lora_A, lora_B) 2D tensor pairs found in {}", source_str);
-            process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error extracting LoRA layers from {}: {}", source_str, e);
-            process::exit(1);
-        }
-    }
+    let (_, layers, alphas, dora_scales, _) = load_full_adapter_bundle_or_exit(source_str, None);
+    (layers, alphas, dora_scales)
 }
 
 fn load_layers_and_alphas_or_exit(path_str: &str) -> (Vec<LoraLayer>, BTreeMap<String, f64>) {
@@ -172,29 +212,45 @@ fn main() {
             }
         }
         "audit" => {
-            let json_mode = args[2..].iter().any(|a| a == "--json");
-            let pos: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
+            let mut json_mode = false;
+            let mut config_opt: Option<String> = None;
+            let mut pos: Vec<String> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--json" => {
+                        json_mode = true;
+                        i += 1;
+                    }
+                    "--config" | "--peft-config" if i + 1 < args.len() => {
+                        config_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    a if !a.starts_with("--") => {
+                        pos.push(a.to_string());
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
             if pos.is_empty() {
                 print_usage();
                 process::exit(1);
             }
-            let source = pos[0];
-            let layers = load_layers_or_exit(source);
+            let source = &pos[0];
+            let (tensors, layers, alphas, dora_scales, peft_config) =
+                load_full_adapter_bundle_or_exit(source, config_opt.as_deref());
             let summary = audit_adapter(&layers);
+            let integrity = audit_adapter_integrity(
+                &layers,
+                &tensors,
+                &alphas,
+                &dora_scales,
+                peft_config.as_ref(),
+            );
 
             if json_mode {
-                println!("{{");
-                println!("  \"source\": \"{}\",", json_escape(source));
-                println!("  \"layer_count\": {},", summary.layers.len());
-                println!("  \"total_nominal_bytes\": {},", summary.total_nominal_bytes);
-                println!("  \"total_optimal_99_bytes\": {},", summary.total_optimal_99_bytes);
-                println!("  \"compressible_byte_ratio\": {:.6},", summary.compressible_byte_ratio);
-                println!("  \"mean_nominal_rank\": {:.2},", summary.mean_nominal_rank);
-                println!("  \"mean_effective_rank\": {:.2},", summary.mean_effective_rank);
-                println!("  \"mean_stable_rank\": {:.2},", summary.mean_stable_rank);
-                println!("  \"mean_rank_at_99_energy\": {:.2},", summary.mean_rank_at_99_energy);
-                println!("  \"mean_rank_marchenko_pastur\": {:.2}", summary.mean_rank_mp);
-                println!("}}");
+                println!("{}", render_audit_json(source, &summary, &integrity));
             } else {
                 println!(
                     "{:<42} {:>6} {:>8} {:>8} {:>7} {:>6} {:>8} {:<18}",
@@ -224,6 +280,81 @@ fn main() {
                     summary.mean_effective_rank,
                     summary.compressible_byte_ratio * 100.0
                 );
+                let alpha_scale_str = match (
+                    integrity.alpha_summary.min_alpha_r_ratio,
+                    integrity.alpha_summary.max_alpha_r_ratio,
+                ) {
+                    (Some(lo), Some(hi)) if (hi - lo).abs() < 1e-4 => format!("{:.2}", lo),
+                    (Some(lo), Some(hi)) => format!("{:.2}..{:.2}", lo, hi),
+                    _ => "implicit(1.0)".to_string(),
+                };
+                println!(
+                    "Integrity: {} | Alpha/DoRA: {} (alpha/r={}, .alpha={}, dora={}) | Token modules inspected: {}",
+                    integrity.status,
+                    integrity.alpha_summary.status,
+                    alpha_scale_str,
+                    integrity.alpha_summary.alpha_tensor_count,
+                    integrity.alpha_summary.dora_tensor_count,
+                    integrity.embedding_entries.len()
+                );
+                for issue in &integrity.issues {
+                    println!(
+                        "  [{}] {} ({}): {}",
+                        issue.severity.as_str(),
+                        issue.code,
+                        issue.subject,
+                        issue.message
+                    );
+                }
+            }
+        }
+        "card" => {
+            let mut output_opt: Option<String> = None;
+            let mut config_opt: Option<String> = None;
+            let mut pos: Vec<String> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-o" | "--output" if i + 1 < args.len() => {
+                        output_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--config" | "--peft-config" if i + 1 < args.len() => {
+                        config_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    a if !a.starts_with('-') => {
+                        pos.push(a.to_string());
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            if pos.is_empty() {
+                print_usage();
+                process::exit(1);
+            }
+            let source = &pos[0];
+            let (tensors, layers, alphas, dora_scales, peft_config) =
+                load_full_adapter_bundle_or_exit(source, config_opt.as_deref());
+            let arch = inspect_adapter_architecture(&layers, &alphas);
+            let summary = audit_adapter(&layers);
+            let integrity = audit_adapter_integrity(
+                &layers,
+                &tensors,
+                &alphas,
+                &dora_scales,
+                peft_config.as_ref(),
+            );
+            let card_md = generate_model_card(source, &arch, &summary, &integrity);
+            if let Some(out_path) = output_opt {
+                if let Err(e) = std::fs::write(&out_path, card_md.as_bytes()) {
+                    eprintln!("Failed to write model card to {}: {}", out_path, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote HuggingFace Model Card spectral audit report to {}", out_path);
+            } else {
+                print!("{}", card_md);
             }
         }
         "compress" => {
