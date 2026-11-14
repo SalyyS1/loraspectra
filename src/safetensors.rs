@@ -657,6 +657,321 @@ pub fn cast_layers_dtype(layers: &mut [LoraLayer], target_dtype: DType) {
     }
 }
 
+/// Strip the standard HuggingFace PEFT `"base_model.model."` wrapper prefix so module keys match
+/// `PreTrainedModel.named_modules()` entries inside `rank_pattern` and `alpha_pattern`.
+pub fn strip_peft_base_prefix(name: &str) -> &str {
+    name.strip_prefix("base_model.model.").unwrap_or(name)
+}
+
+/// Match a module `base_name` against a PEFT `rank_pattern` or `alpha_pattern` map following
+/// `peft.utils.other.get_pattern_key` (`(.*\.)?({key})$` with longest-key precedence).
+pub fn match_peft_pattern_value<T: Copy>(
+    pattern_map: &BTreeMap<String, T>,
+    base_name: &str,
+) -> Option<T> {
+    if let Some(&exact) = pattern_map.get(base_name) {
+        return Some(exact);
+    }
+    let stripped = strip_peft_base_prefix(base_name);
+    if let Some(&exact) = pattern_map.get(stripped) {
+        return Some(exact);
+    }
+    let mut best: Option<(&str, T)> = None;
+    for (pat, &val) in pattern_map {
+        let pat_s = pat.as_str();
+        let is_dot_suffix = stripped == pat_s
+            || base_name == pat_s
+            || (stripped.len() > pat_s.len()
+                && stripped.ends_with(pat_s)
+                && stripped.as_bytes()[stripped.len() - pat_s.len() - 1] == b'.')
+            || (base_name.len() > pat_s.len()
+                && base_name.ends_with(pat_s)
+                && base_name.as_bytes()[base_name.len() - pat_s.len() - 1] == b'.');
+        if is_dot_suffix {
+            match best {
+                Some((prev_pat, _)) if prev_pat.len() >= pat_s.len() => {}
+                _ => best = Some((pat_s, val)),
+            }
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+/// Infer sorted unique leaf module names (e.g. `["down_proj", "gate_proj", "k_proj", "o_proj", "q_proj", "up_proj", "v_proj"]`)
+/// from LoRA layers so `PeftModel.from_pretrained` injects adapters into all compressed target modules.
+pub fn infer_peft_target_modules(layers: &[LoraLayer]) -> Vec<String> {
+    let mut modules = std::collections::BTreeSet::new();
+    for layer in layers {
+        let stripped = strip_peft_base_prefix(&layer.base_name);
+        let leaf = stripped.rsplit('.').next().unwrap_or(stripped);
+        if !leaf.is_empty() {
+            modules.insert(leaf.to_string());
+        }
+    }
+    modules.into_iter().collect()
+}
+
+fn format_json_number(val: f64) -> String {
+    let rounded = val.round();
+    if (val - rounded).abs() < 1e-9 && rounded.abs() < (i64::MAX as f64) {
+        format!("{}", rounded as i64)
+    } else {
+        let s = format!("{:.9}", val);
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+        if trimmed.is_empty() || trimmed == "-0" {
+            "0".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+fn escape_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Resolve pre-compression per-layer `(alpha, effective_scale, effective_rslora)` from explicit
+/// `.alpha` tensors, CLI overrides, or a companion `PeftAdapterConfig`.
+pub fn resolve_layer_scaling_params(
+    layer: &LoraLayer,
+    alphas: &BTreeMap<String, f64>,
+    default_alpha_override: Option<f64>,
+    peft_config: Option<&PeftAdapterConfig>,
+    rslora_override: bool,
+) -> (f64, f64, bool) {
+    let orig_r = layer.rank().max(1) as f64;
+    let use_rslora = rslora_override || peft_config.map(|c| c.use_rslora).unwrap_or(false);
+    let denom = if use_rslora { orig_r.sqrt() } else { orig_r };
+
+    let resolved_alpha = alphas
+        .get(&layer.base_name)
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .or_else(|| default_alpha_override.filter(|v| v.is_finite() && *v > 0.0))
+        .or_else(|| {
+            peft_config.and_then(|cfg| {
+                match_peft_pattern_value(&cfg.alpha_pattern, &layer.base_name)
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .or_else(|| cfg.lora_alpha.filter(|v| v.is_finite() && *v > 0.0))
+            })
+        })
+        .unwrap_or(denom);
+
+    let effective_scale = resolved_alpha / denom;
+    (resolved_alpha, effective_scale, use_rslora)
+}
+
+/// Compute exact scale-preserving per-module `alpha_pattern` entries for compressed layers.
+///
+/// When `baked_scaling` is `false`, emits `alpha_l = s_l * k_l` (or `s_l * sqrt(k_l)` when
+/// `out_use_rslora` is `true`) so HuggingFace PEFT's runtime multiplier `alpha_l / k_l`
+/// (or `alpha_l / sqrt(k_l)`) matches the original layer's effective scale `s_l` to machine precision.
+/// When `baked_scaling` is `true`, emits `alpha_l = k_l` (`out_use_rslora = false`, multiplier `1.0`).
+pub fn compute_peft_alpha_pattern(
+    layers: &[LoraLayer],
+    pre_scales: &[f64],
+    baked_scaling: bool,
+    out_use_rslora: bool,
+) -> BTreeMap<String, f64> {
+    let mut alpha_pattern = BTreeMap::new();
+    for (idx, layer) in layers.iter().enumerate() {
+        let k = layer.rank().max(1) as f64;
+        let clean = strip_peft_base_prefix(&layer.base_name).to_string();
+        let alpha_val = if baked_scaling {
+            k
+        } else {
+            let s = pre_scales.get(idx).copied().unwrap_or(1.0);
+            if out_use_rslora {
+                s * k.sqrt()
+            } else {
+                s * k
+            }
+        };
+        alpha_pattern.insert(clean, alpha_val);
+    }
+    alpha_pattern
+}
+
+/// Build a complete HuggingFace PEFT `adapter_config.json` document preserving upstream metadata
+/// (`base_model_name_or_path`, `task_type`, `target_modules`, `modules_to_save`, `use_dora`, etc.)
+/// while emitting exact per-module `rank_pattern` and `alpha_pattern` maps.
+pub fn build_peft_adapter_config_json(
+    rank_pattern: &BTreeMap<String, usize>,
+    alpha_pattern: &BTreeMap<String, f64>,
+    default_rank: usize,
+    out_use_rslora: bool,
+    has_dora: bool,
+    inferred_target_modules: &[String],
+    source_config: Option<&PeftAdapterConfig>,
+) -> String {
+    let top_r = default_rank.max(1);
+    let mut clean_ranks: BTreeMap<String, usize> = BTreeMap::new();
+    for (name, &r) in rank_pattern {
+        clean_ranks.insert(strip_peft_base_prefix(name).to_string(), r.max(1));
+    }
+
+    let mut clean_alphas: BTreeMap<String, f64> = BTreeMap::new();
+    for (name, &a) in alpha_pattern {
+        clean_alphas.insert(strip_peft_base_prefix(name).to_string(), a);
+    }
+    for (name, &r) in &clean_ranks {
+        clean_alphas.entry(name.clone()).or_insert(r as f64);
+    }
+
+    // Representative top-level lora_alpha consistent with the first layer's post-compression scale
+    let rep_scale = clean_ranks
+        .iter()
+        .next()
+        .and_then(|(k, &r)| {
+            clean_alphas.get(k).map(|&a| {
+                let rf = r.max(1) as f64;
+                if out_use_rslora {
+                    a / rf.sqrt()
+                } else {
+                    a / rf
+                }
+            })
+        })
+        .unwrap_or(1.0);
+    let top_alpha = if out_use_rslora {
+        rep_scale * (top_r as f64).sqrt()
+    } else {
+        rep_scale * (top_r as f64)
+    };
+
+    let peft_type = source_config
+        .and_then(|c| c.peft_type.as_deref())
+        .unwrap_or("LORA");
+    let inference_mode = source_config
+        .and_then(|c| c.inference_mode)
+        .unwrap_or(true);
+    let bias = source_config
+        .and_then(|c| c.bias.as_deref())
+        .unwrap_or("none");
+    let lora_dropout = source_config
+        .and_then(|c| c.lora_dropout)
+        .unwrap_or(0.0);
+    let use_dora = has_dora || source_config.map(|c| c.use_dora).unwrap_or(false);
+
+    let mut fields: Vec<String> = Vec::new();
+    fields.push(format!("  \"peft_type\": \"{}\"", escape_json_str(peft_type)));
+    if let Some(base_model) = source_config.and_then(|c| c.base_model_name_or_path.as_deref()) {
+        fields.push(format!(
+            "  \"base_model_name_or_path\": \"{}\"",
+            escape_json_str(base_model)
+        ));
+    }
+    if let Some(task_type) = source_config.and_then(|c| c.task_type.as_deref()) {
+        fields.push(format!("  \"task_type\": \"{}\"", escape_json_str(task_type)));
+    }
+    fields.push(format!("  \"inference_mode\": {}", inference_mode));
+    fields.push(format!("  \"r\": {}", top_r));
+    fields.push(format!("  \"lora_alpha\": {}", format_json_number(top_alpha)));
+    fields.push(format!(
+        "  \"lora_dropout\": {}",
+        format_json_number(lora_dropout)
+    ));
+    fields.push(format!("  \"bias\": \"{}\"", escape_json_str(bias)));
+    fields.push(format!("  \"use_rslora\": {}", out_use_rslora));
+    fields.push(format!("  \"use_dora\": {}", use_dora));
+    if let Some(fan_in) = source_config.and_then(|c| c.fan_in_fan_out) {
+        fields.push(format!("  \"fan_in_fan_out\": {}", fan_in));
+    }
+
+    if let Some(tm_str) = source_config.and_then(|c| c.target_modules_str.as_deref()) {
+        fields.push(format!(
+            "  \"target_modules\": \"{}\"",
+            escape_json_str(tm_str)
+        ));
+    } else {
+        let tm_list: &[String] = match source_config {
+            Some(c) if !c.target_modules.is_empty() => &c.target_modules,
+            _ => inferred_target_modules,
+        };
+        if !tm_list.is_empty() {
+            let items: Vec<String> = tm_list
+                .iter()
+                .map(|m| format!("\"{}\"", escape_json_str(m)))
+                .collect();
+            fields.push(format!("  \"target_modules\": [{}]", items.join(", ")));
+        }
+    }
+
+    if let Some(cfg) = source_config {
+        if !cfg.modules_to_save.is_empty() {
+            let items: Vec<String> = cfg
+                .modules_to_save
+                .iter()
+                .map(|m| format!("\"{}\"", escape_json_str(m)))
+                .collect();
+            fields.push(format!("  \"modules_to_save\": [{}]", items.join(", ")));
+        }
+    }
+
+    let rank_entries: Vec<String> = clean_ranks
+        .iter()
+        .map(|(k, &r)| format!("    \"{}\": {}", escape_json_str(k), r))
+        .collect();
+    fields.push(format!(
+        "  \"rank_pattern\": {{\n{}\n  }}",
+        rank_entries.join(",\n")
+    ));
+
+    let alpha_entries: Vec<String> = clean_alphas
+        .iter()
+        .map(|(k, &a)| format!("    \"{}\": {}", escape_json_str(k), format_json_number(a)))
+        .collect();
+    fields.push(format!(
+        "  \"alpha_pattern\": {{\n{}\n  }}",
+        alpha_entries.join(",\n")
+    ));
+
+    format!("{{\n{}\n}}\n", fields.join(",\n"))
+}
+
+/// Write a full HuggingFace PEFT `adapter_config.json` with exact `rank_pattern`, scale-preserving
+/// `alpha_pattern`, `target_modules`, and preserved upstream metadata.
+pub fn write_peft_adapter_config(
+    path: &Path,
+    rank_pattern: &BTreeMap<String, usize>,
+    alpha_pattern: &BTreeMap<String, f64>,
+    default_rank: usize,
+    out_use_rslora: bool,
+    has_dora: bool,
+    inferred_target_modules: &[String],
+    source_config: Option<&PeftAdapterConfig>,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let json = build_peft_adapter_config_json(
+        rank_pattern,
+        alpha_pattern,
+        default_rank,
+        out_use_rslora,
+        has_dora,
+        inferred_target_modules,
+        source_config,
+    );
+    let mut file = fs::File::create(path)?;
+    file.write_all(json.as_bytes())?;
+    Ok(())
+}
+
 /// Write a HuggingFace PEFT-compatible `adapter_config.json` containing `rank_pattern` and
 /// `alpha_pattern` for dynamically compressed heterogeneous-rank LoRA adapters (fixes PEFT #3737).
 pub fn write_peft_rank_pattern_config(
@@ -664,21 +979,27 @@ pub fn write_peft_rank_pattern_config(
     rank_pattern: &BTreeMap<String, usize>,
     default_rank: usize,
 ) -> io::Result<()> {
-    let mut entries = Vec::with_capacity(rank_pattern.len());
+    let mut alpha_pattern = BTreeMap::new();
+    let mut leaf_set = std::collections::BTreeSet::new();
     for (name, &r) in rank_pattern {
-        let clean_name = name
-            .strip_prefix("base_model.model.")
-            .unwrap_or(name.as_str());
-        entries.push(format!("    \"{}\": {}", clean_name, r));
+        let clean = strip_peft_base_prefix(name);
+        alpha_pattern.insert(clean.to_string(), r as f64);
+        let leaf = clean.rsplit('.').next().unwrap_or(clean);
+        if !leaf.is_empty() {
+            leaf_set.insert(leaf.to_string());
+        }
     }
-    let pattern_body = entries.join(",\n");
-    let json = format!(
-        "{{\n  \"peft_type\": \"LORA\",\n  \"r\": {},\n  \"lora_alpha\": {},\n  \"rank_pattern\": {{\n{}\n  }},\n  \"alpha_pattern\": {{\n{}\n  }}\n}}\n",
-        default_rank, default_rank, pattern_body, pattern_body
-    );
-    let mut file = fs::File::create(path)?;
-    file.write_all(json.as_bytes())?;
-    Ok(())
+    let inferred: Vec<String> = leaf_set.into_iter().collect();
+    write_peft_adapter_config(
+        path,
+        rank_pattern,
+        &alpha_pattern,
+        default_rank,
+        false,
+        false,
+        &inferred,
+        None,
+    )
 }
 
 /// Extract per-layer `.alpha` scalar values (`<base_name>.alpha`) from a `.safetensors` tensor map.
@@ -971,6 +1292,15 @@ pub struct PeftAdapterConfig {
     pub rank_pattern: BTreeMap<String, usize>,
     pub alpha_pattern: BTreeMap<String, f64>,
     pub modules_to_save: Vec<String>,
+    pub target_modules: Vec<String>,
+    pub target_modules_str: Option<String>,
+    pub base_model_name_or_path: Option<String>,
+    pub task_type: Option<String>,
+    pub peft_type: Option<String>,
+    pub bias: Option<String>,
+    pub inference_mode: Option<bool>,
+    pub fan_in_fan_out: Option<bool>,
+    pub lora_dropout: Option<f64>,
 }
 
 /// Parse a HuggingFace PEFT `adapter_config.json` document without external crates.
@@ -1018,6 +1348,16 @@ pub fn parse_peft_adapter_config(json_str: &str) -> Result<PeftAdapterConfig, St
         Err("Unterminated JSON string".to_string())
     };
 
+    let parse_opt_str = |idx: &mut usize| -> Result<Option<String>, String> {
+        skip_ws(idx);
+        if *idx + 4 <= bytes.len() && &bytes[*idx..*idx + 4] == b"null" {
+            *idx += 4;
+            Ok(None)
+        } else {
+            Ok(Some(parse_str(idx)?))
+        }
+    };
+
     let parse_opt_f64 = |idx: &mut usize| -> Result<Option<f64>, String> {
         skip_ws(idx);
         if *idx + 4 <= bytes.len() && &bytes[*idx..*idx + 4] == b"null" {
@@ -1040,17 +1380,17 @@ pub fn parse_peft_adapter_config(json_str: &str) -> Result<PeftAdapterConfig, St
         Ok(Some(val))
     };
 
-    let parse_bool_or_null = |idx: &mut usize| -> Result<bool, String> {
+    let parse_opt_bool = |idx: &mut usize| -> Result<Option<bool>, String> {
         skip_ws(idx);
         if *idx + 4 <= bytes.len() && &bytes[*idx..*idx + 4] == b"true" {
             *idx += 4;
-            Ok(true)
+            Ok(Some(true))
         } else if *idx + 5 <= bytes.len() && &bytes[*idx..*idx + 5] == b"false" {
             *idx += 5;
-            Ok(false)
+            Ok(Some(false))
         } else if *idx + 4 <= bytes.len() && &bytes[*idx..*idx + 4] == b"null" {
             *idx += 4;
-            Ok(false)
+            Ok(None)
         } else {
             Err(format!("Expected boolean at byte {}", *idx))
         }
@@ -1127,11 +1467,54 @@ pub fn parse_peft_adapter_config(json_str: &str) -> Result<PeftAdapterConfig, St
             "lora_alpha" => {
                 cfg.lora_alpha = parse_opt_f64(&mut i)?;
             }
+            "lora_dropout" => {
+                cfg.lora_dropout = parse_opt_f64(&mut i)?;
+            }
             "use_rslora" => {
-                cfg.use_rslora = parse_bool_or_null(&mut i)?;
+                cfg.use_rslora = parse_opt_bool(&mut i)?.unwrap_or(false);
             }
             "use_dora" => {
-                cfg.use_dora = parse_bool_or_null(&mut i)?;
+                cfg.use_dora = parse_opt_bool(&mut i)?.unwrap_or(false);
+            }
+            "inference_mode" => {
+                cfg.inference_mode = parse_opt_bool(&mut i)?;
+            }
+            "fan_in_fan_out" => {
+                cfg.fan_in_fan_out = parse_opt_bool(&mut i)?;
+            }
+            "base_model_name_or_path" => {
+                cfg.base_model_name_or_path = parse_opt_str(&mut i)?;
+            }
+            "task_type" => {
+                cfg.task_type = parse_opt_str(&mut i)?;
+            }
+            "peft_type" => {
+                cfg.peft_type = parse_opt_str(&mut i)?;
+            }
+            "bias" => {
+                cfg.bias = parse_opt_str(&mut i)?;
+            }
+            "target_modules" => {
+                if i < bytes.len() && bytes[i] == b'[' {
+                    i += 1;
+                    loop {
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b']' {
+                            i += 1;
+                            break;
+                        }
+                        let m = parse_str(&mut i)?;
+                        cfg.target_modules.push(m);
+                        skip_ws(&mut i);
+                        if i < bytes.len() && bytes[i] == b',' {
+                            i += 1;
+                        }
+                    }
+                } else if i < bytes.len() && bytes[i] == b'"' {
+                    cfg.target_modules_str = Some(parse_str(&mut i)?);
+                } else {
+                    skip_val(&mut i)?;
+                }
             }
             "rank_pattern" => {
                 if i < bytes.len() && bytes[i] == b'{' {

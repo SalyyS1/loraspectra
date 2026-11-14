@@ -1867,4 +1867,377 @@ mod tests {
         assert!(sarif.contains("\"version\": \"0.9.0\""));
         assert!(!sarif.contains('\u{2014}'));
     }
+
+    #[test]
+    fn test_budget_optimal_rank_allocator_beats_uniform_fixed_rank_at_identical_bytes() {
+        let mut rng = Rng64::new(10001);
+        let d = 64;
+        let r = 16;
+
+        // Build 2 rank-2 collapsed attention layers + 2 rank-10 MLP layers
+        let mut layers = Vec::new();
+        for idx in 0..2 {
+            let u2 = random_matrix(d, 2, &mut rng, DType::F32);
+            let v2 = random_matrix(2, d, &mut rng, DType::F32);
+            let mut b = Tensor2D::zeros(d, r, DType::F32);
+            let mut a = Tensor2D::zeros(r, d, DType::F32);
+            for col in 0..2 {
+                for row in 0..d {
+                    b.set(row, col, u2.get(row, col) * 2.0);
+                    a.set(col, row, v2.get(col, row) * 2.0);
+                }
+            }
+            let name = format!("base_model.model.model.layers.{}.self_attn.q_proj", idx);
+            layers.push(LoraLayer {
+                a_key: format!("{}.lora_A.weight", name),
+                b_key: format!("{}.lora_B.weight", name),
+                base_name: name,
+                a,
+                b,
+            });
+        }
+        for idx in 0..2 {
+            let u10 = random_matrix(d, 10, &mut rng, DType::F32);
+            let v10 = random_matrix(10, d, &mut rng, DType::F32);
+            let mut b = Tensor2D::zeros(d, r, DType::F32);
+            let mut a = Tensor2D::zeros(r, d, DType::F32);
+            for col in 0..10 {
+                for row in 0..d {
+                    b.set(row, col, u10.get(row, col) * 3.0);
+                    a.set(col, row, v10.get(col, row) * 3.0);
+                }
+            }
+            let name = format!("base_model.model.model.layers.{}.mlp.down_proj", idx);
+            layers.push(LoraLayer {
+                a_key: format!("{}.lora_A.weight", name),
+                b_key: format!("{}.lora_B.weight", name),
+                base_name: name,
+                a,
+                b,
+            });
+        }
+
+        let res_fixed = crate::compress::compress_adapter(&layers, CompressionPolicy::FixedRank(6));
+        let res_budget = crate::compress::compress_adapter(
+            &layers,
+            CompressionPolicy::TargetBudget {
+                target: crate::compress::BudgetTarget::TargetMeanRank(6.0),
+                min_rank: 1,
+                max_rank: 16,
+            },
+        );
+
+        assert!(
+            res_budget.total_compressed_bytes <= res_fixed.total_compressed_bytes,
+            "budget bytes {} exceeded fixed bytes {}",
+            res_budget.total_compressed_bytes,
+            res_fixed.total_compressed_bytes
+        );
+        assert!(
+            res_budget.global_retained_energy > res_fixed.global_retained_energy + 0.15,
+            "expected budget allocator to strictly beat uniform rank: budget={} vs fixed={}",
+            res_budget.global_retained_energy,
+            res_fixed.global_retained_energy
+        );
+        assert!(res_budget.global_retained_energy > 0.999999);
+        assert_eq!(res_budget.metrics[0].compressed_rank, 2);
+        assert_eq!(res_budget.metrics[1].compressed_rank, 2);
+        assert_eq!(res_budget.metrics[2].compressed_rank, 10);
+        assert_eq!(res_budget.metrics[3].compressed_rank, 10);
+    }
+
+    #[test]
+    fn test_budget_optimal_allocator_respects_exact_max_bytes_and_dtype_cost() {
+        assert_eq!(crate::compress::parse_byte_budget("512").unwrap(), 512);
+        assert_eq!(crate::compress::parse_byte_budget("4K").unwrap(), 4096);
+        assert_eq!(
+            crate::compress::parse_byte_budget("1.5MiB").unwrap(),
+            1_572_864
+        );
+        assert!(crate::compress::parse_byte_budget("0").is_err());
+        assert!(crate::compress::parse_byte_budget("-8K").is_err());
+        assert!(crate::compress::parse_byte_budget("12TB").is_err());
+
+        let mut rng = Rng64::new(10002);
+        let narrow_k = LoraLayer {
+            base_name: "model.layers.0.self_attn.k_proj".to_string(),
+            a_key: "model.layers.0.self_attn.k_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.k_proj.lora_B.weight".to_string(),
+            a: random_matrix(16, 64, &mut rng, DType::F32),
+            b: random_matrix(16, 16, &mut rng, DType::F32),
+        };
+        let wide_up = LoraLayer {
+            base_name: "model.layers.0.mlp.up_proj".to_string(),
+            a_key: "model.layers.0.mlp.up_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.up_proj.lora_B.weight".to_string(),
+            a: random_matrix(16, 64, &mut rng, DType::F32),
+            b: random_matrix(192, 16, &mut rng, DType::F32),
+        };
+
+        // In BF16 (2 bytes/elem): narrow_k step = (64+16)*2 = 160B, wide_up step = (64+192)*2 = 512B.
+        let max_bytes = 2_400usize;
+        let mut res = crate::compress::compress_adapter_with_options(
+            &[narrow_k, wide_up],
+            None,
+            CompressionPolicy::TargetBudget {
+                target: crate::compress::BudgetTarget::MaxBytes(max_bytes),
+                min_rank: 2,
+                max_rank: 12,
+            },
+            Some(DType::BF16),
+        );
+        cast_layers_dtype(&mut res.layers, DType::BF16);
+        let bf16_bytes: usize = res.layers.iter().map(|l| l.raw_byte_size()).sum();
+        assert!(
+            bf16_bytes <= max_bytes,
+            "BF16 payload {} exceeded max_bytes {}",
+            bf16_bytes,
+            max_bytes
+        );
+        for m in &res.metrics {
+            assert!(m.compressed_rank >= 2 && m.compressed_rank <= 12);
+        }
+    }
+
+    #[test]
+    fn test_peft_scale_preserving_alpha_pattern_standard_and_rslora_roundtrip() {
+        let mut rng = Rng64::new(10003);
+        let d = 32;
+        let r = 8;
+
+        // Exact rank-3 layer and exact rank-5 layer stored in rank-8 tensors
+        let make_exact_rank_layer = |name: &str, true_k: usize, rng: &mut Rng64| -> LoraLayer {
+            let u = random_matrix(d, true_k, rng, DType::F32);
+            let v = random_matrix(true_k, d, rng, DType::F32);
+            let mut b = Tensor2D::zeros(d, r, DType::F32);
+            let mut a = Tensor2D::zeros(r, d, DType::F32);
+            for col in 0..true_k {
+                for row in 0..d {
+                    b.set(row, col, u.get(row, col));
+                    a.set(col, row, v.get(col, row));
+                }
+            }
+            LoraLayer {
+                base_name: name.to_string(),
+                a_key: format!("{}.lora_A.weight", name),
+                b_key: format!("{}.lora_B.weight", name),
+                a,
+                b,
+            }
+        };
+
+        let l0 = make_exact_rank_layer("base_model.model.model.layers.0.self_attn.q_proj", 3, &mut rng);
+        let l1 = make_exact_rank_layer("base_model.model.model.layers.0.mlp.down_proj", 5, &mut rng);
+        let layers = vec![l0, l1];
+
+        for use_rslora in [false, true] {
+            let mut src_cfg = crate::safetensors::PeftAdapterConfig::default();
+            src_cfg.r = Some(r);
+            src_cfg.lora_alpha = Some(24.0);
+            src_cfg.use_rslora = use_rslora;
+            src_cfg.base_model_name_or_path = Some("Qwen/Qwen2.5-7B".to_string());
+            src_cfg.task_type = Some("CAUSAL_LM".to_string());
+            src_cfg.target_modules = vec!["down_proj".to_string(), "q_proj".to_string()];
+            src_cfg.modules_to_save = vec!["lm_head".to_string()];
+
+            let alphas = BTreeMap::new();
+            let mut pre_scales = Vec::new();
+            for l in &layers {
+                let (_, s, _) = crate::safetensors::resolve_layer_scaling_params(
+                    l,
+                    &alphas,
+                    None,
+                    Some(&src_cfg),
+                    false,
+                );
+                pre_scales.push(s);
+            }
+
+            let res = crate::compress::compress_adapter_with_options(
+                &layers,
+                Some(&pre_scales),
+                CompressionPolicy::AdaptiveEnergy {
+                    target_energy: 0.9999,
+                    min_rank: 1,
+                    max_rank: 8,
+                },
+                None,
+            );
+            assert_eq!(res.layers[0].rank(), 3);
+            assert_eq!(res.layers[1].rank(), 5);
+
+            let alpha_pattern = crate::safetensors::compute_peft_alpha_pattern(
+                &res.layers,
+                &pre_scales,
+                false,
+                use_rslora,
+            );
+            let inferred = crate::safetensors::infer_peft_target_modules(&res.layers);
+            let json = crate::safetensors::build_peft_adapter_config_json(
+                &res.rank_pattern,
+                &alpha_pattern,
+                5,
+                use_rslora,
+                false,
+                &inferred,
+                Some(&src_cfg),
+            );
+            let parsed = crate::safetensors::parse_peft_adapter_config(&json).expect("parse emitted config");
+            assert_eq!(
+                parsed.base_model_name_or_path.as_deref(),
+                Some("Qwen/Qwen2.5-7B")
+            );
+            assert_eq!(parsed.task_type.as_deref(), Some("CAUSAL_LM"));
+            assert_eq!(parsed.use_rslora, use_rslora);
+            assert_eq!(parsed.modules_to_save, vec!["lm_head".to_string()]);
+            assert_eq!(
+                parsed.rank_pattern.get("model.layers.0.self_attn.q_proj"),
+                Some(&3)
+            );
+            assert_eq!(
+                parsed.rank_pattern.get("model.layers.0.mlp.down_proj"),
+                Some(&5)
+            );
+
+            // Verify exact forward-pass equivalence: s_orig * (B @ A) == s_new * (B_k @ A_k)
+            for (orig_l, comp_l) in layers.iter().zip(res.layers.iter()) {
+                let (_, s_orig, _) = crate::safetensors::resolve_layer_scaling_params(
+                    orig_l,
+                    &alphas,
+                    None,
+                    Some(&src_cfg),
+                    false,
+                );
+                let (_, s_new, _) = crate::safetensors::resolve_layer_scaling_params(
+                    comp_l,
+                    &alphas,
+                    None,
+                    Some(&parsed),
+                    false,
+                );
+                assert!(
+                    (s_orig - s_new).abs() < 1e-6,
+                    "scale mismatch (rslora={}): orig={} vs new={}",
+                    use_rslora,
+                    s_orig,
+                    s_new
+                );
+                let dw_orig = matmul(&orig_l.b, &orig_l.a);
+                let dw_comp = matmul(&comp_l.b, &comp_l.a);
+                for (&x, &y) in dw_orig.data.iter().zip(dw_comp.data.iter()) {
+                    assert!((s_orig * x - s_new * y).abs() < 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_peft_pattern_dot_boundary_and_string_target_modules() {
+        let mut pat = BTreeMap::new();
+        pat.insert("layers.1.self_attn.q_proj".to_string(), 16usize);
+        pat.insert("q_proj".to_string(), 4usize);
+
+        assert_eq!(
+            crate::safetensors::match_peft_pattern_value(
+                &pat,
+                "base_model.model.model.layers.1.self_attn.q_proj"
+            ),
+            Some(16)
+        );
+        assert_eq!(
+            crate::safetensors::match_peft_pattern_value(
+                &pat,
+                "base_model.model.model.layers.10.self_attn.q_proj"
+            ),
+            Some(4)
+        );
+
+        let mut single_pat = BTreeMap::new();
+        single_pat.insert("layers.1".to_string(), 32usize);
+        assert_eq!(
+            crate::safetensors::match_peft_pattern_value(
+                &single_pat,
+                "model.layers.10.self_attn.q_proj"
+            ),
+            None
+        );
+
+        let raw_cfg = r#"{
+          "peft_type": "LORA",
+          "r": 16,
+          "lora_alpha": 32,
+          "target_modules": "all-linear",
+          "base_model_name_or_path": null
+        }"#;
+        let parsed = crate::safetensors::parse_peft_adapter_config(raw_cfg).expect("parse all-linear");
+        assert_eq!(parsed.target_modules_str.as_deref(), Some("all-linear"));
+        assert_eq!(parsed.base_model_name_or_path, None);
+
+        let mut rp = BTreeMap::new();
+        rp.insert("model.layers.0.q_proj".to_string(), 8usize);
+        let mut ap = BTreeMap::new();
+        ap.insert("model.layers.0.q_proj".to_string(), 16.0);
+        let out_json = crate::safetensors::build_peft_adapter_config_json(
+            &rp,
+            &ap,
+            8,
+            false,
+            false,
+            &[],
+            Some(&parsed),
+        );
+        assert!(out_json.contains("\"target_modules\": \"all-linear\""));
+    }
+
+    #[test]
+    fn test_dense_model_extraction_with_global_budget_allocator() {
+        let mut rng = Rng64::new(10005);
+        let d = 24;
+        let mut base = BTreeMap::new();
+        let mut tuned = BTreeMap::new();
+
+        let w0 = random_matrix(d, d, &mut rng, DType::F32);
+        let w1 = random_matrix(d, d, &mut rng, DType::F32);
+        base.insert("model.layers.0.q_proj.weight".to_string(), w0.clone());
+        base.insert("model.layers.0.down_proj.weight".to_string(), w1.clone());
+
+        // Layer 0 gets rank-1 delta; Layer 1 gets rank-6 delta
+        let u1 = random_matrix(d, 1, &mut rng, DType::F32);
+        let v1 = random_matrix(1, d, &mut rng, DType::F32);
+        let d0 = matmul(&u1, &v1);
+        let mut t0 = w0;
+        for (t, &dv) in t0.data.iter_mut().zip(d0.data.iter()) {
+            *t += dv;
+        }
+
+        let u6 = random_matrix(d, 6, &mut rng, DType::F32);
+        let v6 = random_matrix(6, d, &mut rng, DType::F32);
+        let d1 = matmul(&u6, &v6);
+        let mut t1 = w1;
+        for (t, &dv) in t1.data.iter_mut().zip(d1.data.iter()) {
+            *t += dv * 2.0;
+        }
+
+        tuned.insert("model.layers.0.q_proj.weight".to_string(), t0);
+        tuned.insert("model.layers.0.down_proj.weight".to_string(), t1);
+
+        // Each F32 rank step on 24x24 costs (24+24)*4 = 192 bytes.
+        // Budget for 7 total rank steps = 7 * 192 = 1344 bytes -> exact (1, 6) allocation!
+        let res = extract_lora_from_dense_models(
+            &base,
+            &tuned,
+            CompressionPolicy::TargetBudget {
+                target: crate::compress::BudgetTarget::MaxBytes(1344),
+                min_rank: 1,
+                max_rank: 12,
+            },
+            "peft",
+        )
+        .expect("extract budget lora");
+
+        assert!(res.total_compressed_bytes <= 1344);
+        assert_eq!(res.rank_pattern.get("model.layers.0.q_proj"), Some(&1));
+        assert_eq!(res.rank_pattern.get("model.layers.0.down_proj"), Some(&6));
+        assert!(res.global_retained_energy > 0.999999);
+    }
 }

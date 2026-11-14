@@ -1,5 +1,5 @@
-# loraspectra (v0.9.0)
-> Zero-Dependency Rust Engine, CLI & 100% Client-Side Browser Inspector for `.safetensors` Header Inspection, Spectral SVD Auditing, Silent SFT Bug Diagnostics, Multi-Adapter Pre-Merge Conflict Analysis (`loraspectra merge-check`), HuggingFace Model Card Generation (`loraspectra card`), Eckart-Young Dynamic Rank Compression (-83.8% size at 99% energy), and Orthogonal Subspace Merging (`ortho-svd`) of `.safetensors` LoRA/DoRA Adapters.
+# loraspectra (v1.0.0)
+> Zero-Dependency Rust Engine, CLI & 100% Client-Side Browser Inspector for `.safetensors` Header Inspection, Spectral SVD Auditing, Silent SFT Bug Diagnostics, Multi-Adapter Pre-Merge Conflict Analysis (`loraspectra merge-check`), HuggingFace Model Card Generation (`loraspectra card`), Global Budget-Optimal & Eckart-Young Dynamic Rank Compression (`rank_pattern` + scale-preserving `alpha_pattern`), and Orthogonal Subspace Merging (`ortho-svd`) of `.safetensors` LoRA/DoRA Adapters.
 
 - Interactive Browser `.safetensors` Header, Spectral SVD & Multi-Adapter `merge-check` Inspector (100% local Web File API, 0 uploads): https://salyys1.github.io/loraspectra/
 - Repository: https://github.com/SalyyS1/loraspectra

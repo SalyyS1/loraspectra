@@ -6,7 +6,8 @@ use std::process;
 use loraspectra::audit::{audit_adapter, audit_adapter_integrity, render_audit_json};
 use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
-    compress_adapter, extract_lora_from_dense_models, CompressionPolicy,
+    compress_adapter_with_options, extract_lora_from_dense_models, parse_byte_budget, BudgetTarget,
+    CompressionPolicy,
 };
 use loraspectra::diff::{diff_adapters, render_diff_json, render_diff_table};
 use loraspectra::merge::{
@@ -18,17 +19,18 @@ use loraspectra::merge_check::{
 };
 use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
 use loraspectra::safetensors::{
-    bake_adapter_scaling, cast_layers_dtype, convert_layers_key_format, extract_dora_scales,
-    extract_lora_alphas, extract_lora_layers, insert_dora_scales, insert_unit_alpha_tensors,
-    inspect_adapter_architecture, layers_to_tensor_map, read_peft_adapter_config, read_safetensors,
-    write_peft_rank_pattern_config, write_safetensors, DType, LoraLayer, PeftAdapterConfig,
-    Tensor2D,
+    bake_adapter_scaling, cast_layers_dtype, compute_peft_alpha_pattern, convert_layers_key_format,
+    extract_dora_scales, extract_lora_alphas, extract_lora_layers, infer_peft_target_modules,
+    insert_dora_scales, insert_unit_alpha_tensors, inspect_adapter_architecture,
+    layers_to_tensor_map, read_peft_adapter_config, read_safetensors, resolve_layer_scaling_params,
+    strip_peft_base_prefix, write_peft_adapter_config, write_safetensors, DType, LoraLayer,
+    PeftAdapterConfig, Tensor2D,
 };
 use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif};
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v0.9.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+        "loraspectra v1.0.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -39,8 +41,8 @@ USAGE:
   loraspectra audit <adapter_or_hf_uri> [--json] [--config <adapter_config.json>] [--sarif <output.sarif>]
   loraspectra diff <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
   loraspectra card <adapter_or_hf_uri> [-o <model_card.md>] [--config <adapter_config.json>]
-  loraspectra compress <input_or_hf_uri> <output.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
-  loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
+  loraspectra compress <input_or_hf_uri> [output.safetensors | --out-dir <dir>] [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.25 | --max-bytes 16M] [--min-rank R] [--max-rank R] [--config <in_config.json>] [--peft-config <out_config.json>] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--json]
+  loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.05 | --max-bytes 16M] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
   loraspectra merge-check <in_1> <in_2> [in_3 ...] [--weights W1:W2[:W3...]] [--json] [--sarif <output.sarif>] [--fail-on-conflict]
   loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]"
@@ -263,7 +265,7 @@ fn main() {
             );
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "0.9.0");
+                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.0.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                 } else {
@@ -399,28 +401,40 @@ fn main() {
             }
         }
         "compress" => {
-            if args.len() < 4 {
+            if args.len() < 3 {
                 print_usage();
                 process::exit(1);
             }
-            let input_path = &args[2];
-            let output_path = &args[3];
-            let mut policy = CompressionPolicy::AdaptiveEnergy {
-                target_energy: 0.99,
-                min_rank: 1,
-                max_rank: 256,
-            };
+            #[derive(Clone, Copy)]
+            enum PolicySpec {
+                Fixed(usize),
+                Energy(f64),
+                MpDenoise,
+                Budget(BudgetTarget),
+            }
+
+            let mut pos: Vec<String> = Vec::new();
+            let mut policy_spec = PolicySpec::Energy(0.99);
+            let mut min_rank: usize = 1;
+            let mut max_rank: usize = 256;
+            let mut input_config_opt: Option<String> = None;
             let mut peft_config_path: Option<String> = None;
+            let mut out_dir_opt: Option<String> = None;
             let mut target_dtype: Option<DType> = None;
             let mut target_format: Option<String> = None;
             let mut bake_alpha = false;
             let mut rslora = false;
             let mut default_alpha: Option<f64> = None;
             let mut exclude_patterns: Vec<String> = Vec::new();
+            let mut json_mode = false;
 
-            let mut i = 4;
+            let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
+                    "--json" => {
+                        json_mode = true;
+                        i += 1;
+                    }
                     "--exclude" if i + 1 < args.len() => {
                         exclude_patterns = args[i + 1]
                             .split(',')
@@ -431,24 +445,43 @@ fn main() {
                     }
                     "--rank" if i + 1 < args.len() => {
                         let k: usize = args[i + 1].parse().expect("Invalid --rank integer");
-                        policy = CompressionPolicy::FixedRank(k);
+                        policy_spec = PolicySpec::Fixed(k);
                         i += 2;
                     }
                     "--energy" if i + 1 < args.len() => {
                         let e: f64 = args[i + 1].parse().expect("Invalid --energy float");
-                        policy = CompressionPolicy::AdaptiveEnergy {
-                            target_energy: e,
-                            min_rank: 1,
-                            max_rank: 256,
-                        };
+                        policy_spec = PolicySpec::Energy(e);
                         i += 2;
                     }
                     "--mp-denoise" => {
-                        policy = CompressionPolicy::MarchenkoPastur {
-                            min_rank: 1,
-                            max_rank: 256,
-                        };
+                        policy_spec = PolicySpec::MpDenoise;
                         i += 1;
+                    }
+                    "--target-rank" if i + 1 < args.len() => {
+                        let avg_r: f64 = args[i + 1].parse().expect("Invalid --target-rank float");
+                        policy_spec = PolicySpec::Budget(BudgetTarget::TargetMeanRank(avg_r));
+                        i += 2;
+                    }
+                    "--budget-ratio" if i + 1 < args.len() => {
+                        let ratio: f64 = args[i + 1].parse().expect("Invalid --budget-ratio float");
+                        policy_spec = PolicySpec::Budget(BudgetTarget::Ratio(ratio));
+                        i += 2;
+                    }
+                    "--max-bytes" if i + 1 < args.len() => {
+                        let bytes = parse_byte_budget(&args[i + 1]).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        });
+                        policy_spec = PolicySpec::Budget(BudgetTarget::MaxBytes(bytes));
+                        i += 2;
+                    }
+                    "--min-rank" if i + 1 < args.len() => {
+                        min_rank = args[i + 1].parse().expect("Invalid --min-rank integer");
+                        i += 2;
+                    }
+                    "--max-rank" if i + 1 < args.len() => {
+                        max_rank = args[i + 1].parse().expect("Invalid --max-rank integer");
+                        i += 2;
                     }
                     "--bake-alpha" => {
                         bake_alpha = true;
@@ -469,8 +502,16 @@ fn main() {
                         target_format = Some(args[i + 1].clone());
                         i += 2;
                     }
+                    "--config" if i + 1 < args.len() => {
+                        input_config_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
                     "--peft-config" if i + 1 < args.len() => {
                         peft_config_path = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--out-dir" if i + 1 < args.len() => {
+                        out_dir_opt = Some(args[i + 1].clone());
                         i += 2;
                     }
                     "--dtype" if i + 1 < args.len() => {
@@ -478,19 +519,98 @@ fn main() {
                             Some(DType::from_name(&args[i + 1]).expect("Invalid --dtype (use f16, bf16, or f32)"));
                         i += 2;
                     }
+                    a if !a.starts_with("--") => {
+                        pos.push(a.to_string());
+                        i += 1;
+                    }
                     _ => i += 1,
                 }
             }
 
-            let (mut layers, alphas, dora_scales) = load_layers_alphas_dora_or_exit(input_path);
+            if pos.is_empty() {
+                print_usage();
+                process::exit(1);
+            }
+            let input_path = &pos[0];
+            let output_path = if pos.len() >= 2 {
+                pos[1].clone()
+            } else if let Some(ref dir) = out_dir_opt {
+                std::fs::create_dir_all(dir).expect("Failed to create --out-dir");
+                Path::new(dir)
+                    .join("adapter_model.safetensors")
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                print_usage();
+                process::exit(1);
+            };
+            if peft_config_path.is_none() {
+                if let Some(ref dir) = out_dir_opt {
+                    peft_config_path = Some(
+                        Path::new(dir)
+                            .join("adapter_config.json")
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+                }
+            }
+
+            let policy = match policy_spec {
+                PolicySpec::Fixed(k) => CompressionPolicy::FixedRank(k),
+                PolicySpec::Energy(e) => CompressionPolicy::AdaptiveEnergy {
+                    target_energy: e,
+                    min_rank,
+                    max_rank,
+                },
+                PolicySpec::MpDenoise => CompressionPolicy::MarchenkoPastur { min_rank, max_rank },
+                PolicySpec::Budget(target) => CompressionPolicy::TargetBudget {
+                    target,
+                    min_rank,
+                    max_rank,
+                },
+            };
+
+            let (_, mut layers, alphas, dora_scales, source_peft_config) =
+                load_full_adapter_bundle_or_exit(input_path, input_config_opt.as_deref());
             if !exclude_patterns.is_empty() {
                 layers.retain(|l| !exclude_patterns.iter().any(|p| l.base_name.contains(p.as_str())));
             }
-            let default_r = layers.first().map(|l| l.rank()).unwrap_or(16);
-            if bake_alpha || !alphas.is_empty() {
-                bake_adapter_scaling(&mut layers, &alphas, default_alpha, rslora);
+            if layers.is_empty() {
+                eprintln!("Error: all LoRA layers were excluded by --exclude");
+                process::exit(1);
             }
-            let mut res = compress_adapter(&layers, policy);
+
+            let mut resolved_alphas: BTreeMap<String, f64> = BTreeMap::new();
+            let mut pre_scales: Vec<f64> = Vec::with_capacity(layers.len());
+            let mut any_rslora = rslora;
+            for layer in &layers {
+                let (a_val, s_val, layer_rs) = resolve_layer_scaling_params(
+                    layer,
+                    &alphas,
+                    default_alpha,
+                    source_peft_config.as_ref(),
+                    rslora,
+                );
+                resolved_alphas.insert(layer.base_name.clone(), a_val);
+                pre_scales.push(s_val);
+                if layer_rs {
+                    any_rslora = true;
+                }
+            }
+
+            let baked = bake_alpha || !alphas.is_empty();
+            if baked {
+                bake_adapter_scaling(&mut layers, &resolved_alphas, default_alpha, any_rslora);
+            }
+
+            let alloc_scales: Vec<f64> = if baked {
+                vec![1.0; layers.len()]
+            } else {
+                pre_scales.clone()
+            };
+
+            let mut res =
+                compress_adapter_with_options(&layers, Some(&alloc_scales), policy, target_dtype);
             if let Some(ref fmt) = target_format {
                 convert_layers_key_format(&mut res.layers, fmt).expect("Invalid --format");
             }
@@ -505,34 +625,139 @@ fn main() {
             if !dora_scales.is_empty() {
                 insert_dora_scales(&mut out_map, &dora_scales, target_format.as_deref(), target_dtype);
             }
-            write_safetensors(Path::new(output_path), &out_map).expect("Failed to write output .safetensors");
+            if let Some(parent) = Path::new(&output_path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            write_safetensors(Path::new(&output_path), &out_map)
+                .expect("Failed to write output .safetensors");
+
+            let out_use_rslora = if baked { false } else { any_rslora };
+            let alpha_pattern =
+                compute_peft_alpha_pattern(&res.layers, &pre_scales, baked, out_use_rslora);
+            let inferred_targets = infer_peft_target_modules(&res.layers);
+            let top_r = res
+                .layers
+                .iter()
+                .map(|l| l.rank())
+                .max()
+                .unwrap_or_else(|| layers.first().map(|l| l.rank()).unwrap_or(16));
 
             if let Some(cfg_path) = &peft_config_path {
-                write_peft_rank_pattern_config(Path::new(cfg_path), &res.rank_pattern, default_r)
-                    .expect("Failed to write PEFT adapter_config.json");
+                write_peft_adapter_config(
+                    Path::new(cfg_path),
+                    &res.rank_pattern,
+                    &alpha_pattern,
+                    top_r,
+                    out_use_rslora,
+                    !dora_scales.is_empty(),
+                    &inferred_targets,
+                    source_peft_config.as_ref(),
+                )
+                .expect("Failed to write PEFT adapter_config.json");
             }
 
-            let reduction = (1.0 - (final_bytes as f64) / (res.total_original_bytes.max(1) as f64)) * 100.0;
-            println!(
-                "Compressed {} -> {} ({} layers): {} bytes -> {} bytes (-{:.1}%), mean retained spectral energy: {:.2}%",
-                input_path,
-                output_path,
-                res.layers.len(),
-                res.total_original_bytes,
-                final_bytes,
-                reduction,
-                res.overall_retained_energy * 100.0
-            );
+            let reduction =
+                (1.0 - (final_bytes as f64) / (res.total_original_bytes.max(1) as f64)) * 100.0;
+            let min_alloc = res
+                .metrics
+                .iter()
+                .map(|m| m.compressed_rank)
+                .min()
+                .unwrap_or(0);
+            let max_alloc = res
+                .metrics
+                .iter()
+                .map(|m| m.compressed_rank)
+                .max()
+                .unwrap_or(0);
+            let mean_alloc = res
+                .metrics
+                .iter()
+                .map(|m| m.compressed_rank as f64)
+                .sum::<f64>()
+                / (res.metrics.len().max(1) as f64);
+
+            if json_mode {
+                println!("{{");
+                println!("  \"input\": \"{}\",", json_escape(input_path));
+                println!("  \"output\": \"{}\",", json_escape(&output_path));
+                if let Some(ref cfg_p) = peft_config_path {
+                    println!("  \"peft_config\": \"{}\",", json_escape(cfg_p));
+                } else {
+                    println!("  \"peft_config\": null,");
+                }
+                println!("  \"layer_count\": {},", res.layers.len());
+                println!("  \"original_bytes\": {},", res.total_original_bytes);
+                println!("  \"compressed_bytes\": {},", final_bytes);
+                println!("  \"reduction_percent\": {:.4},", reduction);
+                println!(
+                    "  \"mean_retained_energy\": {:.6},",
+                    res.overall_retained_energy
+                );
+                println!(
+                    "  \"global_retained_energy\": {:.6},",
+                    res.global_retained_energy
+                );
+                println!("  \"min_allocated_rank\": {},", min_alloc);
+                println!("  \"max_allocated_rank\": {},", max_alloc);
+                println!("  \"mean_allocated_rank\": {:.4},", mean_alloc);
+                println!("  \"rank_pattern\": {{");
+                let rp_entries: Vec<(&String, &usize)> = res.rank_pattern.iter().collect();
+                for (idx, (k, &r)) in rp_entries.iter().enumerate() {
+                    let comma = if idx + 1 < rp_entries.len() { "," } else { "" };
+                    println!(
+                        "    \"{}\": {}{}",
+                        json_escape(strip_peft_base_prefix(k)),
+                        r,
+                        comma
+                    );
+                }
+                println!("  }},");
+                println!("  \"alpha_pattern\": {{");
+                let ap_entries: Vec<(&String, &f64)> = alpha_pattern.iter().collect();
+                for (idx, (k, &a)) in ap_entries.iter().enumerate() {
+                    let comma = if idx + 1 < ap_entries.len() { "," } else { "" };
+                    println!("    \"{}\": {:.6}{}", json_escape(k), a, comma);
+                }
+                println!("  }}");
+                println!("}}");
+            } else {
+                println!(
+                    "Compressed {} -> {} ({} layers, rank {}..{}, mean {:.1}): {} bytes -> {} bytes (-{:.1}%), mean retained energy: {:.2}% (global: {:.2}%)",
+                    input_path,
+                    output_path,
+                    res.layers.len(),
+                    min_alloc,
+                    max_alloc,
+                    mean_alloc,
+                    res.total_original_bytes,
+                    final_bytes,
+                    reduction,
+                    res.overall_retained_energy * 100.0,
+                    res.global_retained_energy * 100.0
+                );
+            }
         }
         "extract" => {
             if args.len() < 5 {
                 print_usage();
                 process::exit(1);
             }
+            #[derive(Clone, Copy)]
+            enum ExtractPolicySpec {
+                Fixed(usize),
+                Energy(f64),
+                MpDenoise,
+                Budget(BudgetTarget),
+            }
             let base_path = &args[2];
             let tuned_path = &args[3];
             let output_path = &args[4];
-            let mut policy = CompressionPolicy::FixedRank(16);
+            let mut policy_spec = ExtractPolicySpec::Fixed(16);
+            let mut min_rank: usize = 1;
+            let mut max_rank: usize = 128;
             let mut target_format = "peft".to_string();
             let mut target_dtype: Option<DType> = None;
             let mut peft_config_path: Option<String> = None;
@@ -542,24 +767,43 @@ fn main() {
                 match args[i].as_str() {
                     "--rank" if i + 1 < args.len() => {
                         let k: usize = args[i + 1].parse().expect("Invalid --rank integer");
-                        policy = CompressionPolicy::FixedRank(k);
+                        policy_spec = ExtractPolicySpec::Fixed(k);
                         i += 2;
                     }
                     "--energy" if i + 1 < args.len() => {
                         let e: f64 = args[i + 1].parse().expect("Invalid --energy float");
-                        policy = CompressionPolicy::AdaptiveEnergy {
-                            target_energy: e,
-                            min_rank: 1,
-                            max_rank: 128,
-                        };
+                        policy_spec = ExtractPolicySpec::Energy(e);
                         i += 2;
                     }
                     "--mp-denoise" => {
-                        policy = CompressionPolicy::MarchenkoPastur {
-                            min_rank: 1,
-                            max_rank: 128,
-                        };
+                        policy_spec = ExtractPolicySpec::MpDenoise;
                         i += 1;
+                    }
+                    "--target-rank" if i + 1 < args.len() => {
+                        let avg_r: f64 = args[i + 1].parse().expect("Invalid --target-rank float");
+                        policy_spec = ExtractPolicySpec::Budget(BudgetTarget::TargetMeanRank(avg_r));
+                        i += 2;
+                    }
+                    "--budget-ratio" if i + 1 < args.len() => {
+                        let ratio: f64 = args[i + 1].parse().expect("Invalid --budget-ratio float");
+                        policy_spec = ExtractPolicySpec::Budget(BudgetTarget::Ratio(ratio));
+                        i += 2;
+                    }
+                    "--max-bytes" if i + 1 < args.len() => {
+                        let bytes = parse_byte_budget(&args[i + 1]).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        });
+                        policy_spec = ExtractPolicySpec::Budget(BudgetTarget::MaxBytes(bytes));
+                        i += 2;
+                    }
+                    "--min-rank" if i + 1 < args.len() => {
+                        min_rank = args[i + 1].parse().expect("Invalid --min-rank integer");
+                        i += 2;
+                    }
+                    "--max-rank" if i + 1 < args.len() => {
+                        max_rank = args[i + 1].parse().expect("Invalid --max-rank integer");
+                        i += 2;
                     }
                     "--format" if i + 1 < args.len() => {
                         target_format = args[i + 1].clone();
@@ -578,6 +822,21 @@ fn main() {
                 }
             }
 
+            let policy = match policy_spec {
+                ExtractPolicySpec::Fixed(k) => CompressionPolicy::FixedRank(k),
+                ExtractPolicySpec::Energy(e) => CompressionPolicy::AdaptiveEnergy {
+                    target_energy: e,
+                    min_rank,
+                    max_rank,
+                },
+                ExtractPolicySpec::MpDenoise => CompressionPolicy::MarchenkoPastur { min_rank, max_rank },
+                ExtractPolicySpec::Budget(target) => CompressionPolicy::TargetBudget {
+                    target,
+                    min_rank,
+                    max_rank,
+                },
+            };
+
             let resolved_base = resolve_input_or_exit(base_path);
             let resolved_tuned = resolve_input_or_exit(tuned_path);
             let base_tensors = read_safetensors(&resolved_base).expect("Failed to read base .safetensors");
@@ -590,9 +849,21 @@ fn main() {
             let out_map = layers_to_tensor_map(&res.layers);
             let bytes = write_safetensors(Path::new(output_path), &out_map).expect("Failed to write output .safetensors");
             if let Some(cfg_path) = &peft_config_path {
-                let default_r = res.layers.first().map(|l| l.rank()).unwrap_or(16);
-                write_peft_rank_pattern_config(Path::new(cfg_path), &res.rank_pattern, default_r)
-                    .expect("Failed to write PEFT adapter_config.json");
+                let top_r = res.layers.iter().map(|l| l.rank()).max().unwrap_or(16);
+                let unit_scales = vec![1.0; res.layers.len()];
+                let alpha_pattern = compute_peft_alpha_pattern(&res.layers, &unit_scales, true, false);
+                let inferred_targets = infer_peft_target_modules(&res.layers);
+                write_peft_adapter_config(
+                    Path::new(cfg_path),
+                    &res.rank_pattern,
+                    &alpha_pattern,
+                    top_r,
+                    false,
+                    false,
+                    &inferred_targets,
+                    None,
+                )
+                .expect("Failed to write PEFT adapter_config.json");
             }
             println!(
                 "Extracted {} LoRA layers from ({}, {}) -> {} ({} bytes, mean retained energy: {:.2}%)",
@@ -809,7 +1080,7 @@ fn main() {
             };
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_merge_check_sarif(&summary, "0.9.0");
+                let sarif_str = build_merge_check_sarif(&summary, "1.0.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                     process::exit(1);
