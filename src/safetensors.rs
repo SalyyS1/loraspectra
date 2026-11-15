@@ -583,6 +583,9 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
     let mut b_map: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
 
     for (key, tensor) in tensors {
+        if key.contains(".pissa_init.") || key.ends_with(".pissa_init") {
+            continue;
+        }
         if let Some(raw_base) = key
             .strip_suffix(".lora_A.weight")
             .or_else(|| key.strip_suffix(".lora_A.default.weight"))
@@ -639,6 +642,123 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
         }
     }
     Ok(layers)
+}
+
+/// Extract matched PiSSA initial-principal reference layers (`lora_A.pissa_init.weight`,
+/// `pissa_init.lora_A.weight`, or `lora_embedding_A.pissa_init`) keyed by normalized `base_name`.
+pub fn extract_pissa_init_layers(
+    tensors: &BTreeMap<String, Tensor2D>,
+) -> Result<BTreeMap<String, LoraLayer>, String> {
+    let mut a_map: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
+    let mut b_map: BTreeMap<String, (String, Tensor2D)> = BTreeMap::new();
+
+    for (key, tensor) in tensors {
+        if let Some(raw_base) = key
+            .strip_suffix(".lora_A.pissa_init.weight")
+            .or_else(|| key.strip_suffix(".lora_A.pissa_init"))
+            .or_else(|| key.strip_suffix(".pissa_init.lora_A.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_A.pissa_init.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_A.pissa_init"))
+        {
+            let base = raw_base
+                .strip_suffix(".dora_layer")
+                .or_else(|| raw_base.strip_suffix(".lora_layer"))
+                .unwrap_or(raw_base);
+            a_map.insert(base.to_string(), (key.clone(), tensor.clone()));
+        } else if let Some(raw_base) = key
+            .strip_suffix(".lora_B.pissa_init.weight")
+            .or_else(|| key.strip_suffix(".lora_B.pissa_init"))
+            .or_else(|| key.strip_suffix(".pissa_init.lora_B.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_B.pissa_init.weight"))
+            .or_else(|| key.strip_suffix(".lora_embedding_B.pissa_init"))
+        {
+            let base = raw_base
+                .strip_suffix(".dora_layer")
+                .or_else(|| raw_base.strip_suffix(".lora_layer"))
+                .unwrap_or(raw_base);
+            b_map.insert(base.to_string(), (key.clone(), tensor.clone()));
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    for (base_name, (a_key, a_tensor)) in a_map {
+        if let Some((b_key, b_tensor)) = b_map.remove(&base_name) {
+            if a_tensor.rows != b_tensor.cols {
+                return Err(format!(
+                    "Dimension mismatch in pissa_init layer {}: A is ({}, {}), B is ({}, {})",
+                    base_name, a_tensor.rows, a_tensor.cols, b_tensor.rows, b_tensor.cols
+                ));
+            }
+            out.insert(
+                base_name.clone(),
+                LoraLayer {
+                    base_name,
+                    a_key,
+                    b_key,
+                    a: a_tensor,
+                    b: b_tensor,
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Construct the exact rank-`(r + r_init)` net task perturbation relative to the unmodified base model:
+/// `\Delta W_net = scale_active * B * A - scale_init * B_init * A_init = [B, -B_init] * [scale_active * A; scale_init * A_init]`
+/// in `O((r + r_init) * (d_in + d_out))` without allocating a dense `d_out x d_in` matrix.
+pub fn subtract_pissa_residual_layer(
+    active: &LoraLayer,
+    scale_active: f64,
+    pissa_init: &LoraLayer,
+    scale_init: f64,
+) -> Option<LoraLayer> {
+    let d_out = active.d_out();
+    let d_in = active.d_in();
+    if d_out != pissa_init.d_out() || d_in != pissa_init.d_in() {
+        return None;
+    }
+    let r_act = active.rank();
+    let r_init = pissa_init.rank();
+    let r_total = r_act + r_init;
+
+    // Stacked A_net: ((r_act + r_init) x d_in) = [scale_active * A; scale_init * A_init]
+    let mut a_data = Vec::with_capacity(r_total * d_in);
+    for &v in &active.a.data {
+        a_data.push(v * scale_active);
+    }
+    for &v in &pissa_init.a.data {
+        a_data.push(v * scale_init);
+    }
+
+    // Concatenated B_net: (d_out x (r_act + r_init)) = [B, -B_init]
+    let mut b_data = Vec::with_capacity(d_out * r_total);
+    for row in 0..d_out {
+        let act_row = &active.b.data[row * r_act..(row + 1) * r_act];
+        let init_row = &pissa_init.b.data[row * r_init..(row + 1) * r_init];
+        b_data.extend_from_slice(act_row);
+        for &v in init_row {
+            b_data.push(-v);
+        }
+    }
+
+    Some(LoraLayer {
+        base_name: active.base_name.clone(),
+        a_key: active.a_key.clone(),
+        b_key: active.b_key.clone(),
+        a: Tensor2D {
+            rows: r_total,
+            cols: d_in,
+            dtype: active.a.dtype,
+            data: a_data,
+        },
+        b: Tensor2D {
+            rows: d_out,
+            cols: r_total,
+            dtype: active.b.dtype,
+            data: b_data,
+        },
+    })
 }
 
 /// Convert a slice of `LoraLayer` back into a `BTreeMap<String, Tensor2D>`.
@@ -1372,6 +1492,7 @@ pub struct PeftAdapterConfig {
     pub lora_alpha: Option<f64>,
     pub use_rslora: bool,
     pub use_dora: bool,
+    pub init_lora_weights: Option<String>,
     pub rank_pattern: BTreeMap<String, usize>,
     pub alpha_pattern: BTreeMap<String, f64>,
     pub modules_to_save: Vec<String>,
@@ -1384,6 +1505,20 @@ pub struct PeftAdapterConfig {
     pub inference_mode: Option<bool>,
     pub fan_in_fan_out: Option<bool>,
     pub lora_dropout: Option<f64>,
+}
+
+impl PeftAdapterConfig {
+    /// Returns `true` when `init_lora_weights` indicates an unconverted PiSSA residual adapter
+    /// (`"pissa"` or `"pissa_niter_*"`), as opposed to standard boolean `true`/`false` initialization.
+    pub fn is_pissa(&self) -> bool {
+        match self.init_lora_weights.as_deref() {
+            Some(s) => {
+                let low = s.trim().to_ascii_lowercase();
+                low == "pissa" || low.starts_with("pissa_niter")
+            }
+            None => false,
+        }
+    }
 }
 
 /// Parse a HuggingFace PEFT `adapter_config.json` document without external crates.
@@ -1558,6 +1693,16 @@ pub fn parse_peft_adapter_config(json_str: &str) -> Result<PeftAdapterConfig, St
             }
             "use_dora" => {
                 cfg.use_dora = parse_opt_bool(&mut i)?.unwrap_or(false);
+            }
+            "init_lora_weights" => {
+                skip_ws(&mut i);
+                if i < bytes.len() && bytes[i] == b'"' {
+                    cfg.init_lora_weights = Some(parse_str(&mut i)?);
+                } else if let Ok(opt_b) = parse_opt_bool(&mut i) {
+                    cfg.init_lora_weights = opt_b.map(|b| if b { "true".to_string() } else { "false".to_string() });
+                } else {
+                    skip_val(&mut i)?;
+                }
             }
             "inference_mode" => {
                 cfg.inference_mode = parse_opt_bool(&mut i)?;

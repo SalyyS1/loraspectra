@@ -127,19 +127,26 @@ pub fn generate_model_card(
         format!("r={}", arch.max_rank)
     };
 
-    let alpha_ratio_str = match (
-        integrity.alpha_summary.min_alpha_r_ratio,
-        integrity.alpha_summary.max_alpha_r_ratio,
-    ) {
+    let eff_scale_pair = (
+        integrity.alpha_summary.min_effective_scale,
+        integrity.alpha_summary.max_effective_scale,
+    );
+    let alpha_ratio_str = match eff_scale_pair {
         (Some(lo), Some(hi)) if (hi - lo).abs() < 1e-4 => {
             if integrity.alpha_summary.use_rslora {
-                format!("alpha/r={:.2} (rsLoRA)", lo)
+                format!("alpha/sqrt(r)={:.2} (rsLoRA)", lo)
             } else {
                 format!("alpha/r={:.2}", lo)
             }
         }
-        (Some(lo), Some(hi)) => format!("alpha/r={:.2}..{:.2}", lo, hi),
-        _ => "implicit unit scale (alpha=r)".to_string(),
+        (Some(lo), Some(hi)) => {
+            if integrity.alpha_summary.use_rslora {
+                format!("alpha/sqrt(r)={:.2}..{:.2} (rsLoRA)", lo, hi)
+            } else {
+                format!("alpha/r={:.2}..{:.2}", lo, hi)
+            }
+        }
+        _ => "implicit unit scale (1.0)".to_string(),
     };
 
     let dora_str = if integrity.alpha_summary.dora_tensor_count > 0 {
@@ -147,6 +154,18 @@ pub fn generate_model_card(
             "{} DoRA magnitude vectors",
             integrity.alpha_summary.dora_tensor_count
         )
+    } else if integrity.alpha_summary.pissa_init_tensor_pairs > 0 {
+        format!(
+            "PiSSA ({} pissa_init reference pairs)",
+            integrity.alpha_summary.pissa_init_tensor_pairs
+        )
+    } else if integrity
+        .alpha_summary
+        .init_lora_weights
+        .as_deref()
+        .map_or(false, |s| s.to_ascii_lowercase().starts_with("pissa"))
+    {
+        "PiSSA residual adapter (unconverted)".to_string()
     } else {
         "Standard LoRA (no DoRA vectors)".to_string()
     };

@@ -3,13 +3,15 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use loraspectra::audit::{audit_adapter, audit_adapter_integrity, render_audit_json};
+use loraspectra::audit::{
+    audit_adapter, audit_adapter_integrity_with_pissa, render_audit_json,
+};
 use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
     compress_adapter_with_options, extract_lora_from_dense_models, parse_byte_budget, BudgetTarget,
     CompressionPolicy,
 };
-use loraspectra::diff::{diff_adapters_with_dora, render_diff_json, render_diff_table};
+use loraspectra::diff::{diff_adapters_full, render_diff_json, render_diff_table};
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
@@ -20,10 +22,10 @@ use loraspectra::merge_check::{
 use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
 use loraspectra::safetensors::{
     bake_adapter_scaling, cast_layers_dtype, compute_peft_alpha_pattern, convert_layers_key_format,
-    extract_dora_scales, extract_lora_alphas, extract_lora_layers, filter_dora_scales_for_layers,
-    infer_peft_target_modules, insert_dora_scales, insert_unit_alpha_tensors,
-    inspect_adapter_architecture, layers_to_tensor_map, merge_dora_scales,
-    read_peft_adapter_config, read_safetensors, resolve_layer_scaling_params,
+    extract_dora_scales, extract_lora_alphas, extract_lora_layers, extract_pissa_init_layers,
+    filter_dora_scales_for_layers, infer_peft_target_modules, insert_dora_scales,
+    insert_unit_alpha_tensors, inspect_adapter_architecture, layers_to_tensor_map,
+    merge_dora_scales, read_peft_adapter_config, read_safetensors, resolve_layer_scaling_params,
     strip_peft_base_prefix, write_peft_adapter_config, write_safetensors, DType, LoraLayer,
     PeftAdapterConfig, Tensor2D,
 };
@@ -31,7 +33,7 @@ use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif};
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.1.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA (.safetensors)
+        "loraspectra v1.2.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA/rsLoRA/PiSSA (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -40,7 +42,7 @@ SOURCES:
 USAGE:
   loraspectra info <adapter_or_hf_uri> [--json]
   loraspectra audit <adapter_or_hf_uri> [--json] [--config <adapter_config.json>] [--sarif <output.sarif>]
-  loraspectra diff <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
+  loraspectra diff <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]
   loraspectra card <adapter_or_hf_uri> [-o <model_card.md>] [--config <adapter_config.json>]
   loraspectra compress <input_or_hf_uri> [output.safetensors | --out-dir <dir>] [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.25 | --max-bytes 16M] [--min-rank R] [--max-rank R] [--config <in_config.json>] [--peft-config <out_config.json>] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--json]
   loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.05 | --max-bytes 16M] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
@@ -132,6 +134,37 @@ fn load_full_adapter_bundle_or_exit(
     (tensors, layers, alphas, dora_scales, peft_config)
 }
 
+fn load_companion_pissa_init(
+    source_str: &str,
+    tensors: &BTreeMap<String, Tensor2D>,
+) -> BTreeMap<String, LoraLayer> {
+    let mut pissa_map = extract_pissa_init_layers(tensors).unwrap_or_default();
+    let candidate = Path::new(source_str);
+    let base_dir = if candidate.is_dir() {
+        Some(candidate)
+    } else {
+        candidate.parent()
+    };
+    if let Some(dir) = base_dir {
+        let sub_sf = dir.join("pissa_init").join("adapter_model.safetensors");
+        if sub_sf.is_file() {
+            if let Ok(sub_t) = read_safetensors(&sub_sf) {
+                if let Ok(sub_layers) = extract_lora_layers(&sub_t) {
+                    for l in sub_layers {
+                        pissa_map.entry(l.base_name.clone()).or_insert(l);
+                    }
+                }
+                if let Ok(sub_pissa) = extract_pissa_init_layers(&sub_t) {
+                    for (k, l) in sub_pissa {
+                        pissa_map.entry(k).or_insert(l);
+                    }
+                }
+            }
+        }
+    }
+    pissa_map
+}
+
 fn load_layers_alphas_dora_or_exit(
     source_str: &str,
 ) -> (
@@ -161,7 +194,7 @@ fn main() {
 
     match args[1].as_str() {
         "-V" | "--version" | "version" => {
-            println!("loraspectra 1.1.0");
+            println!("loraspectra 1.2.0");
         }
         "info" => {
             let json_mode = args[2..].iter().any(|a| a == "--json");
@@ -259,17 +292,23 @@ fn main() {
             let source = &pos[0];
             let (tensors, layers, alphas, dora_scales, peft_config) =
                 load_full_adapter_bundle_or_exit(source, config_opt.as_deref());
+            let companion_pissa = load_companion_pissa_init(source, &tensors);
             let summary = audit_adapter(&layers);
-            let integrity = audit_adapter_integrity(
+            let integrity = audit_adapter_integrity_with_pissa(
                 &layers,
                 &tensors,
                 &alphas,
                 &dora_scales,
                 peft_config.as_ref(),
+                if companion_pissa.is_empty() {
+                    None
+                } else {
+                    Some(&companion_pissa)
+                },
             );
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.1.0");
+                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.2.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                 } else {
@@ -308,21 +347,28 @@ fn main() {
                     summary.mean_effective_rank,
                     summary.compressible_byte_ratio * 100.0
                 );
+                let scale_key = if integrity.alpha_summary.use_rslora {
+                    "alpha/sqrt(r)"
+                } else {
+                    "alpha/r"
+                };
                 let alpha_scale_str = match (
-                    integrity.alpha_summary.min_alpha_r_ratio,
-                    integrity.alpha_summary.max_alpha_r_ratio,
+                    integrity.alpha_summary.min_effective_scale,
+                    integrity.alpha_summary.max_effective_scale,
                 ) {
                     (Some(lo), Some(hi)) if (hi - lo).abs() < 1e-4 => format!("{:.2}", lo),
                     (Some(lo), Some(hi)) => format!("{:.2}..{:.2}", lo, hi),
                     _ => "implicit(1.0)".to_string(),
                 };
                 println!(
-                    "Integrity: {} | Alpha/DoRA: {} (alpha/r={}, .alpha={}, dora={}) | Token modules inspected: {}",
+                    "Integrity: {} | Scaling: {} ({}={}, .alpha={}, dora={}, pissa_init={}) | Token modules inspected: {}",
                     integrity.status,
                     integrity.alpha_summary.status,
+                    scale_key,
                     alpha_scale_str,
                     integrity.alpha_summary.alpha_tensor_count,
                     integrity.alpha_summary.dora_tensor_count,
+                    integrity.alpha_summary.pissa_init_tensor_pairs,
                     integrity.embedding_entries.len()
                 );
                 for issue in &integrity.issues {
@@ -337,18 +383,56 @@ fn main() {
             }
         }
         "diff" => {
-            let json_mode = args[2..].iter().any(|a| a == "--json");
-            let pos: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
+            let mut json_mode = false;
+            let mut config_a_opt: Option<String> = None;
+            let mut config_b_opt: Option<String> = None;
+            let mut pos: Vec<String> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--json" => {
+                        json_mode = true;
+                        i += 1;
+                    }
+                    "--config-a" if i + 1 < args.len() => {
+                        config_a_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--config-b" if i + 1 < args.len() => {
+                        config_b_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    a if !a.starts_with("--") => {
+                        pos.push(a.to_string());
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
             if pos.len() < 2 {
                 print_usage();
                 process::exit(1);
             }
-            let source_a = pos[0];
-            let source_b = pos[1];
-            let (layers_a, alphas_a, dora_a) = load_layers_alphas_dora_or_exit(source_a);
-            let (layers_b, alphas_b, dora_b) = load_layers_alphas_dora_or_exit(source_b);
-            let summary =
-                diff_adapters_with_dora(&layers_a, &alphas_a, &dora_a, &layers_b, &alphas_b, &dora_b);
+            let source_a = &pos[0];
+            let source_b = &pos[1];
+            let (tensors_a, layers_a, alphas_a, dora_a, cfg_a) =
+                load_full_adapter_bundle_or_exit(source_a, config_a_opt.as_deref());
+            let (tensors_b, layers_b, alphas_b, dora_b, cfg_b) =
+                load_full_adapter_bundle_or_exit(source_b, config_b_opt.as_deref());
+            let pissa_a = load_companion_pissa_init(source_a, &tensors_a);
+            let pissa_b = load_companion_pissa_init(source_b, &tensors_b);
+            let summary = diff_adapters_full(
+                &layers_a,
+                &alphas_a,
+                &dora_a,
+                cfg_a.as_ref(),
+                if pissa_a.is_empty() { None } else { Some(&pissa_a) },
+                &layers_b,
+                &alphas_b,
+                &dora_b,
+                cfg_b.as_ref(),
+                if pissa_b.is_empty() { None } else { Some(&pissa_b) },
+            );
 
             if json_mode {
                 println!("{}", render_diff_json(&summary));
@@ -385,14 +469,20 @@ fn main() {
             let source = &pos[0];
             let (tensors, layers, alphas, dora_scales, peft_config) =
                 load_full_adapter_bundle_or_exit(source, config_opt.as_deref());
+            let companion_pissa = load_companion_pissa_init(source, &tensors);
             let arch = inspect_adapter_architecture(&layers, &alphas);
             let summary = audit_adapter(&layers);
-            let integrity = audit_adapter_integrity(
+            let integrity = audit_adapter_integrity_with_pissa(
                 &layers,
                 &tensors,
                 &alphas,
                 &dora_scales,
                 peft_config.as_ref(),
+                if companion_pissa.is_empty() {
+                    None
+                } else {
+                    Some(&companion_pissa)
+                },
             );
             let card_md = generate_model_card(source, &arch, &summary, &integrity);
             if let Some(out_path) = output_opt {
@@ -1091,7 +1181,7 @@ fn main() {
             };
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_merge_check_sarif(&summary, "1.1.0");
+                let sarif_str = build_merge_check_sarif(&summary, "1.2.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                     process::exit(1);

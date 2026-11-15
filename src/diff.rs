@@ -1,14 +1,19 @@
 use std::collections::BTreeMap;
 
 use crate::audit::pearson_correlation;
-use crate::linalg::{dot_slice, thin_qr_columns, transpose};
-use crate::safetensors::{LoraLayer, Tensor2D};
+use crate::linalg::{dot_slice, matmul, thin_qr_columns, transpose};
+use crate::safetensors::{
+    resolve_layer_scaling_params, subtract_pissa_residual_layer, DType, LoraLayer,
+    PeftAdapterConfig, Tensor2D,
+};
 
 #[derive(Debug, Clone)]
 pub struct LayerDiffReport {
     pub base_name: String,
     pub rank_a: usize,
     pub rank_b: usize,
+    pub scale_a: f64,
+    pub scale_b: f64,
     pub d_out: usize,
     pub d_in: usize,
     pub frobenius_norm_a: f64,
@@ -19,6 +24,7 @@ pub struct LayerDiffReport {
     pub subspace_similarity_out: f64,
     pub subspace_similarity: f64,
     pub rank_delta: i64,
+    pub pissa_residual_subtracted: bool,
     pub dora_l2_drift: Option<f64>,
     pub dora_relative_drift: Option<f64>,
     pub dora_max_channel_delta: Option<f64>,
@@ -34,6 +40,9 @@ pub struct AdapterDiffSummary {
     pub mean_subspace_similarity: f64,
     pub max_drift_layer: Option<String>,
     pub max_relative_drift: f64,
+    pub use_rslora_a: bool,
+    pub use_rslora_b: bool,
+    pub pissa_layers_normalized: usize,
     pub dora_shared_layers: usize,
     pub mean_dora_relative_drift: Option<f64>,
 }
@@ -142,7 +151,7 @@ pub fn diff_layer_with_dora(
     }
     let norm_b = (scale_b * scale_b * fn_sq_b.max(0.0)).sqrt();
 
-    // 3. Cross term: P = A_A * A_B^T (r_A x r_B), Q = B_A^T * B_B (r_A x r_B)
+    // 3. Cross term: P = A_A * A_B^T (r_A x r_B) (also reused for DoRA row deltas)
     let mut p = vec![0.0; r_a * r_b];
     for i in 0..r_a {
         let row_a = &layer_a.a.data[i * d_in..(i + 1) * d_in];
@@ -152,27 +161,46 @@ pub fn diff_layer_with_dora(
         }
     }
 
-    let mut q = vec![0.0; r_a * r_b];
-    for i in 0..r_a {
-        for j in 0..r_b {
-            let mut dot = 0.0;
-            for k in 0..d_out {
-                dot += layer_a.b.data[k * r_a + i] * layer_b.b.data[k * r_b + j];
+    // Cancellation-free QR-Core Frobenius drift:
+    // s_B * B_B * A_B - s_A * B_A * A_A = [s_B * B_B, -s_A * B_A] * [A_B; A_A].
+    // Evaluating ||R_B * R_A^T||_F avoids the sqrt(eps) cancellation floor of
+    // sqrt(||X||_F^2 + ||Y||_F^2 - 2<X, Y>_F) when two checkpoints are nearly identical.
+    let r_sum = r_a + r_b;
+    let frobenius_delta = if r_sum == 0 || d_out == 0 || d_in == 0 {
+        0.0
+    } else {
+        let mut c_b = Tensor2D::zeros(d_out, r_sum, DType::F32);
+        for row in 0..d_out {
+            let bb_row = &layer_b.b.data[row * r_b..(row + 1) * r_b];
+            let ba_row = &layer_a.b.data[row * r_a..(row + 1) * r_a];
+            let dst = &mut c_b.data[row * r_sum..(row + 1) * r_sum];
+            for c in 0..r_b {
+                dst[c] = scale_b * bb_row[c];
             }
-            q[i * r_b + j] = dot;
+            for c in 0..r_a {
+                dst[r_b + c] = -scale_a * ba_row[c];
+            }
         }
-    }
-
-    let mut cross_trace = 0.0;
-    for i in 0..r_a {
-        for j in 0..r_b {
-            cross_trace += q[i * r_b + j] * p[i * r_b + j];
+        let mut c_at = Tensor2D::zeros(d_in, r_sum, DType::F32);
+        for col in 0..d_in {
+            let dst = &mut c_at.data[col * r_sum..(col + 1) * r_sum];
+            for c in 0..r_b {
+                dst[c] = layer_b.a.data[c * d_in + col];
+            }
+            for c in 0..r_a {
+                dst[r_b + c] = layer_a.a.data[c * d_in + col];
+            }
         }
-    }
-    let scaled_cross = scale_a * scale_b * cross_trace;
-
-    let diff_sq = (norm_a * norm_a + norm_b * norm_b - 2.0 * scaled_cross).max(0.0);
-    let frobenius_delta = diff_sq.sqrt();
+        if r_sum <= d_out.min(d_in) {
+            let (_qb, rb) = thin_qr_columns(&c_b);
+            let (_qa, ra) = thin_qr_columns(&c_at);
+            let core = matmul(&rb, &transpose(&ra));
+            core.frobenius_norm_sq().sqrt()
+        } else {
+            let dense_diff = matmul(&c_b, &transpose(&c_at));
+            dense_diff.frobenius_norm_sq().sqrt()
+        }
+    };
     let relative_drift = frobenius_delta / norm_a.max(1e-12);
 
     // 4. Subspace principal cosine similarity
@@ -261,6 +289,8 @@ pub fn diff_layer_with_dora(
         base_name: layer_a.base_name.clone(),
         rank_a: r_a,
         rank_b: r_b,
+        scale_a,
+        scale_b,
         d_out,
         d_in,
         frobenius_norm_a: norm_a,
@@ -271,6 +301,7 @@ pub fn diff_layer_with_dora(
         subspace_similarity_out: subspace_sim_out,
         subspace_similarity,
         rank_delta: (r_b as i64) - (r_a as i64),
+        pissa_residual_subtracted: false,
         dora_l2_drift,
         dora_relative_drift,
         dora_max_channel_delta,
@@ -306,6 +337,27 @@ pub fn diff_adapters_with_dora(
     alphas_b: &BTreeMap<String, f64>,
     dora_b: &BTreeMap<String, (String, Tensor2D)>,
 ) -> AdapterDiffSummary {
+    diff_adapters_full(
+        layers_a, alphas_a, dora_a, None, None, layers_b, alphas_b, dora_b, None, None,
+    )
+}
+
+/// Full LoRA / rsLoRA / DoRA / PiSSA adapter comparison resolving per-layer `PeftAdapterConfig`
+/// (`lora_alpha`, `alpha_pattern`, `use_rslora` `alpha / sqrt(r)`) and normalizing net base-model
+/// task perturbations `\Delta W_net = scale * B * A - B_init * A_init` when `pissa_init` layers exist.
+#[allow(clippy::too_many_arguments)]
+pub fn diff_adapters_full(
+    layers_a: &[LoraLayer],
+    alphas_a: &BTreeMap<String, f64>,
+    dora_a: &BTreeMap<String, (String, Tensor2D)>,
+    config_a: Option<&PeftAdapterConfig>,
+    pissa_a: Option<&BTreeMap<String, LoraLayer>>,
+    layers_b: &[LoraLayer],
+    alphas_b: &BTreeMap<String, f64>,
+    dora_b: &BTreeMap<String, (String, Tensor2D)>,
+    config_b: Option<&PeftAdapterConfig>,
+    pissa_b: Option<&BTreeMap<String, LoraLayer>>,
+) -> AdapterDiffSummary {
     let mut map_a: BTreeMap<&str, &LoraLayer> = BTreeMap::new();
     for l in layers_a {
         map_a.insert(l.base_name.as_str(), l);
@@ -316,17 +368,81 @@ pub fn diff_adapters_with_dora(
         map_b.insert(l.base_name.as_str(), l);
     }
 
+    let use_rslora_a = config_a.map_or(false, |c| c.use_rslora);
+    let use_rslora_b = config_b.map_or(false, |c| c.use_rslora);
+    let mut pissa_layers_normalized = 0usize;
+
     let mut shared_reports: Vec<LayerDiffReport> = Vec::new();
     let mut removed_layers: Vec<String> = Vec::new();
     let mut added_layers: Vec<String> = Vec::new();
 
     for (name, layer_a) in &map_a {
         if let Some(layer_b) = map_b.get(name) {
-            let scale_a = compute_layer_scaling(name, layer_a.rank(), alphas_a);
-            let scale_b = compute_layer_scaling(name, layer_b.rank(), alphas_b);
+            let (_, scale_a, _) = if config_a.is_some() {
+                resolve_layer_scaling_params(layer_a, alphas_a, None, config_a, false)
+            } else {
+                (0.0, compute_layer_scaling(name, layer_a.rank(), alphas_a), false)
+            };
+            let (_, scale_b, _) = if config_b.is_some() {
+                resolve_layer_scaling_params(layer_b, alphas_b, None, config_b, false)
+            } else {
+                (0.0, compute_layer_scaling(name, layer_b.rank(), alphas_b), false)
+            };
+
+            let init_a = pissa_a.and_then(|m| m.get(*name));
+            let init_b = pissa_b.and_then(|m| m.get(*name));
+
+            let mut pissa_sub = false;
+            let mut fallback_denom: Option<f64> = None;
+
+            let (eff_layer_a, eff_scale_a) = if let Some(ia) = init_a {
+                if let Some(net_a) = subtract_pissa_residual_layer(layer_a, scale_a, ia, 1.0) {
+                    pissa_sub = true;
+                    if let Some(ia_rep) = diff_layer(ia, 1.0, ia, 0.0) {
+                        fallback_denom = Some(ia_rep.frobenius_norm_a);
+                    }
+                    (Some(net_a), 1.0)
+                } else {
+                    (None, scale_a)
+                }
+            } else {
+                (None, scale_a)
+            };
+
+            let (eff_layer_b, eff_scale_b) = if let Some(ib) = init_b {
+                if let Some(net_b) = subtract_pissa_residual_layer(layer_b, scale_b, ib, 1.0) {
+                    pissa_sub = true;
+                    (Some(net_b), 1.0)
+                } else {
+                    (None, scale_b)
+                }
+            } else {
+                (None, scale_b)
+            };
+
+            let ref_a = eff_layer_a.as_ref().unwrap_or(layer_a);
+            let ref_b = eff_layer_b.as_ref().unwrap_or(layer_b);
             let da = dora_a.get(*name).map(|(_, t)| t);
             let db = dora_b.get(*name).map(|(_, t)| t);
-            if let Some(report) = diff_layer_with_dora(layer_a, scale_a, da, layer_b, scale_b, db) {
+
+            if let Some(mut report) =
+                diff_layer_with_dora(ref_a, eff_scale_a, da, ref_b, eff_scale_b, db)
+            {
+                // Preserve nominal checkpoint ranks and resolved runtime scales on the report
+                report.rank_a = layer_a.rank();
+                report.rank_b = layer_b.rank();
+                report.rank_delta = (layer_b.rank() as i64) - (layer_a.rank() as i64);
+                report.scale_a = scale_a;
+                report.scale_b = scale_b;
+                report.pissa_residual_subtracted = pissa_sub;
+                if pissa_sub {
+                    pissa_layers_normalized += 1;
+                    if report.frobenius_norm_a <= 1e-9 {
+                        if let Some(fb) = fallback_denom.filter(|&v| v > 1e-9) {
+                            report.relative_drift = report.frobenius_delta / fb;
+                        }
+                    }
+                }
                 shared_reports.push(report);
             }
         } else {
@@ -377,6 +493,9 @@ pub fn diff_adapters_with_dora(
         mean_subspace_similarity,
         max_drift_layer,
         max_relative_drift,
+        use_rslora_a,
+        use_rslora_b,
+        pissa_layers_normalized,
         dora_shared_layers,
         mean_dora_relative_drift,
     }
@@ -415,6 +534,8 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
       "layer": "{}",
       "rank_a": {},
       "rank_b": {},
+      "scale_a": {:.6},
+      "scale_b": {:.6},
       "rank_delta": {},
       "d_out": {},
       "d_in": {},
@@ -425,6 +546,7 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
       "subspace_similarity_in": {:.6},
       "subspace_similarity_out": {:.6},
       "subspace_similarity": {:.6},
+      "pissa_residual_subtracted": {},
       "dora_l2_drift": {},
       "dora_relative_drift": {},
       "dora_max_channel_delta": {},
@@ -433,6 +555,8 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
                 escape_json(&r.base_name),
                 r.rank_a,
                 r.rank_b,
+                r.scale_a,
+                r.scale_b,
                 r.rank_delta,
                 r.d_out,
                 r.d_in,
@@ -443,6 +567,7 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
                 r.subspace_similarity_in,
                 r.subspace_similarity_out,
                 r.subspace_similarity,
+                r.pissa_residual_subtracted,
                 opt_json_f64(r.dora_l2_drift),
                 opt_json_f64(r.dora_relative_drift),
                 opt_json_f64(r.dora_max_channel_delta),
@@ -472,6 +597,9 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
   "mean_subspace_similarity": {:.6},
   "max_drift_layer": {},
   "max_relative_drift": {:.6},
+  "use_rslora_a": {},
+  "use_rslora_b": {},
+  "pissa_layers_normalized": {},
   "dora_shared_layers": {},
   "mean_dora_relative_drift": {},
   "layers": [
@@ -491,6 +619,9 @@ pub fn render_diff_json(summary: &AdapterDiffSummary) -> String {
             .as_ref()
             .map_or("null".to_string(), |s| format!("\"{}\"", escape_json(s))),
         summary.max_relative_drift,
+        summary.use_rslora_a,
+        summary.use_rslora_b,
+        summary.pissa_layers_normalized,
         summary.dora_shared_layers,
         opt_json_f64(summary.mean_dora_relative_drift),
         layers_json.join(",\n    "),
@@ -554,6 +685,18 @@ pub fn render_diff_table(summary: &AdapterDiffSummary) -> String {
         out.push_str(&format!(
             "  DoRA Magnitude Drift: {} shared DoRA layer(s), mean rel_drift {:.4}\n",
             summary.dora_shared_layers, mean_dora
+        ));
+    }
+    if summary.use_rslora_a || summary.use_rslora_b {
+        out.push_str(&format!(
+            "  Rank-Stabilized Scaling (rsLoRA): adapter_a={}, adapter_b={}\n",
+            summary.use_rslora_a, summary.use_rslora_b
+        ));
+    }
+    if summary.pissa_layers_normalized > 0 {
+        out.push_str(&format!(
+            "  PiSSA Residual Normalization: {} layer(s) compared via net task delta (s*B*A - B_init*A_init)\n",
+            summary.pissa_layers_normalized
         ));
     }
 

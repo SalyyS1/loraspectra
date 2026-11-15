@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.1.0 - Interactive .safetensors Header, Spectral SVD &amp; Multi-Adapter Merge Inspector</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/DoRA spectral SVD auditor, and multi-adapter merge-check analyzer + zero-dependency Rust CLI (v1.1.0).">
-  <meta property="og:title" content="loraspectra v1.1.0 - Interactive .safetensors Header, Spectral SVD &amp; Merge Inspector">
+  <title>loraspectra v1.2.0 - Interactive .safetensors Header, Spectral SVD &amp; Multi-Adapter Merge Inspector</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, and multi-adapter merge-check analyzer + zero-dependency Rust CLI (v1.2.0).">
+  <meta property="og:title" content="loraspectra v1.2.0 - Interactive .safetensors Header, Spectral SVD &amp; Merge Inspector">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -419,9 +419,9 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.1.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.2.0</span></h1>
         <p class="lead">
-          Spectral SVD Auditor, DoRA Directional vs Magnitude Analyzer, Zero-Copy <code>.safetensors</code> Header Inspector, Dynamic Rank Compressor, and Multi-Adapter Merge Conflict Analyzer
+          Spectral SVD Auditor, rsLoRA &amp; PiSSA Residual Validator, DoRA Directional vs Magnitude Analyzer, Zero-Copy <code>.safetensors</code> Header Inspector, Dynamic Rank Compressor, and Multi-Adapter Merge Conflict Analyzer
           - powered by exact QR-Core SVD
           (<code>O(r&sup2;d + r&sup3;)</code>) in your browser or native Rust CLI without PyTorch or GPU VRAM.
         </p>
@@ -440,15 +440,18 @@
         <span class="privacy-tag">100% Local Web File API - Zero Uploads</span>
       </div>
 
-      <input type="file" id="file-input" accept=".safetensors" multiple class="hidden">
-      <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Drop one or more .safetensors files or click to browse">
-        <p class="dropzone-title">Drop 1 <code>.safetensors</code> file (Header + Spectral SVD) or 2+ files (Multi-Adapter <code>merge-check</code>)</p>
+      <input type="file" id="file-input" accept=".safetensors,.json" multiple class="hidden">
+      <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Drop .safetensors and optional adapter_config.json files or click to browse">
+        <p class="dropzone-title">Drop 1 <code>.safetensors</code> (+ optional <code>adapter_config.json</code>) or 2+ files (Multi-Adapter <code>merge-check</code>)</p>
         <p class="dropzone-sub">
-          Reads 8-byte header slices in &lt;5 ms for any dense or LoRA checkpoint, decodes <code>F32</code>/<code>F16</code>/<code>BF16</code> <code>(lora_A, lora_B)</code> pairs, and analyzes multi-adapter subspace collisions
+          Reads 8-byte header slices in &lt;5 ms, decodes <code>F32</code>/<code>F16</code>/<code>BF16</code> LoRA/rsLoRA/PiSSA/DoRA factors, validates <code>alpha/sqrt(r)</code> &amp; <code>pissa_init</code> residuals, and checks multi-adapter collisions
         </p>
         <div class="demo-bar" id="demo-bar">
           <button type="button" class="btn btn-accent btn-sm" id="btn-demo-peft">
             Load Demo: Rank-64 Collapsed Transformer LoRA (PEFT)
+          </button>
+          <button type="button" class="btn btn-sm" id="btn-demo-rslora-pissa">
+            Load Demo: rsLoRA + PiSSA Residual Hazard (LS021/LS022)
           </button>
           <button type="button" class="btn btn-sm" id="btn-demo-flux">
             Load Demo: Healthy Rank-16 FLUX/Kohya Style LoRA
@@ -461,7 +464,7 @@
           </button>
         </div>
         <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
-        <div class="status-line" id="status-line">Ready - drop 1 or more local .safetensors files or click a preset above.</div>
+        <div class="status-line" id="status-line">Ready - drop .safetensors (+ optional adapter_config.json) or click a preset above.</div>
       </div>
 
       <!-- Zero-Copy .safetensors Header & Tensor Manifest Inspector -->
@@ -603,6 +606,16 @@
           </div>
         </div>
 
+        <!-- Scaling, rsLoRA & PiSSA Integrity Diagnostics Panel -->
+        <div id="integrity-panel" class="cli-block" style="margin-bottom: 18px;">
+          <div class="cli-block-head">
+            <span>Scaling, rsLoRA &amp; PiSSA Residual Diagnostics (SARIF <code>LS001-LS022</code>)</span>
+            <span class="badge" id="integrity-badge">SCALING_OK</span>
+          </div>
+          <div id="integrity-summary" style="padding: 10px 14px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--border);"></div>
+          <div id="integrity-findings" style="padding: 10px 14px; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.55;"></div>
+        </div>
+
         <!-- Target Energy Slider -->
         <div class="slider-panel">
           <div class="slider-left">
@@ -702,11 +715,11 @@
       <div class="cli-block">
 <pre class="cli-code">cargo install --git https://github.com/SalyyS1/loraspectra
 
-# Inspect or audit remote HuggingFace LoRAs directly (auto-cached in ${TMPDIR:-/tmp}/loraspectra-cache/)
-loraspectra info hf://XLabs-AI/flux-RealismLora
-loraspectra audit hf://org/llama3-lora/adapter_model.safetensors
+# Audit LoRA, rsLoRA (alpha/sqrt(r)), PiSSA residuals, and DoRA magnitudes with SARIF v2.1.0 output
+loraspectra audit ./checkpoint/adapter_model.safetensors --sarif loraspectra.sarif
+loraspectra diff ./pissa_step500/adapter_model.safetensors ./lora_converted/adapter_model.safetensors
 
-# Compress a rank-collapsed LoRA at 99% Frobenius energy or global byte budget and emit PEFT rank_pattern + alpha_pattern
+# Compress a rank-collapsed LoRA/rsLoRA at 99% Frobenius energy or byte budget with scale-preserving alpha_pattern
 loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_slim --energy 0.99
 loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_16mb --max-bytes 16M --dtype bf16
 
@@ -1182,6 +1195,161 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       ".lora_B",
       ".lora_up"
     ];
+    const PISSA_A_SUFFIXES = [
+      ".lora_A.pissa_init.weight",
+      ".lora_A.pissa_init",
+      ".pissa_init.lora_A.weight"
+    ];
+    const PISSA_B_SUFFIXES = [
+      ".lora_B.pissa_init.weight",
+      ".lora_B.pissa_init",
+      ".pissa_init.lora_B.weight"
+    ];
+
+    function resolvePeftPatternValue(patternMap, baseName) {
+      if (!patternMap || typeof patternMap !== "object") return null;
+      if (Object.prototype.hasOwnProperty.call(patternMap, baseName)) return Number(patternMap[baseName]);
+      let bestKey = null;
+      let bestVal = null;
+      for (const [pat, rawVal] of Object.entries(patternMap)) {
+        const val = Number(rawVal);
+        if (!Number.isFinite(val)) continue;
+        if (baseName === pat || baseName.endsWith("." + pat)) {
+          if (bestKey === null || pat.length > bestKey.length) {
+            bestKey = pat;
+            bestVal = val;
+          }
+        }
+      }
+      return bestVal;
+    }
+
+    function resolveLayerScaleJs(baseName, r, tensorAlpha, peftConfig) {
+      const rf = Math.max(r, 1);
+      const useRslora = Boolean(peftConfig && peftConfig.use_rslora === true);
+      const denom = useRslora ? Math.sqrt(rf) : rf;
+      if (tensorAlpha !== null && Number.isFinite(tensorAlpha) && tensorAlpha > 0) {
+        return { alpha: tensorAlpha, scale: tensorAlpha / denom, useRslora };
+      }
+      if (peftConfig) {
+        const patAlpha = resolvePeftPatternValue(peftConfig.alpha_pattern, baseName);
+        if (patAlpha !== null && patAlpha > 0) {
+          return { alpha: patAlpha, scale: patAlpha / denom, useRslora };
+        }
+        const globalAlpha = Number(peftConfig.lora_alpha);
+        if (Number.isFinite(globalAlpha) && globalAlpha > 0) {
+          return { alpha: globalAlpha, scale: globalAlpha / denom, useRslora };
+        }
+      }
+      return { alpha: tensorAlpha, scale: 1.0, useRslora };
+    }
+
+    function evaluateScalingAndPissaDiagnostics(records, rawLayers, pissaInitLayers, alphaCount, doraCount, peftConfig) {
+      const useRslora = Boolean(peftConfig && peftConfig.use_rslora === true);
+      const initWeights = (peftConfig && peftConfig.init_lora_weights != null) ? String(peftConfig.init_lora_weights) : null;
+      const isPissaCfg = Boolean(initWeights && initWeights.toLowerCase().startsWith("pissa"));
+      const pissaPairs = pissaInitLayers ? pissaInitLayers.size : 0;
+      const formula = useRslora ? "alpha / sqrt(r) (rsLoRA)" : "alpha / r (standard LoRA)";
+      const findings = [];
+      let minScale = Infinity, maxScale = -Infinity;
+
+      for (const rec of records) {
+        const l = rawLayers.get(rec.baseName);
+        const sc = l ? l.scale : 1.0;
+        if (sc < minScale) minScale = sc;
+        if (sc > maxScale) maxScale = sc;
+      }
+      if (!Number.isFinite(minScale)) { minScale = 1.0; maxScale = 1.0; }
+
+      if (useRslora && alphaCount > 0 && records.some((r) => r.nominalRank > 1)) {
+        findings.push({
+          rule: "LS021",
+          severity: "WARN",
+          msg: "RSLORA_ALPHA_TENSOR_AMBIGUITY: adapter_config.json sets use_rslora=true alongside " + alphaCount +
+            " embedded .alpha scalar tensor(s); standalone safetensors loaders divide .alpha/r instead of .alpha/sqrt(r)."
+        });
+      }
+      if (maxScale > 8.0) {
+        findings.push({
+          rule: useRslora ? "LS021" : "LS008",
+          severity: "WARN",
+          msg: "EXTREME_EFFECTIVE_SCALE: effective forward multiplier reaches " + maxScale.toFixed(3) + "x under " + formula +
+            (useRslora ? " (naive alpha=2r heuristic overscales high-rank rsLoRA by sqrt(r))." : " (risk of activation norm explosion on merge).")
+        });
+      } else if (minScale < 0.1) {
+        findings.push({
+          rule: "LS008",
+          severity: "WARN",
+          msg: "UNDER_SCALED_ADAPTER: minimum effective forward multiplier is " + minScale.toFixed(4) + "x (< 0.1x), attenuating fine-tuned updates."
+        });
+      }
+
+      let meanNetUpdateNorm = null;
+      if (pissaPairs > 0) {
+        let sumNet = 0.0, cnt = 0, zeroTaskCount = 0;
+        for (const [baseName, initL] of pissaInitLayers.entries()) {
+          const actL = rawLayers.get(baseName);
+          if (!actL || actL.dOut !== initL.dOut || actL.dIn !== initL.dIn) {
+            findings.push({
+              rule: "LS022",
+              severity: "ERROR",
+              msg: "PISSA_SHAPE_MISMATCH on " + baseName + ": .pissa_init shape does not match active (lora_A, lora_B) dimensions."
+            });
+            continue;
+          }
+          const normActSq = Math.max(0.0, lowRankFrobInnerJs(actL, actL));
+          const normInitSq = Math.max(0.0, lowRankFrobInnerJs(initL, initL));
+          const cross = lowRankFrobInnerJs(actL, initL);
+          const netNorm = Math.sqrt(Math.max(0.0, normActSq + normInitSq - 2.0 * cross));
+          sumNet += netNorm;
+          cnt++;
+          if (normInitSq > 1e-12 && netNorm / Math.sqrt(normInitSq) < 1e-4) zeroTaskCount++;
+        }
+        if (cnt > 0) meanNetUpdateNorm = sumNet / cnt;
+        if (pissaPairs < records.length) {
+          findings.push({
+            rule: "LS022",
+            severity: "WARN",
+            msg: "PISSA_PARTIAL_INIT_COVERAGE: only " + pissaPairs + " / " + records.length + " LoRA layers include .pissa_init reference factors."
+          });
+        }
+        if (zeroTaskCount > 0) {
+          findings.push({
+            rule: "LS022",
+            severity: "WARN",
+            msg: "PISSA_ZERO_TASK_UPDATE: " + zeroTaskCount + " layer(s) show ||s*B*A - B_init*A_init||_F ~ 0 (no task learning beyond principal SVD init)."
+          });
+        }
+      } else if (isPissaCfg) {
+        findings.push({
+          rule: "LS022",
+          severity: "WARN",
+          msg: "PISSA_UNCONVERTED_RESIDUAL_HAZARD: init_lora_weights=\"" + initWeights +
+            "\" without .pissa_init reference weights; applying onto unmodified W_0 instead of W_res = W_0 - B_init*A_init doubles principal singular components."
+        });
+      }
+
+      if ((isPissaCfg || pissaPairs > 0) && (Math.abs(minScale - 1.0) > 1e-3 || Math.abs(maxScale - 1.0) > 1e-3)) {
+        findings.push({
+          rule: "LS022",
+          severity: "WARN",
+          msg: "PISSA_NON_UNIT_SCALING: PiSSA principal factors expect unit scale 1.0x (lora_alpha=r or rslora lora_alpha=sqrt(r)), found " +
+            minScale.toFixed(3) + "x.." + maxScale.toFixed(3) + "x."
+        });
+      }
+
+      return {
+        formula,
+        useRslora,
+        initWeights,
+        pissaPairs,
+        doraCount,
+        minScale,
+        maxScale,
+        meanNetUpdateNorm,
+        findings
+      };
+    }
 
     function stripWrapperSuffix(rawBase) {
       if (rawBase.endsWith(".dora_layer")) return rawBase.slice(0, -11);
@@ -1278,7 +1446,7 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       };
     }
 
-    async function parseSafetensorsFile(file) {
+    async function parseSafetensorsFile(file, peftConfig) {
       if (file.size < 16) throw new Error("File is too small to be a valid .safetensors checkpoint.");
       const lenBuf = await file.slice(0, 8).arrayBuffer();
       const lenDv = new DataView(lenBuf);
@@ -1302,6 +1470,8 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       const bodyOffset = 8 + headerLen;
       const aEntries = new Map();
       const bEntries = new Map();
+      const pissaAEntries = new Map();
+      const pissaBEntries = new Map();
       const alphaEntries = new Map();
       let doraCount = 0;
 
@@ -1335,6 +1505,19 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
         }
 
         if (shape.length === 2) {
+          const pBaseA = matchSuffix(key, PISSA_A_SUFFIXES);
+          if (pBaseA !== null) {
+            pissaAEntries.set(pBaseA, { key, dtype, rows: shape[0], cols: shape[1], start, end });
+            continue;
+          }
+          const pBaseB = matchSuffix(key, PISSA_B_SUFFIXES);
+          if (pBaseB !== null) {
+            pissaBEntries.set(pBaseB, { key, dtype, rows: shape[0], cols: shape[1], start, end });
+            continue;
+          }
+          if (key.includes(".pissa_init.") || key.endsWith(".pissa_init")) {
+            continue;
+          }
           const baseA = matchSuffix(key, A_SUFFIXES);
           if (baseA !== null) {
             aEntries.set(baseA, { key, dtype, rows: shape[0], cols: shape[1], start, end });
@@ -1353,9 +1536,12 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
           fileName: file.name,
           records: [],
           rawLayers: new Map(),
+          pissaInitLayers: new Map(),
+          peftConfig: peftConfig || null,
           headerManifest,
           alphaCount: 0,
           doraCount,
+          pissaInitCount: Math.min(pissaAEntries.size, pissaBEntries.size),
           elapsedMs: 0.5,
           syntheticTensors: null
         };
@@ -1371,6 +1557,7 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
 
       const records = [];
       const rawLayers = new Map();
+      const pissaInitLayers = new Map();
       const t0 = performance.now();
       let lastYield = t0;
 
@@ -1408,10 +1595,22 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
         }
 
         const sigma = qrCoreSingularValues(bData, dOut, r, aData, dIn);
-        const alphaVal = alphaValues.has(baseName) ? alphaValues.get(baseName) : null;
-        const scale = (alphaVal !== null && alphaVal > 0) ? (alphaVal / Math.max(r, 1)) : 1.0;
-        rawLayers.set(baseName, { aData, bData, dOut, dIn, r, scale, s1: sigma[0] || 0.0 });
-        records.push(buildLayerAuditRecord(baseName, aInfo.key, dOut, dIn, r, aInfo.dtype, sigma, alphaVal));
+        const tensorAlpha = alphaValues.has(baseName) ? alphaValues.get(baseName) : null;
+        const resolved = resolveLayerScaleJs(baseName, r, tensorAlpha, peftConfig);
+        rawLayers.set(baseName, { aData, bData, dOut, dIn, r, scale: resolved.scale, s1: sigma[0] || 0.0 });
+        records.push(buildLayerAuditRecord(baseName, aInfo.key, dOut, dIn, r, aInfo.dtype, sigma, resolved.alpha));
+
+        if (pissaAEntries.has(baseName) && pissaBEntries.has(baseName)) {
+          const pa = pissaAEntries.get(baseName);
+          const pb = pissaBEntries.get(baseName);
+          if (pa.rows === pb.cols) {
+            const paBuf = await file.slice(bodyOffset + pa.start, bodyOffset + pa.end).arrayBuffer();
+            const pbBuf = await file.slice(bodyOffset + pb.start, bodyOffset + pb.end).arrayBuffer();
+            const paData = decodeTensorBytes(paBuf, pa.dtype, pa.rows * pa.cols);
+            const pbData = decodeTensorBytes(pbBuf, pb.dtype, pb.rows * pb.cols);
+            pissaInitLayers.set(baseName, { aData: paData, bData: pbData, dOut: pb.rows, dIn: pa.cols, r: pa.rows, scale: 1.0 });
+          }
+        }
 
         const now = performance.now();
         if (now - lastYield > 16) {
@@ -1426,9 +1625,12 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
         fileName: file.name,
         records,
         rawLayers,
+        pissaInitLayers,
+        peftConfig: peftConfig || null,
         headerManifest,
         alphaCount: alphaValues.size,
         doraCount,
+        pissaInitCount: pissaInitLayers.size,
         elapsedMs,
         syntheticTensors: null
       };
@@ -1555,9 +1757,83 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
           fileName: "demo_llama_r64_collapsed_peft.safetensors",
           records,
           rawLayers,
+          pissaInitLayers: new Map(),
+          peftConfig: { peft_type: "LORA", r: 64, lora_alpha: 64, use_rslora: false },
           headerManifest: buildSyntheticHeaderManifest(exportTensors, { peft_type: "LORA", base_model: "Llama-3-8B-Instruct" }),
           alphaCount: 0,
           doraCount: 0,
+          pissaInitCount: 0,
+          elapsedMs: performance.now() - t0,
+          syntheticTensors: exportTensors
+        };
+      } else if (kind === "rslora-pissa-hazard") {
+        // Rank-32 rsLoRA + Partial PiSSA Residual Hazard Demo (triggers LS021 + LS022)
+        const rng = createDeterministicRng(512022);
+        const r = 32;
+        const pool256 = randomOrthonormalCols(256, r, rng);
+        const pissaInitLayers = new Map();
+        const peftConfig = {
+          peft_type: "LORA",
+          r: 32,
+          lora_alpha: 64,
+          use_rslora: true,
+          init_lora_weights: "pissa_niter_4"
+        };
+        const projs = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.down_proj"];
+        let idx = 0;
+        for (let blk = 0; blk < 2; blk++) {
+          for (const p of projs) {
+            const baseName = "model.layers." + blk + "." + p;
+            const aKey = baseName + ".lora_A.weight";
+            const bKey = baseName + ".lora_B.weight";
+            const alphaKey = baseName + ".alpha";
+            const { bData: bInit, aData: aInit } = synthesizeFromBasisPool(
+              pool256, 256, pool256, 256, r, idx,
+              (k, _rank, prng) => (k < 12 ? 1.8 * Math.pow(k + 1, -0.55) : 0.06) * (0.95 + 0.1 * prng.nextUniform()),
+              rng
+            );
+            const aData = new Float64Array(aInit.length);
+            const bData = new Float64Array(bInit.length);
+            const stagnant = (idx === 0);
+            for (let i = 0; i < aData.length; i++) {
+              aData[i] = stagnant ? aInit[i] : (aInit[i] + 0.035 * rng.nextGaussian());
+            }
+            for (let i = 0; i < bData.length; i++) {
+              bData[i] = stagnant ? bInit[i] : (bInit[i] + 0.035 * rng.nextGaussian());
+            }
+            const sigma = qrCoreSingularValues(bData, 256, r, aData, 256);
+            const resolved = resolveLayerScaleJs(baseName, r, 64.0, peftConfig);
+            rawLayers.set(baseName, { aData, bData, dOut: 256, dIn: 256, r, scale: resolved.scale, s1: sigma[0] || 0.0 });
+            records.push(buildLayerAuditRecord(baseName, aKey, 256, 256, r, "BF16", sigma, 64.0));
+            exportTensors.push({ key: alphaKey, rows: 1, cols: 1, data: new Float64Array([64.0]), isScalar: true });
+            exportTensors.push({ key: aKey, rows: r, cols: 256, data: aData, isScalar: false });
+            exportTensors.push({ key: bKey, rows: 256, cols: r, data: bData, isScalar: false });
+            if (blk === 0) {
+              // Include .pissa_init on only half of layers to demonstrate partial coverage + net task delta
+              const paKey = baseName + ".lora_A.pissa_init.weight";
+              const pbKey = baseName + ".lora_B.pissa_init.weight";
+              pissaInitLayers.set(baseName, { aData: aInit, bData: bInit, dOut: 256, dIn: 256, r, scale: 1.0 });
+              exportTensors.push({ key: paKey, rows: r, cols: 256, data: aInit, isScalar: false });
+              exportTensors.push({ key: pbKey, rows: 256, cols: r, data: bInit, isScalar: false });
+            }
+            idx++;
+          }
+        }
+        return {
+          fileName: "demo_qwen_r32_rslora_pissa_hazard.safetensors",
+          records,
+          rawLayers,
+          pissaInitLayers,
+          peftConfig,
+          headerManifest: buildSyntheticHeaderManifest(exportTensors, {
+            peft_type: "LORA",
+            use_rslora: "true",
+            init_lora_weights: "pissa_niter_4",
+            lora_alpha: "64"
+          }),
+          alphaCount: idx,
+          doraCount: 0,
+          pissaInitCount: pissaInitLayers.size,
           elapsedMs: performance.now() - t0,
           syntheticTensors: exportTensors
         };
@@ -2186,6 +2462,57 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       clearProgress("Completed multi-adapter merge-check across " + payloads.length + " adapters (" + layerRows.length + " shared layers).");
     }
 
+    function escapeHtmlJs(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function renderIntegrityDiagnostics(payload) {
+      const diag = evaluateScalingAndPissaDiagnostics(
+        payload.records || [],
+        payload.rawLayers || new Map(),
+        payload.pissaInitLayers || new Map(),
+        payload.alphaCount || 0,
+        payload.doraCount || 0,
+        payload.peftConfig || null
+      );
+      const badgeEl = document.getElementById("integrity-badge");
+      const summaryEl = document.getElementById("integrity-summary");
+      const findingsEl = document.getElementById("integrity-findings");
+      const hasError = diag.findings.some((f) => f.severity === "ERROR");
+      const hasWarn = diag.findings.length > 0;
+      badgeEl.textContent = hasError ? "CRITICAL_HAZARD" : (hasWarn ? diag.findings.length + " WARNING(S)" : "SCALING_OK");
+      badgeEl.style.color = hasError ? "#ff7b72" : (hasWarn ? "#f0883e" : "#3fb950");
+
+      const scaleStr = Math.abs(diag.maxScale - diag.minScale) < 1e-6
+        ? diag.minScale.toFixed(4) + "x"
+        : (diag.minScale.toFixed(4) + "x .. " + diag.maxScale.toFixed(4) + "x");
+      const parts = [
+        "Active Formula: " + diag.formula,
+        "Effective Scale: " + scaleStr,
+        "PiSSA Init Pairs: " + diag.pissaPairs + " / " + (payload.records ? payload.records.length : 0)
+      ];
+      if (diag.initWeights) parts.push("init_lora_weights: " + diag.initWeights);
+      if (diag.meanNetUpdateNorm !== null) {
+        parts.push("Mean Net Task Update ||s*B*A - B_init*A_init||_F: " + diag.meanNetUpdateNorm.toFixed(4));
+      }
+      if (diag.doraCount > 0) parts.push("DoRA Vectors: " + diag.doraCount);
+      summaryEl.textContent = parts.join("  |  ");
+
+      if (diag.findings.length === 0) {
+        findingsEl.innerHTML = "<span style=\"color:#3fb950;\">[PASS]</span> Effective LoRA/rsLoRA scaling and residual adapter checks passed with 0 SARIF warnings.";
+      } else {
+        findingsEl.innerHTML = diag.findings.map((f) => {
+          const col = f.severity === "ERROR" ? "#ff7b72" : "#f0883e";
+          return "<div><span style=\"color:" + col + ";font-weight:700;\">[" + escapeHtmlJs(f.rule) + " / " + escapeHtmlJs(f.severity) + "]</span> " +
+            escapeHtmlJs(f.msg) + "</div>";
+        }).join("");
+      }
+    }
+
     function applyLoadedAdapter(payload) {
       mergeCheckBox.classList.add("hidden");
       renderHeaderInspector(payload.headerManifest || null);
@@ -2207,6 +2534,7 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
 
       btnExportDemo.classList.toggle("hidden", !state.syntheticTensors);
       resultsBox.classList.remove("hidden");
+      renderIntegrityDiagnostics(payload);
       updateKpiAndCli();
       renderAuditTable();
       renderSpectrumSvg();
@@ -2220,19 +2548,30 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
     async function handleFileSelection(files) {
       if (!files || files.length === 0) return;
       try {
-        if (files.length >= 2) {
+        const arr = Array.from(files);
+        const jsonFiles = arr.filter((f) => f.name.toLowerCase().endsWith(".json"));
+        const stFiles = arr.filter((f) => !f.name.toLowerCase().endsWith(".json"));
+        let peftConfig = null;
+        if (jsonFiles.length > 0) {
+          const rawJson = await jsonFiles[0].text();
+          peftConfig = JSON.parse(rawJson);
+        }
+        if (stFiles.length === 0) {
+          throw new Error("Drop at least one .safetensors file alongside optional adapter_config.json.");
+        }
+        if (stFiles.length >= 2) {
           const payloads = [];
-          for (let i = 0; i < files.length; i++) {
-            setProgress(((i + 1) / files.length) * 80, "Parsing adapter " + (i + 1) + " / " + files.length + " (" + files[i].name + ")...");
+          for (let i = 0; i < stFiles.length; i++) {
+            setProgress(((i + 1) / stFiles.length) * 80, "Parsing adapter " + (i + 1) + " / " + stFiles.length + " (" + stFiles[i].name + ")...");
             await new Promise((r) => setTimeout(r, 0));
-            payloads.push(await parseSafetensorsFile(files[i]));
+            payloads.push(await parseSafetensorsFile(stFiles[i], peftConfig));
           }
           applyMultiMergeCheck(payloads);
         } else {
-          const file = files[0];
+          const file = stFiles[0];
           setProgress(8, "Reading .safetensors header slice from " + file.name + "...");
           await new Promise((r) => setTimeout(r, 0));
-          const payload = await parseSafetensorsFile(file);
+          const payload = await parseSafetensorsFile(file, peftConfig);
           applyLoadedAdapter(payload);
         }
       } catch (err) {
@@ -2276,6 +2615,14 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       setProgress(15, "Synthesizing Rank-64 Collapsed Transformer LoRA (PEFT)...");
       await new Promise((r) => setTimeout(r, 0));
       const payload = await generateDemoPreset("peft-collapsed");
+      applyLoadedAdapter(payload);
+    });
+
+    document.getElementById("btn-demo-rslora-pissa").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      setProgress(15, "Synthesizing Rank-32 rsLoRA + PiSSA Residual Hazard Demo...");
+      await new Promise((r) => setTimeout(r, 0));
+      const payload = await generateDemoPreset("rslora-pissa-hazard");
       applyLoadedAdapter(payload);
     });
 

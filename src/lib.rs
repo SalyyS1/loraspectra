@@ -2573,4 +2573,287 @@ mod tests {
         assert!(!diff_json.contains('\u{2014}'));
         assert!(!diff_table.contains('\u{2014}'));
     }
+
+    #[test]
+    fn test_rslora_rank_stabilized_scaling_audit_diff_and_sarif_ls021() {
+        let mut rng = Rng64::new(12001);
+        let d_out = 24;
+        let d_in = 24;
+
+        // 1. High-rank rsLoRA (r=256, lora_alpha=16 -> alpha/r=0.0625, but alpha/sqrt(r)=1.0)
+        let hi_layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(256, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, 256, &mut rng, DType::F32),
+        };
+        let hi_tensors = layers_to_tensor_map(std::slice::from_ref(&hi_layer));
+        let hi_cfg = crate::safetensors::parse_peft_adapter_config(
+            r#"{"peft_type":"LORA","r":256,"lora_alpha":16,"use_rslora":true}"#,
+        )
+        .expect("parse rslora config");
+        let hi_int = audit_adapter_integrity(
+            std::slice::from_ref(&hi_layer),
+            &hi_tensors,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&hi_cfg),
+        );
+        assert_eq!(hi_int.status, "HEALTHY", "issues: {:?}", hi_int.issues);
+        assert!((hi_int.alpha_summary.min_effective_scale.unwrap() - 1.0).abs() < 1e-9);
+        assert!((hi_int.alpha_summary.min_alpha_r_ratio.unwrap() - 0.0625).abs() < 1e-9);
+
+        let arch = inspect_adapter_architecture(std::slice::from_ref(&hi_layer), &BTreeMap::new());
+        let sum = audit_adapter(std::slice::from_ref(&hi_layer));
+        let card = crate::card::generate_model_card("rslora.safetensors", &arch, &sum, &hi_int);
+        assert!(card.contains("alpha/sqrt(r)=1.00 (rsLoRA)"));
+        assert!(!card.contains('\u{2014}'));
+
+        // 2. Naive alpha=2*r with use_rslora=true at r=100 -> alpha/sqrt(r) = 20.0 (> 16.0) + .alpha ambiguity
+        let over_layer = LoraLayer {
+            base_name: "model.layers.0.mlp.up_proj".to_string(),
+            a_key: "model.layers.0.mlp.up_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.up_proj.lora_B.weight".to_string(),
+            a: random_matrix(100, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, 100, &mut rng, DType::F32),
+        };
+        let over_tensors = layers_to_tensor_map(std::slice::from_ref(&over_layer));
+        let mut over_alphas = BTreeMap::new();
+        over_alphas.insert(over_layer.base_name.clone(), 200.0);
+        let over_cfg = crate::safetensors::parse_peft_adapter_config(
+            r#"{"peft_type":"LORA","r":100,"lora_alpha":200,"use_rslora":true}"#,
+        )
+        .expect("parse over rslora");
+        let over_int = audit_adapter_integrity(
+            std::slice::from_ref(&over_layer),
+            &over_tensors,
+            &over_alphas,
+            &BTreeMap::new(),
+            Some(&over_cfg),
+        );
+        assert!(over_int
+            .issues
+            .iter()
+            .any(|i| i.code == "EXTREME_ALPHA_OVERSCALE" && i.message.contains("alpha/sqrt(r)")));
+        assert!(over_int
+            .issues
+            .iter()
+            .any(|i| i.code == "RSLORA_ALPHA_TENSOR_AMBIGUITY"));
+        let sarif = crate::sarif::build_audit_sarif(None, Some(&over_int), "over.safetensors", "1.2.0");
+        assert!(sarif.contains("\"ruleId\": \"LS021\""));
+        assert!(sarif.contains("\"ruleId\": \"LS010\""));
+
+        // 3. diff_adapters_full: rsLoRA (r=16, alpha=8 -> 8/4=2.0) vs standard LoRA (r=16, alpha=32 -> 32/16=2.0)
+        let eq_layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.k_proj".to_string(),
+            a_key: "model.layers.0.self_attn.k_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.k_proj.lora_B.weight".to_string(),
+            a: random_matrix(16, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, 16, &mut rng, DType::F32),
+        };
+        let cfg_rs = crate::safetensors::parse_peft_adapter_config(
+            r#"{"r":16,"lora_alpha":8,"use_rslora":true}"#,
+        )
+        .unwrap();
+        let cfg_std = crate::safetensors::parse_peft_adapter_config(
+            r#"{"r":16,"lora_alpha":32,"use_rslora":false}"#,
+        )
+        .unwrap();
+        let diff_sum = crate::diff::diff_adapters_full(
+            std::slice::from_ref(&eq_layer),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&cfg_rs),
+            None,
+            std::slice::from_ref(&eq_layer),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&cfg_std),
+            None,
+        );
+        assert!(diff_sum.use_rslora_a);
+        assert!(!diff_sum.use_rslora_b);
+        assert!(diff_sum.shared_layers[0].frobenius_delta < 1e-12);
+        assert!(diff_sum.shared_layers[0].relative_drift < 1e-12);
+        assert!((diff_sum.shared_layers[0].scale_a - 2.0).abs() < 1e-12);
+        assert!((diff_sum.shared_layers[0].scale_b - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pissa_residual_adapter_audit_diagnostics_and_sarif_ls022() {
+        let mut rng = Rng64::new(12002);
+        let d_out = 20;
+        let d_in = 16;
+        let r = 4;
+
+        // 1. Unconverted PiSSA without pissa_init reference weights and non-unit scale (lora_alpha=8, r=4 -> 2.0)
+        let active_l1 = LoraLayer {
+            base_name: "base_model.model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight".to_string(),
+            b_key: "base_model.model.layers.0.self_attn.q_proj.lora_B.default.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+        let pissa_cfg = crate::safetensors::parse_peft_adapter_config(
+            r#"{"peft_type":"LORA","r":4,"lora_alpha":8,"init_lora_weights":"pissa_niter_4"}"#,
+        )
+        .expect("parse pissa config");
+        assert!(pissa_cfg.is_pissa());
+
+        let t_unconv = layers_to_tensor_map(std::slice::from_ref(&active_l1));
+        let rep_unconv = audit_adapter_integrity(
+            std::slice::from_ref(&active_l1),
+            &t_unconv,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&pissa_cfg),
+        );
+        assert!(rep_unconv
+            .issues
+            .iter()
+            .any(|i| i.code == "PISSA_UNCONVERTED_RESIDUAL_HAZARD"));
+        assert!(rep_unconv
+            .issues
+            .iter()
+            .any(|i| i.code == "PISSA_NON_UNIT_SCALING"));
+
+        // 2. Multi-adapter safetensors containing both default active LoRA and pissa_init reference weights
+        let active_l2 = LoraLayer {
+            base_name: "base_model.model.layers.0.self_attn.v_proj".to_string(),
+            a_key: "base_model.model.layers.0.self_attn.v_proj.lora_A.default.weight".to_string(),
+            b_key: "base_model.model.layers.0.self_attn.v_proj.lora_B.default.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+        // Perturb l1 away from init, keep l2 identical to init (zero net task update!)
+        let mut init_l1_b = active_l1.b.clone();
+        for v in &mut init_l1_b.data {
+            *v *= 0.75;
+        }
+        let mut multi_map = layers_to_tensor_map(&[active_l1, active_l2.clone()]);
+        multi_map.insert(
+            "base_model.model.layers.0.self_attn.q_proj.lora_A.pissa_init.weight".to_string(),
+            t_unconv["base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight"].clone(),
+        );
+        multi_map.insert(
+            "base_model.model.layers.0.self_attn.q_proj.lora_B.pissa_init.weight".to_string(),
+            init_l1_b,
+        );
+        multi_map.insert(
+            "base_model.model.layers.0.self_attn.v_proj.lora_A.pissa_init.weight".to_string(),
+            active_l2.a.clone(),
+        );
+        multi_map.insert(
+            "base_model.model.layers.0.self_attn.v_proj.lora_B.pissa_init.weight".to_string(),
+            active_l2.b.clone(),
+        );
+
+        let extracted_active = extract_lora_layers(&multi_map).expect("active layers");
+        let extracted_pissa =
+            crate::safetensors::extract_pissa_init_layers(&multi_map).expect("pissa_init layers");
+        assert_eq!(extracted_active.len(), 2);
+        assert_eq!(extracted_pissa.len(), 2);
+
+        let unit_pissa_cfg = crate::safetensors::parse_peft_adapter_config(
+            r#"{"peft_type":"LORA","r":4,"lora_alpha":4,"init_lora_weights":"pissa"}"#,
+        )
+        .unwrap();
+        let rep_bundled = audit_adapter_integrity(
+            &extracted_active,
+            &multi_map,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&unit_pissa_cfg),
+        );
+        assert_eq!(rep_bundled.pissa_diagnostics.len(), 2);
+        assert!(rep_bundled
+            .issues
+            .iter()
+            .any(|i| i.code == "PISSA_ZERO_TASK_UPDATE"));
+        assert!(!rep_bundled
+            .issues
+            .iter()
+            .any(|i| i.code == "PISSA_UNCONVERTED_RESIDUAL_HAZARD"));
+
+        let sarif =
+            crate::sarif::build_audit_sarif(None, Some(&rep_bundled), "pissa.safetensors", "1.2.0");
+        assert!(sarif.contains("\"ruleId\": \"LS022\""));
+        let json_out = crate::audit::render_audit_json(
+            "pissa.safetensors",
+            &audit_adapter(&extracted_active),
+            &rep_bundled,
+        );
+        assert!(json_out.contains("\"pissa_diagnostics\": ["));
+        assert!(!json_out.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn test_diff_adapters_full_normalizes_pissa_residual_against_converted_lora() {
+        let mut rng = Rng64::new(12003);
+        let d_out = 22;
+        let d_in = 18;
+        let r = 4;
+
+        let pissa_init = LoraLayer {
+            base_name: "model.layers.0.mlp.down_proj".to_string(),
+            a_key: "model.layers.0.mlp.down_proj.lora_A.pissa_init.weight".to_string(),
+            b_key: "model.layers.0.mlp.down_proj.lora_B.pissa_init.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+        let active_pissa = LoraLayer {
+            base_name: "model.layers.0.mlp.down_proj".to_string(),
+            a_key: "model.layers.0.mlp.down_proj.lora_A.default.weight".to_string(),
+            b_key: "model.layers.0.mlp.down_proj.lora_B.default.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+
+        // PEFT convert_pissa_to_lora produces rank-2r standard LoRA equal to B*A - B_init*A_init
+        let converted_lora = crate::safetensors::subtract_pissa_residual_layer(
+            &active_pissa,
+            1.0,
+            &pissa_init,
+            1.0,
+        )
+        .expect("subtract pissa residual");
+        assert_eq!(converted_lora.rank(), 2 * r);
+
+        let mut pissa_map_a = BTreeMap::new();
+        pissa_map_a.insert(pissa_init.base_name.clone(), pissa_init);
+
+        let cfg_pissa = crate::safetensors::parse_peft_adapter_config(
+            r#"{"r":4,"lora_alpha":4,"init_lora_weights":"pissa"}"#,
+        )
+        .unwrap();
+        let cfg_conv = crate::safetensors::parse_peft_adapter_config(
+            r#"{"r":8,"lora_alpha":8,"init_lora_weights":true}"#,
+        )
+        .unwrap();
+
+        let summary = crate::diff::diff_adapters_full(
+            &[active_pissa],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&cfg_pissa),
+            Some(&pissa_map_a),
+            &[converted_lora],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&cfg_conv),
+            None,
+        );
+        assert_eq!(summary.pissa_layers_normalized, 1);
+        let rep = &summary.shared_layers[0];
+        assert_eq!(rep.rank_a, 4);
+        assert_eq!(rep.rank_b, 8);
+        assert!(rep.pissa_residual_subtracted);
+        assert!(
+            rep.frobenius_delta < 1e-12,
+            "expected zero net base-model delta between pissa+init and converted rank-2r LoRA, got {}",
+            rep.frobenius_delta
+        );
+        assert!(rep.relative_drift < 1e-12);
+    }
 }

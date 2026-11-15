@@ -150,6 +150,20 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         full_description: "DoRA output channel scales span an extreme >50x dynamic range (cv > 1.5) or diverge while the low-rank directional update B*A remains frozen across output rows.",
         default_level: "warning",
     },
+    SarifRuleDefinition {
+        id: "LS021",
+        name: "RsLoraScalingAnomaly",
+        short_description: "rsLoRA rank-stabilized scaling factor ambiguity or mismatch",
+        full_description: "adapter_config.json enables rank-stabilized LoRA (use_rslora=true, alpha/sqrt(r)) alongside embedded .alpha scalar tensors that standalone safetensors loaders divide by r instead of sqrt(r).",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS022",
+        name: "PissaResidualAdapterHazard",
+        short_description: "PiSSA residual-adapter conversion, scaling, or principal update hazard",
+        full_description: "An unconverted PiSSA adapter (init_lora_weights=\"pissa*\") lacks pissa_init reference weights or unit principal scaling (risking doubled principal singular components on unmodified W_0), has mismatched/partial pissa_init tensors, or shows zero net task update relative to B_init*A_init.",
+        default_level: "warning",
+    },
 ];
 
 fn escape_json(s: &str) -> String {
@@ -187,6 +201,12 @@ fn map_issue_code_to_rule(code: &str) -> Option<(&'static str, &'static str)> {
         "DORA_SHAPE_MISMATCH" | "INVALID_DORA_MAGNITUDE" => Some(("LS019", "error")),
         "PARTIAL_DORA_COVERAGE" => Some(("LS019", "warning")),
         "DORA_EXTREME_DISPERSION" | "DORA_DIRECTIONAL_STAGNATION" => Some(("LS020", "warning")),
+        "RSLORA_ALPHA_TENSOR_AMBIGUITY" => Some(("LS021", "warning")),
+        "PISSA_SHAPE_MISMATCH" => Some(("LS022", "error")),
+        "PISSA_UNCONVERTED_RESIDUAL_HAZARD"
+        | "PISSA_NON_UNIT_SCALING"
+        | "PISSA_PARTIAL_INIT_COVERAGE"
+        | "PISSA_ZERO_TASK_UPDATE" => Some(("LS022", "warning")),
         _ => None,
     }
 }

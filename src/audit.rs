@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::diff::diff_layer;
 use crate::linalg::{dot_slice, qr_core_singular_values};
-use crate::safetensors::{LoraLayer, PeftAdapterConfig, Tensor2D};
+use crate::safetensors::{extract_pissa_init_layers, LoraLayer, PeftAdapterConfig, Tensor2D};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerHealth {
@@ -304,8 +305,27 @@ pub struct AlphaScalingSummary {
     pub use_rslora: bool,
     pub min_alpha_r_ratio: Option<f64>,
     pub max_alpha_r_ratio: Option<f64>,
+    pub min_effective_scale: Option<f64>,
+    pub max_effective_scale: Option<f64>,
     pub dora_tensor_count: usize,
+    pub init_lora_weights: Option<String>,
+    pub pissa_init_tensor_pairs: usize,
     pub status: &'static str,
+}
+
+/// Per-layer PiSSA (Principal Singular Values and Singular Vectors Adaptation, Meng et al. NeurIPS 2024)
+/// residual task-update diagnostics comparing active `(B, A)` against initial principal `(B_init, A_init)`
+/// in `O(r^2 * (d_in + d_out))` without dense matrix allocations.
+#[derive(Debug, Clone)]
+pub struct PissaLayerDiagnostics {
+    pub base_name: String,
+    pub rank: usize,
+    pub init_rank: usize,
+    pub principal_norm: f64,
+    pub active_norm: f64,
+    pub task_delta_norm: f64,
+    pub relative_task_update: f64,
+    pub principal_subspace_retention: f64,
 }
 
 /// Per-layer DoRA (Weight-Decomposed Low-Rank Adaptation, Liu et al. ICML 2024) magnitude vs
@@ -332,6 +352,7 @@ pub struct AdapterIntegrityReport {
     pub embedding_entries: Vec<EmbeddingAuditEntry>,
     pub alpha_summary: AlphaScalingSummary,
     pub dora_diagnostics: Vec<DoraLayerDiagnostics>,
+    pub pissa_diagnostics: Vec<PissaLayerDiagnostics>,
     pub issues: Vec<IntegrityIssue>,
 }
 
@@ -492,15 +513,51 @@ pub fn audit_adapter_integrity(
     dora_scales: &BTreeMap<String, (String, Tensor2D)>,
     peft_config: Option<&PeftAdapterConfig>,
 ) -> AdapterIntegrityReport {
+    audit_adapter_integrity_with_pissa(layers, all_tensors, alphas, dora_scales, peft_config, None)
+}
+
+/// Extended adapter integrity auditor accepting optional external PiSSA `pissa_init` reference layers
+/// (e.g. from a sibling `pissa_init/adapter_model.safetensors` subdirectory) in addition to inline
+/// `.lora_A.pissa_init.weight` tensors inside `all_tensors`.
+pub fn audit_adapter_integrity_with_pissa(
+    layers: &[LoraLayer],
+    all_tensors: &BTreeMap<String, Tensor2D>,
+    alphas: &BTreeMap<String, f64>,
+    dora_scales: &BTreeMap<String, (String, Tensor2D)>,
+    peft_config: Option<&PeftAdapterConfig>,
+    extra_pissa_init: Option<&BTreeMap<String, LoraLayer>>,
+) -> AdapterIntegrityReport {
     let eps = 1e-7_f64;
     let mut issues: Vec<IntegrityIssue> = Vec::new();
     let mut embedding_entries: Vec<EmbeddingAuditEntry> = Vec::new();
 
-    // Track keys already claimed by matched (lora_A, lora_B) pairs, .alpha scalars, or DoRA scales.
+    let mut pissa_init_map: BTreeMap<String, LoraLayer> = match extract_pissa_init_layers(all_tensors) {
+        Ok(m) => m,
+        Err(e) => {
+            issues.push(IntegrityIssue {
+                code: "PISSA_SHAPE_MISMATCH",
+                severity: IssueSeverity::Critical,
+                subject: "pissa_init".to_string(),
+                message: e,
+            });
+            BTreeMap::new()
+        }
+    };
+    if let Some(ext_map) = extra_pissa_init {
+        for (k, v) in ext_map {
+            pissa_init_map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
+    // Track keys already claimed by matched (lora_A, lora_B) pairs, pissa_init pairs, .alpha scalars, or DoRA scales.
     let mut claimed_keys: BTreeSet<&str> = BTreeSet::new();
     for l in layers {
         claimed_keys.insert(l.a_key.as_str());
         claimed_keys.insert(l.b_key.as_str());
+    }
+    for pl in pissa_init_map.values() {
+        claimed_keys.insert(pl.a_key.as_str());
+        claimed_keys.insert(pl.b_key.as_str());
     }
     for (_, (k, _)) in dora_scales {
         claimed_keys.insert(k.as_str());
@@ -709,10 +766,14 @@ pub fn audit_adapter_integrity(
 
     let mut min_ratio: Option<f64> = None;
     let mut max_ratio: Option<f64> = None;
+    let mut min_eff_scale: Option<f64> = None;
+    let mut max_eff_scale: Option<f64> = None;
     let mut non_pos_layers: Vec<String> = Vec::new();
     let mut under_layers: Vec<(String, f64, f64, usize)> = Vec::new();
     let mut over_layers: Vec<(String, f64, f64, usize)> = Vec::new();
     let mut config_tensor_mismatches: Vec<String> = Vec::new();
+    let mut pissa_non_unit_layers: Vec<(String, f64)> = Vec::new();
+    let is_pissa_cfg = peft_config.map_or(false, |c| c.is_pissa());
 
     for l in layers {
         let tensor_alpha = alphas.get(&l.base_name).copied();
@@ -727,16 +788,36 @@ pub fn audit_adapter_integrity(
             if !alpha.is_finite() || alpha <= 0.0 {
                 non_pos_layers.push(format!("{} (alpha={})", l.base_name, alpha));
             } else {
-                let ratio = alpha / (r as f64);
+                let rf = r as f64;
+                let ratio = alpha / rf;
+                let eff_scale = if use_rslora { alpha / rf.sqrt() } else { ratio };
                 min_ratio = Some(min_ratio.map_or(ratio, |m| m.min(ratio)));
                 max_ratio = Some(max_ratio.map_or(ratio, |m| m.max(ratio)));
-                if ratio < 0.1 {
-                    under_layers.push((l.base_name.clone(), ratio, alpha, r));
-                } else if ratio > 16.0 {
-                    over_layers.push((l.base_name.clone(), ratio, alpha, r));
+                min_eff_scale = Some(min_eff_scale.map_or(eff_scale, |m| m.min(eff_scale)));
+                max_eff_scale = Some(max_eff_scale.map_or(eff_scale, |m| m.max(eff_scale)));
+                if eff_scale < 0.1 {
+                    under_layers.push((l.base_name.clone(), eff_scale, alpha, r));
+                } else if eff_scale > 16.0 {
+                    over_layers.push((l.base_name.clone(), eff_scale, alpha, r));
+                }
+                if is_pissa_cfg && (eff_scale - 1.0).abs() > 1e-3 {
+                    pissa_non_unit_layers.push((l.base_name.clone(), eff_scale));
                 }
             }
         }
+    }
+
+    if use_rslora && matched_alpha_tensors > 0 && layers.iter().any(|l| l.rank() > 1) {
+        alpha_anomaly = true;
+        issues.push(IntegrityIssue {
+            code: "RSLORA_ALPHA_TENSOR_AMBIGUITY",
+            severity: IssueSeverity::Warning,
+            subject: ".alpha vs use_rslora".to_string(),
+            message: format!(
+                "adapter_config.json sets use_rslora=true while {} .alpha scalar tensor(s) exist in .safetensors; standalone loaders ignoring adapter_config.json divide .alpha/r instead of .alpha/sqrt(r)",
+                matched_alpha_tensors
+            ),
+        });
     }
 
     if !config_tensor_mismatches.is_empty() {
@@ -766,6 +847,8 @@ pub fn audit_adapter_integrity(
         });
     }
 
+    let scale_formula_label = if use_rslora { "alpha/sqrt(r)" } else { "alpha/r" };
+
     if !under_layers.is_empty() {
         alpha_anomaly = true;
         let (ref sample_name, sample_ratio, sample_alpha, sample_r) = under_layers[0];
@@ -774,10 +857,12 @@ pub fn audit_adapter_integrity(
             severity: IssueSeverity::Warning,
             subject: sample_name.clone(),
             message: format!(
-                "{} layer(s) have extreme alpha/r < 0.1 (e.g. alpha={}, r={}, alpha/r={:.4}), causing silent adapter under-scaling during merge or inference",
+                "{} layer(s) have extreme {} < 0.1 (e.g. alpha={}, r={}, {}={:.4}), causing silent adapter under-scaling during merge or inference",
                 under_layers.len(),
+                scale_formula_label,
                 sample_alpha,
                 sample_r,
+                scale_formula_label,
                 sample_ratio
             ),
         });
@@ -791,28 +876,31 @@ pub fn audit_adapter_integrity(
             severity: IssueSeverity::Warning,
             subject: sample_name.clone(),
             message: format!(
-                "{} layer(s) have extreme alpha/r > 16.0 (e.g. alpha={}, r={}, alpha/r={:.2}), risking weight norm explosion and logit saturation during merge",
+                "{} layer(s) have extreme {} > 16.0 (e.g. alpha={}, r={}, {}={:.2}), risking weight norm explosion and logit saturation during merge",
                 over_layers.len(),
+                scale_formula_label,
                 sample_alpha,
                 sample_r,
+                scale_formula_label,
                 sample_ratio
             ),
         });
     }
 
-    if let (Some(min_r), Some(max_r)) = (min_ratio, max_ratio) {
+    if let (Some(min_s), Some(max_s)) = (min_eff_scale, max_eff_scale) {
         let explicit_alpha_pattern = peft_config.map_or(false, |c| !c.alpha_pattern.is_empty());
-        if !explicit_alpha_pattern && !use_rslora && min_r > 0.0 && (max_r / min_r) > 8.0 {
+        if !explicit_alpha_pattern && min_s > 0.0 && (max_s / min_s) > 8.0 {
             alpha_anomaly = true;
             issues.push(IntegrityIssue {
                 code: "MISMATCHED_ALPHA_SCALING",
                 severity: IssueSeverity::Warning,
                 subject: ".alpha".to_string(),
                 message: format!(
-                    "Wide unpatterned alpha/r spread across layers ({:.3}x to {:.3}x, {:.1}x disparity); verify .alpha tensors were not mixed from incompatible checkpoints",
-                    min_r,
-                    max_r,
-                    max_r / min_r
+                    "Wide unpatterned {} spread across layers ({:.3}x to {:.3}x, {:.1}x disparity); verify .alpha tensors were not mixed from incompatible checkpoints",
+                    scale_formula_label,
+                    min_s,
+                    max_s,
+                    max_s / min_s
                 ),
             });
         }
@@ -1001,6 +1089,128 @@ pub fn audit_adapter_integrity(
         }
     }
 
+    // 6. PiSSA (Principal Singular Values & Singular Vectors Adaptation) residual-adapter diagnostics
+    if is_pissa_cfg && pissa_init_map.is_empty() {
+        alpha_anomaly = true;
+        issues.push(IntegrityIssue {
+            code: "PISSA_UNCONVERTED_RESIDUAL_HAZARD",
+            severity: IssueSeverity::Warning,
+            subject: "adapter_config.json".to_string(),
+            message: format!(
+                "init_lora_weights=\"{}\" indicates an unconverted PiSSA residual adapter without bundled pissa_init reference weights; loading onto an unmodified base model W_0 instead of residual W_res doubles the top-r principal singular components",
+                peft_config
+                    .and_then(|c| c.init_lora_weights.as_deref())
+                    .unwrap_or("pissa")
+            ),
+        });
+    }
+
+    if !pissa_non_unit_layers.is_empty() {
+        alpha_anomaly = true;
+        let (ref sample_l, sample_s) = pissa_non_unit_layers[0];
+        issues.push(IntegrityIssue {
+            code: "PISSA_NON_UNIT_SCALING",
+            severity: IssueSeverity::Warning,
+            subject: sample_l.clone(),
+            message: format!(
+                "{} PiSSA layer(s) have non-unit effective scale ({}={:.4}, e.g. {}); unconverted PiSSA requires unit principal scale (1.0) so W_res + B_init*A_init reconstructs W_0",
+                pissa_non_unit_layers.len(),
+                scale_formula_label,
+                sample_s,
+                sample_l
+            ),
+        });
+    }
+
+    let mut pissa_diagnostics: Vec<PissaLayerDiagnostics> = Vec::new();
+    if !pissa_init_map.is_empty() {
+        let matched_pissa_count = layers
+            .iter()
+            .filter(|l| pissa_init_map.contains_key(&l.base_name))
+            .count();
+        if matched_pissa_count > 0 && matched_pissa_count < layers.len() {
+            let missing_name = layers
+                .iter()
+                .find(|l| !pissa_init_map.contains_key(&l.base_name))
+                .map(|l| l.base_name.as_str())
+                .unwrap_or("unknown");
+            alpha_anomaly = true;
+            issues.push(IntegrityIssue {
+                code: "PISSA_PARTIAL_INIT_COVERAGE",
+                severity: IssueSeverity::Warning,
+                subject: missing_name.to_string(),
+                message: format!(
+                    "Partial pissa_init reference coverage: {}/{} LoRA layers have matching pissa_init tensors ({} missing, e.g. {})",
+                    matched_pissa_count,
+                    layers.len(),
+                    layers.len() - matched_pissa_count,
+                    missing_name
+                ),
+            });
+        }
+
+        let mut stagnant_pissa_layers: Vec<String> = Vec::new();
+        for l in layers {
+            if let Some(init_l) = pissa_init_map.get(&l.base_name) {
+                if init_l.d_out() != l.d_out() || init_l.d_in() != l.d_in() {
+                    alpha_anomaly = true;
+                    issues.push(IntegrityIssue {
+                        code: "PISSA_SHAPE_MISMATCH",
+                        severity: IssueSeverity::Critical,
+                        subject: l.base_name.clone(),
+                        message: format!(
+                            "pissa_init shape ({}x{}) does not match active LoRA layer shape ({}x{})",
+                            init_l.d_out(),
+                            init_l.d_in(),
+                            l.d_out(),
+                            l.d_in()
+                        ),
+                    });
+                    continue;
+                }
+                let rf = l.rank().max(1) as f64;
+                let denom = if use_rslora { rf.sqrt() } else { rf };
+                let eff_s = alphas
+                    .get(&l.base_name)
+                    .copied()
+                    .or_else(|| peft_config.and_then(|c| lookup_config_alpha(c, &l.base_name)))
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .map(|a| a / denom)
+                    .unwrap_or(1.0);
+                // Reference pissa_init represents B_init * A_init = U_r S_r V_r^T at unit principal scale (or matching eff_s)
+                if let Some(d_rep) = diff_layer(init_l, 1.0, l, eff_s) {
+                    if d_rep.relative_drift <= 1e-6 && d_rep.frobenius_norm_a > 1e-8 {
+                        stagnant_pissa_layers.push(l.base_name.clone());
+                    }
+                    pissa_diagnostics.push(PissaLayerDiagnostics {
+                        base_name: l.base_name.clone(),
+                        rank: l.rank(),
+                        init_rank: init_l.rank(),
+                        principal_norm: d_rep.frobenius_norm_a,
+                        active_norm: d_rep.frobenius_norm_b,
+                        task_delta_norm: d_rep.frobenius_delta,
+                        relative_task_update: d_rep.relative_drift,
+                        principal_subspace_retention: d_rep.subspace_similarity,
+                    });
+                }
+            }
+        }
+
+        if !stagnant_pissa_layers.is_empty() {
+            alpha_anomaly = true;
+            issues.push(IntegrityIssue {
+                code: "PISSA_ZERO_TASK_UPDATE",
+                severity: IssueSeverity::Warning,
+                subject: stagnant_pissa_layers[0].clone(),
+                message: format!(
+                    "{} PiSSA layer(s) show zero/near-zero net task update relative to pissa_init (||s*B*A - B_init*A_init||_F / ||B_init*A_init||_F <= 1e-6, e.g. {}); fine-tuning failed to update principal components",
+                    stagnant_pissa_layers.len(),
+                    stagnant_pissa_layers[0]
+                ),
+            });
+        }
+    }
+
     let alpha_status = if alpha_anomaly {
         "ANOMALY_DETECTED"
     } else if alphas.is_empty() && config_lora_alpha.is_none() && peft_config.map_or(true, |c| c.alpha_pattern.is_empty()) {
@@ -1026,10 +1236,15 @@ pub fn audit_adapter_integrity(
             use_rslora,
             min_alpha_r_ratio: min_ratio,
             max_alpha_r_ratio: max_ratio,
+            min_effective_scale: min_eff_scale,
+            max_effective_scale: max_eff_scale,
             dora_tensor_count: dora_scales.len(),
+            init_lora_weights: peft_config.and_then(|c| c.init_lora_weights.clone()),
+            pissa_init_tensor_pairs: pissa_init_map.len(),
             status: alpha_status,
         },
         dora_diagnostics,
+        pissa_diagnostics,
         issues,
     }
 }
@@ -1116,6 +1331,26 @@ pub fn render_audit_json(
         opt_f64_json(integrity.alpha_summary.max_alpha_r_ratio)
     ));
     lines.push(format!(
+        "    \"min_effective_scale\": {},",
+        opt_f64_json(integrity.alpha_summary.min_effective_scale)
+    ));
+    lines.push(format!(
+        "    \"max_effective_scale\": {},",
+        opt_f64_json(integrity.alpha_summary.max_effective_scale)
+    ));
+    lines.push(format!(
+        "    \"init_lora_weights\": {},",
+        integrity
+            .alpha_summary
+            .init_lora_weights
+            .as_deref()
+            .map_or("null".to_string(), |s| format!("\"{}\"", json_escape_audit(s)))
+    ));
+    lines.push(format!(
+        "    \"pissa_init_tensor_pairs\": {},",
+        integrity.alpha_summary.pissa_init_tensor_pairs
+    ));
+    lines.push(format!(
         "    \"dora_tensor_count\": {}",
         integrity.alpha_summary.dora_tensor_count
     ));
@@ -1163,6 +1398,28 @@ pub fn render_audit_json(
             d.directional_row_norm_mean,
             d.dead_directional_rows,
             d.mag_dir_correlation,
+            comma
+        ));
+    }
+    lines.push("  ],".to_string());
+
+    lines.push("  \"pissa_diagnostics\": [".to_string());
+    for (idx, p) in integrity.pissa_diagnostics.iter().enumerate() {
+        let comma = if idx + 1 < integrity.pissa_diagnostics.len() {
+            ","
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "    {{\"layer\": \"{}\", \"rank\": {}, \"init_rank\": {}, \"principal_norm\": {:.6}, \"active_norm\": {:.6}, \"task_delta_norm\": {:.6}, \"relative_task_update\": {:.6}, \"principal_subspace_retention\": {:.6}}}{}",
+            json_escape_audit(&p.base_name),
+            p.rank,
+            p.init_rank,
+            p.principal_norm,
+            p.active_norm,
+            p.task_delta_norm,
+            p.relative_task_update,
+            p.principal_subspace_retention,
             comma
         ));
     }

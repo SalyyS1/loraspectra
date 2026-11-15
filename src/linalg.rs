@@ -334,10 +334,22 @@ fn jacobi_svd_tall(mat: &Tensor2D) -> SvdDecomposition {
 
 /// Fast QR-Core Singular Value Spectrum for a low-rank LoRA product `DeltaW = B * A`.
 ///
-/// Because `Q_B` (`d_out x r`) and `Q_A` (`d_in x r`) have orthonormal columns,
-/// the non-zero singular values of `B * A` (`d_out x d_in`) are identically the
-/// singular values of the tiny `r x r` core matrix `M = R_B * R_A^T`.
+/// Because `Q_B` (`d_out x r`) and `Q_A` (`d_in x r`) have orthonormal columns when
+/// `r <= min(d_out, d_in)`, the non-zero singular values of `B * A` (`d_out x d_in`) are
+/// identically the singular values of the tiny `r x r` core matrix `M = R_B * R_A^T`.
+/// When `r > min(d_out, d_in)` (overcomplete nominal rank), decomposing the `d_out x d_in`
+/// product directly avoids `O(r^3)` Jacobi sweeps on rank-deficient zero modes.
 pub fn qr_core_singular_values(b: &Tensor2D, a: &Tensor2D) -> Vec<f64> {
+    let r = b.cols;
+    if r == 0 {
+        return Vec::new();
+    }
+    if r > b.rows || r > a.cols {
+        let dense = matmul(b, a);
+        let mut sigma = jacobi_svd(&dense).sigma;
+        sigma.resize(r, 0.0);
+        return sigma;
+    }
     let (_qb_cols, rb) = thin_qr_columns(b);
     let at = transpose(a);
     let (_qa_cols, ra) = thin_qr_columns(&at);
