@@ -23,6 +23,98 @@ impl LayerHealth {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SvdTruncationBounds {
+    pub rank_k: usize,
+    pub nominal_rank: usize,
+    pub spectral_error: f64,
+    pub relative_spectral_error: f64,
+    pub frobenius_error: f64,
+    pub relative_frobenius_error: f64,
+    pub nuclear_error: f64,
+    pub relative_nuclear_error: f64,
+    pub wedin_spectral_gap: f64,
+    pub relative_local_gap: f64,
+}
+
+/// Compute exact Eckart-Young-Mirsky spectral (`L2`), Frobenius (`S2`), Mirsky nuclear (`S1`),
+/// and Wedin spectral-gap bounds for truncating `singular_values` to rank `k`.
+pub fn compute_truncation_bounds(singular_values: &[f64], k: usize) -> SvdTruncationBounds {
+    let r = singular_values.len();
+    if r == 0 {
+        return SvdTruncationBounds {
+            rank_k: 0,
+            nominal_rank: 0,
+            spectral_error: 0.0,
+            relative_spectral_error: 0.0,
+            frobenius_error: 0.0,
+            relative_frobenius_error: 0.0,
+            nuclear_error: 0.0,
+            relative_nuclear_error: 0.0,
+            wedin_spectral_gap: 0.0,
+            relative_local_gap: 0.0,
+        };
+    }
+
+    let keep = k.max(1).min(r);
+    let sigma_1 = singular_values[0].max(0.0);
+    let total_energy: f64 = singular_values.iter().map(|&s| s * s).sum();
+    let frobenius_norm = total_energy.sqrt();
+    let nuclear_norm: f64 = singular_values.iter().map(|&s| s.max(0.0)).sum();
+
+    let tail = if keep < r {
+        &singular_values[keep..]
+    } else {
+        &[]
+    };
+    let spectral_error = tail.first().copied().unwrap_or(0.0).max(0.0);
+    let relative_spectral_error = if sigma_1 > 1e-18 {
+        spectral_error / sigma_1
+    } else {
+        0.0
+    };
+
+    let frobenius_error = tail.iter().map(|&s| s * s).sum::<f64>().sqrt();
+    let relative_frobenius_error = if frobenius_norm > 1e-18 {
+        frobenius_error / frobenius_norm
+    } else {
+        0.0
+    };
+
+    let nuclear_error: f64 = tail.iter().map(|&s| s.max(0.0)).sum();
+    let relative_nuclear_error = if nuclear_norm > 1e-18 {
+        nuclear_error / nuclear_norm
+    } else {
+        0.0
+    };
+
+    let sigma_k = singular_values[keep - 1].max(0.0);
+    let gap = (sigma_k - spectral_error).max(0.0);
+    let wedin_spectral_gap = if sigma_1 > 1e-18 {
+        gap / sigma_1
+    } else {
+        0.0
+    };
+    let relative_local_gap = if sigma_k > 1e-18 {
+        gap / sigma_k
+    } else {
+        0.0
+    };
+
+    SvdTruncationBounds {
+        rank_k: keep,
+        nominal_rank: r,
+        spectral_error,
+        relative_spectral_error,
+        frobenius_error,
+        relative_frobenius_error,
+        nuclear_error,
+        relative_nuclear_error,
+        wedin_spectral_gap,
+        relative_local_gap,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LayerSpectralReport {
     pub base_name: String,
@@ -39,6 +131,8 @@ pub struct LayerSpectralReport {
     pub rank_at_99_energy: usize,
     pub rank_marchenko_pastur: usize,
     pub mp_noise_threshold: f64,
+    pub truncation_at_99: SvdTruncationBounds,
+    pub truncation_at_mp: SvdTruncationBounds,
     pub utilization_ratio: f64,
     pub raw_bytes: usize,
     pub bytes_at_99_energy: usize,
@@ -56,6 +150,8 @@ pub struct AdapterAuditSummary {
     pub mean_rank_at_99_energy: f64,
     pub mean_rank_mp: f64,
     pub compressible_byte_ratio: f64,
+    pub max_mp_relative_spectral_error: f64,
+    pub mean_99_relative_nuclear_error: f64,
 }
 
 /// Gavish & Donoho (2014) Marchenko-Pastur optimal hard threshold estimator for a rank-`r`
@@ -134,6 +230,7 @@ pub fn audit_from_singular_values(
     if frobenius_norm < 1e-9 || spectral_norm < 1e-9 {
         let raw_bytes = nominal_rank * (d_out + d_in) * elem_bytes;
         let min_bytes = (d_out + d_in) * elem_bytes;
+        let zero_bounds = compute_truncation_bounds(&singular_values, 1);
         return LayerSpectralReport {
             base_name: base_name.to_string(),
             d_out,
@@ -149,6 +246,8 @@ pub fn audit_from_singular_values(
             rank_at_99_energy: 1,
             rank_marchenko_pastur: 1,
             mp_noise_threshold: 0.0,
+            truncation_at_99: zero_bounds,
+            truncation_at_mp: zero_bounds,
             utilization_ratio: 0.0,
             raw_bytes,
             bytes_at_99_energy: min_bytes,
@@ -188,6 +287,8 @@ pub fn audit_from_singular_values(
     let rank_at_99_energy = find_energy_rank(0.99);
     let (rank_marchenko_pastur, mp_noise_threshold) =
         estimate_marchenko_pastur_rank(&singular_values, d_out, d_in);
+    let truncation_at_99 = compute_truncation_bounds(&singular_values, rank_at_99_energy);
+    let truncation_at_mp = compute_truncation_bounds(&singular_values, rank_marchenko_pastur);
 
     let utilization_ratio = (rank_at_99_energy as f64) / (nominal_rank.max(1) as f64);
     let raw_bytes = nominal_rank * (d_out + d_in) * elem_bytes;
@@ -216,6 +317,8 @@ pub fn audit_from_singular_values(
         rank_at_99_energy,
         rank_marchenko_pastur,
         mp_noise_threshold,
+        truncation_at_99,
+        truncation_at_mp,
         utilization_ratio,
         raw_bytes,
         bytes_at_99_energy,
@@ -247,6 +350,16 @@ pub fn audit_adapter(layers: &[LoraLayer]) -> AdapterAuditSummary {
         0.0
     };
 
+    let max_mp_relative_spectral_error = reports
+        .iter()
+        .map(|r| r.truncation_at_mp.relative_spectral_error)
+        .fold(0.0_f64, f64::max);
+    let mean_99_relative_nuclear_error = reports
+        .iter()
+        .map(|r| r.truncation_at_99.relative_nuclear_error)
+        .sum::<f64>()
+        / n;
+
     AdapterAuditSummary {
         layers: reports,
         total_nominal_bytes,
@@ -257,6 +370,8 @@ pub fn audit_adapter(layers: &[LoraLayer]) -> AdapterAuditSummary {
         mean_rank_at_99_energy,
         mean_rank_mp,
         compressible_byte_ratio,
+        max_mp_relative_spectral_error,
+        mean_99_relative_nuclear_error,
     }
 }
 
@@ -353,7 +468,136 @@ pub struct AdapterIntegrityReport {
     pub alpha_summary: AlphaScalingSummary,
     pub dora_diagnostics: Vec<DoraLayerDiagnostics>,
     pub pissa_diagnostics: Vec<PissaLayerDiagnostics>,
+    pub quant_summary: Option<crate::quant::AdapterQuantSummary>,
     pub issues: Vec<IntegrityIssue>,
+}
+
+/// Evaluate SVD truncation error bounds (`LS024`: Eckart-Young spectral/Frobenius, Mirsky nuclear,
+/// and Wedin singular gap stability) across audited layers at an optional target rank or tolerance.
+pub fn audit_truncation_error_bounds(
+    layers: &[LayerSpectralReport],
+    target_rank: Option<usize>,
+    max_error_tol: Option<f64>,
+) -> Vec<IntegrityIssue> {
+    let mut issues = Vec::new();
+    let mut exceeded: Vec<(&LayerSpectralReport, SvdTruncationBounds)> = Vec::new();
+    let mut degen_gap: Vec<(&LayerSpectralReport, SvdTruncationBounds)> = Vec::new();
+
+    if target_rank.is_some() || max_error_tol.is_some() {
+        let tol = max_error_tol.unwrap_or(0.15).max(0.0);
+        for rep in layers {
+            if rep.health == LayerHealth::DeadLayer || rep.nominal_rank <= 1 {
+                continue;
+            }
+            let k = target_rank.unwrap_or(rep.rank_at_99_energy).max(1).min(rep.nominal_rank);
+            if k >= rep.nominal_rank {
+                continue;
+            }
+            let b = compute_truncation_bounds(&rep.singular_values, k);
+            if b.relative_frobenius_error > tol || b.relative_spectral_error > tol {
+                exceeded.push((rep, b));
+            }
+            if b.relative_local_gap < 0.02 && b.relative_spectral_error > 0.08 {
+                degen_gap.push((rep, b));
+            }
+        }
+        if !exceeded.is_empty() {
+            let tol = max_error_tol.unwrap_or(0.15).max(0.0);
+            let &(worst_rep, worst_b) = exceeded
+                .iter()
+                .max_by(|a, b| {
+                    a.1.relative_frobenius_error
+                        .max(a.1.relative_spectral_error)
+                        .total_cmp(&b.1.relative_frobenius_error.max(b.1.relative_spectral_error))
+                })
+                .unwrap();
+            let worst_val = worst_b
+                .relative_frobenius_error
+                .max(worst_b.relative_spectral_error);
+            let sev = if worst_val > (2.0 * tol).max(0.35) {
+                IssueSeverity::Critical
+            } else {
+                IssueSeverity::Warning
+            };
+            issues.push(IntegrityIssue {
+                code: "SVD_TRUNCATION_BOUND_EXCEEDED",
+                severity: sev,
+                subject: worst_rep.base_name.clone(),
+                message: format!(
+                    "{} layer(s) exceed SVD truncation error tolerance {:.1}% at rank k={} (worst {}: rel_spec={:.1}%, rel_frob={:.1}%, rel_nuclear={:.1}%)",
+                    exceeded.len(),
+                    tol * 100.0,
+                    worst_b.rank_k,
+                    worst_rep.base_name,
+                    worst_b.relative_spectral_error * 100.0,
+                    worst_b.relative_frobenius_error * 100.0,
+                    worst_b.relative_nuclear_error * 100.0
+                ),
+            });
+        }
+    } else {
+        for rep in layers {
+            if rep.health == LayerHealth::DeadLayer || rep.nominal_rank <= 1 {
+                continue;
+            }
+            if rep.rank_at_99_energy < rep.nominal_rank {
+                let b99 = rep.truncation_at_99;
+                if b99.relative_local_gap < 0.01 && b99.relative_spectral_error > 0.08 {
+                    degen_gap.push((rep, b99));
+                }
+            }
+            if rep.rank_marchenko_pastur < rep.nominal_rank {
+                let bmp = rep.truncation_at_mp;
+                if bmp.relative_spectral_error > 0.35 {
+                    exceeded.push((rep, bmp));
+                }
+            }
+        }
+        if !exceeded.is_empty() {
+            let &(worst_rep, worst_b) = exceeded
+                .iter()
+                .max_by(|a, b| {
+                    a.1.relative_spectral_error
+                        .total_cmp(&b.1.relative_spectral_error)
+                })
+                .unwrap();
+            issues.push(IntegrityIssue {
+                code: "SVD_TRUNCATION_BOUND_EXCEEDED",
+                severity: IssueSeverity::Warning,
+                subject: worst_rep.base_name.clone(),
+                message: format!(
+                    "{} layer(s) incur >35% Eckart-Young spectral operator error at Marchenko-Pastur cutoff k={} (worst {}: sigma_{{k+1}}/sigma_1={:.1}%, rel_frob={:.1}%)",
+                    exceeded.len(),
+                    worst_b.rank_k,
+                    worst_rep.base_name,
+                    worst_b.relative_spectral_error * 100.0,
+                    worst_b.relative_frobenius_error * 100.0
+                ),
+            });
+        }
+    }
+
+    if !degen_gap.is_empty() {
+        let &(worst_rep, worst_b) = degen_gap
+            .iter()
+            .min_by(|a, b| a.1.relative_local_gap.total_cmp(&b.1.relative_local_gap))
+            .unwrap();
+        issues.push(IntegrityIssue {
+            code: "SVD_DEGENERATE_SPECTRAL_GAP",
+            severity: IssueSeverity::Warning,
+            subject: worst_rep.base_name.clone(),
+            message: format!(
+                "{} layer(s) bisect a nearly-degenerate singular doublet at cutoff k={} (e.g. {}: local gap (sigma_k - sigma_{{k+1}})/sigma_k={:.2}%, Wedin gap={:.4}), risking rotational subspace instability",
+                degen_gap.len(),
+                worst_b.rank_k,
+                worst_rep.base_name,
+                worst_b.relative_local_gap * 100.0,
+                worst_b.wedin_spectral_gap
+            ),
+        });
+    }
+
+    issues
 }
 
 /// Compute exact output-channel directional Euclidean norms `||(B * A)_{i,:}||_2` for `i in 0..d_out`
@@ -599,7 +843,18 @@ pub fn audit_adapter_integrity_with_pissa(
 
     // 2. Scan dense saved token embedding / unembedding tensors (e.g., modules_to_save)
     for (key, tensor) in all_tensors {
-        if key.ends_with(".alpha") || claimed_keys.contains(key.as_str()) {
+        if key.ends_with(".alpha")
+            || key.ends_with(".absmax")
+            || key.ends_with(".quant_map")
+            || key.ends_with(".nested_absmax")
+            || key.ends_with(".nested_quant_map")
+            || key.ends_with(".nested_offset")
+            || key.ends_with(".SCB")
+            || key.ends_with(".weight_scale")
+            || key.ends_with(".scale")
+            || key.contains(".quant_state.bitsandbytes__")
+            || claimed_keys.contains(key.as_str())
+        {
             continue;
         }
         if tensor.rows < 2 || tensor.cols < 2 {
@@ -1211,6 +1466,9 @@ pub fn audit_adapter_integrity_with_pissa(
         }
     }
 
+    // 7. Quantized checkpoint scale/codebook metadata integrity (LS023)
+    issues.extend(crate::quant::audit_quantized_safetensors_metadata(all_tensors));
+
     let alpha_status = if alpha_anomaly {
         "ANOMALY_DETECTED"
     } else if alphas.is_empty() && config_lora_alpha.is_none() && peft_config.map_or(true, |c| c.alpha_pattern.is_empty()) {
@@ -1245,6 +1503,7 @@ pub fn audit_adapter_integrity_with_pissa(
         },
         dora_diagnostics,
         pissa_diagnostics,
+        quant_summary: None,
         issues,
     }
 }
@@ -1304,6 +1563,14 @@ pub fn render_audit_json(
     lines.push(format!(
         "  \"mean_rank_marchenko_pastur\": {:.2},",
         summary.mean_rank_mp
+    ));
+    lines.push(format!(
+        "  \"max_mp_relative_spectral_error\": {:.6},",
+        summary.max_mp_relative_spectral_error
+    ));
+    lines.push(format!(
+        "  \"mean_99_relative_nuclear_error\": {:.6},",
+        summary.mean_99_relative_nuclear_error
     ));
     lines.push(format!("  \"integrity_status\": \"{}\",", integrity.status));
     lines.push(format!("  \"dead_lora_layers\": {},", integrity.dead_lora_layers));
@@ -1424,6 +1691,33 @@ pub fn render_audit_json(
         ));
     }
     lines.push("  ],".to_string());
+
+    if let Some(ref qs) = integrity.quant_summary {
+        lines.push("  \"quantization_diagnostics\": {".to_string());
+        lines.push(format!("    \"scheme\": \"{}\",", qs.scheme.as_str()));
+        lines.push(format!("    \"block_size\": {},", qs.block_size));
+        lines.push(format!("    \"mean_sqnr_db\": {:.4},", qs.mean_sqnr_db));
+        lines.push(format!("    \"min_sqnr_db\": {:.4},", qs.min_sqnr_db));
+        lines.push(format!(
+            "    \"mean_relative_frobenius_error\": {:.6},",
+            qs.mean_relative_frobenius_error
+        ));
+        lines.push(format!(
+            "    \"max_relative_frobenius_error\": {:.6},",
+            qs.max_relative_frobenius_error
+        ));
+        lines.push(format!(
+            "    \"max_relative_spectral_error\": {:.6},",
+            qs.max_relative_spectral_error
+        ));
+        lines.push(format!(
+            "    \"mean_balanced_relative_frobenius_error\": {:.6}",
+            qs.mean_balanced_relative_frobenius_error
+        ));
+        lines.push("  },".to_string());
+    } else {
+        lines.push("  \"quantization_diagnostics\": null,".to_string());
+    }
 
     lines.push("  \"integrity_issues\": [".to_string());
     for (idx, issue) in integrity.issues.iter().enumerate() {

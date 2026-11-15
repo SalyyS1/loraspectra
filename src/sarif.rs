@@ -164,6 +164,20 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         full_description: "An unconverted PiSSA adapter (init_lora_weights=\"pissa*\") lacks pissa_init reference weights or unit principal scaling (risking doubled principal singular components on unmodified W_0), has mismatched/partial pissa_init tensors, or shows zero net task update relative to B_init*A_init.",
         default_level: "warning",
     },
+    SarifRuleDefinition {
+        id: "LS023",
+        name: "QuantizationReconstructionHazard",
+        short_description: "Low-bit NF4/FP4/INT4/INT8 quantization distortion or corrupt scale metadata",
+        full_description: "Blockwise NF4/FP4/INT4/INT8 quantization introduces high spectral or Frobenius reconstruction distortion due to outlier clipping or imbalanced (B, A) factors, or quantized safetensors scale/codebook metadata (absmax, SCB, quant_map, quant_state) is invalid.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS024",
+        name: "SvdTruncationErrorBoundViolation",
+        short_description: "SVD rank truncation violates Eckart-Young spectral/Frobenius bounds or Wedin gap stability",
+        full_description: "Truncating the LoRA singular value spectrum at the target or denoised rank exceeds prescribed Eckart-Young spectral/Frobenius/nuclear error bounds or bisects a nearly-degenerate singular doublet with near-zero Wedin gap.",
+        default_level: "warning",
+    },
 ];
 
 fn escape_json(s: &str) -> String {
@@ -207,6 +221,13 @@ fn map_issue_code_to_rule(code: &str) -> Option<(&'static str, &'static str)> {
         | "PISSA_NON_UNIT_SCALING"
         | "PISSA_PARTIAL_INIT_COVERAGE"
         | "PISSA_ZERO_TASK_UPDATE" => Some(("LS022", "warning")),
+        "QUANT_CORRUPT_METADATA" | "QUANT_ZERO_OR_NAN_ABSMAX" => Some(("LS023", "error")),
+        "QUANT_RECONSTRUCTION_HIGH_ERROR" | "QUANT_IMBALANCED_FACTOR_LOSS" => {
+            Some(("LS023", "warning"))
+        }
+        "SVD_TRUNCATION_BOUND_EXCEEDED" | "SVD_DEGENERATE_SPECTRAL_GAP" => {
+            Some(("LS024", "warning"))
+        }
         _ => None,
     }
 }

@@ -5,7 +5,7 @@
 > **[Launch the Interactive Browser `.safetensors` Spectral SVD Inspector -> `https://salyys1.github.io/loraspectra/`](https://salyys1.github.io/loraspectra/)**
 > *Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers `.safetensors` LoRA directly into your browser - 100% client-side QR-Core SVD, zero file uploads, interactive Target Energy slider (`90%` to `99.9%`), Gavish-Donoho Marchenko-Pastur noise floor visualization, and 1-click synthetic demos.*
 
-`loraspectra` (`v1.2.0`) is a zero-dependency Rust engine, CLI, and client-side Web Inspector for auditing, diagnosing, comparing, compressing, and merging Low-Rank Adaptation (LoRA / rsLoRA / PiSSA / DoRA) weights stored in HuggingFace `.safetensors` format (`F32`, `F16`, and `BF16`) without loading a multi-gigabyte PyTorch or GPU runtime.
+`loraspectra` (`v1.3.0`) is a zero-dependency Rust engine, CLI, and client-side Web Inspector for auditing, diagnosing, comparing, compressing, and merging Low-Rank Adaptation (LoRA / rsLoRA / PiSSA / DoRA / QLoRA) weights stored in HuggingFace `.safetensors` format (`F32`, `F16`, `BF16`, `I8`, and packed `U8` `NF4`/`FP4`) without loading a multi-gigabyte PyTorch or GPU runtime.
 
 Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ and running cubic $O(d^3)$ Singular Value Decomposition, `loraspectra` factors $B = Q_B R_B$ and $A^T = Q_A R_A$ via Modified Gram-Schmidt with Daniel-Gragg-Kaufman-Stewart (DGKS) re-orthogonalization and solves the exact SVD on the tiny $r \times r$ core matrix $M = R_B R_A^T$. This reduces per-layer spectral complexity from $O(d^3)$ to $O(r^2(d_{\text{out}} + d_{\text{in}}) + r^3)$ - delivering a **1,050x to 2,680x speedup** over full dense SVD while matching singular values to within **$1.08 \times 10^{-13}$** (IEEE 754 `f64` machine precision).
 
@@ -19,8 +19,9 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
    - Pass `hf://<org>/<repo>`, `hf://<org>/<repo>/<lora.safetensors>`, or any `https://.../*.safetensors` URL directly to `info`, `audit`, `card`, `compress`, `interference`, `merge`, or `extract`.
    - Automatically discovers the `.safetensors` LoRA file (and optional companion `adapter_config.json`) via the HuggingFace Hub API siblings list, respects `HF_TOKEN` for gated/private repos, and caches weights in `${TMPDIR:-/tmp}/loraspectra-cache/` so subsequent runs are instant.
 
-2. **Adapter Integrity & Silent Fine-Tuning Bug Diagnostics (`loraspectra audit [--json]`)**
+2. **Adapter Integrity, Low-Bit Quantization & Silent Fine-Tuning Bug Diagnostics (`loraspectra audit [--quant nf4|fp4|int4|int8] [--json]`)**
    - **Zero-Norm / Dead Special-Token Embedding Detection**: Inspects saved dense token matrices (`embed_tokens`, `wte`, `lm_head` via `modules_to_save`) and LoRA adapters targeting them (including PEFT `lora_embedding_A` / `lora_embedding_B` and `lm_head` `lora_B`), flagging zero/near-zero token rows and dead `lora_B` rank columns. Catches the silent Qwen2.5-Coder / Llama SFT bug where newly added `<tool_call>` special tokens never receive gradient updates.
+   - **Low-Bit Quantization Reconstruction (`NF4` / `FP4` / `INT4` / `INT8`) & `bitsandbytes` Dequantization (`LS023`)**: Transparently unpacks `I8` (`LLM.int8()` `SCB` / `weight_scale`) and packed 4-bit `U8` `bitsandbytes__nf4` / `bitsandbytes__fp4` (including double-quantized `nested_absmax` + `nested_quant_map`) `.safetensors` checkpoints, auditing scale blocks for zero/NaN corruption (`QUANT_ZERO_OR_NAN_ABSMAX`, `QUANT_CORRUPT_METADATA`). With `--quant nf4|fp4|int4|int8 [--block-size 64]`, computes exact stacked QR-Core spectral and Frobenius quantization reconstruction error, SQNR (dB), and SVD-rebalanced factor error (`QUANT_RECONSTRUCTION_HIGH_ERROR`, `QUANT_IMBALANCED_FACTOR_LOSS`) without dense matrix allocations.
    - **Alpha, rsLoRA ($\alpha/\sqrt{r}$), PiSSA Residual & DoRA Diagnostics**: Evaluates effective forward-pass scaling ($\alpha/r$ for standard LoRA vs exact $\alpha/\sqrt{r}$ when `use_rslora=true`, eliminating false high-rank `alpha/r` warnings while catching naive $\alpha = 2r$ rsLoRA overscaling and `.alpha` tensor ambiguity under `LS021`). Detects unconverted PiSSA (`init_lora_weights="pissa*"`) residual checkpoints (`LS022`) that corrupt unadapted base models unless paired with $W_{\text{res}} = W_0 - B_{\text{init}} A_{\text{init}}$ or converted via `pissa_init`, computing exact net task updates $\|\Delta W_{\text{net}}\|_F = \|s_{\text{active}} B A - s_{\text{init}} B_{\text{init}} A_{\text{init}}\|_F$ against bundled `.pissa_init` or companion `pissa_init/adapter_model.safetensors` weights. Also flags DoRA `lora_magnitude_vector` shape mismatches / collapsed zero channels (`LS019`) and extreme DoRA channel dispersion or directional `B*A` stagnation (`LS020`) via $O(r^2(d_{\text{in}} + d_{\text{out}}))$ Gram-matrix row norms.
 
 3. **HuggingFace Model Card Spectral Audit Generator (`loraspectra card <adapter_or_hf_uri>`)**
@@ -36,9 +37,9 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
    - Reports Spectral Norm ($\|\Delta W\|_2 = \sigma_1$), Frobenius Norm ($\|\Delta W\|_F$), Stable Rank ($r_{\text{stable}} = \|\Delta W\|_F^2 / \sigma_1^2$), von Neumann Spectral Entropy Effective Rank ($r_{\text{eff}} = \exp(-\sum_i p_i \ln p_i)$), cumulative energy ranks ($k_{90\%}, k_{95\%}, k_{99\%}$), and the **Gavish-Donoho (2014) Marchenko-Pastur optimal hard-threshold signal rank (`K_MP`)**.
    - Flags `RANK_COLLAPSED` ($r_{\text{eff}} < 2.0$ or $k_{99\%}/r \le 0.15$), `OVER_PARAMETERIZED` ($k_{99\%}/r \le 0.55$), `DEAD_LAYER`, and `OPTIMAL` projections.
 
-6. **Eckart-Young-Mirsky, Marchenko-Pastur & Global Budget-Optimal Rank Compression (`loraspectra compress`)**
-   - Applies optimal rank-$k$ SVD truncation $B_k = U_{:,:k}\Sigma_{:k,:k}^{1/2}$, $A_k = \Sigma_{:k,:k}^{1/2} V_{:,:k}^T$, minimizing both Frobenius reconstruction error $\|\Delta W - \Delta W_k\|_F = \sqrt{\sum_{i>k}\sigma_i^2}$ and spectral error $\|\Delta W - \Delta W_k\|_2 = \sigma_{k+1}$.
-   - Supports **Global Budget-Optimal Heterogeneous Allocation** (`--target-rank <avg_r>`, `--budget-ratio <0..1>`, `--max-bytes <size>`), which allocates heterogeneous per-layer ranks $k_\ell \in [\text{min\_rank}, \text{max\_rank}]$ via $O(L r \log L)$ marginal spectral energy-per-byte water-filling (`(s_l * sigma_{l,j})^2 / c_l`), alongside **Adaptive Per-Layer Energy Allocation** (`--energy 0.99`), **Fixed Rank** (`--rank K`), and **Hyperparameter-Free Marchenko-Pastur Denoising** (`--mp-denoise`).
+6. **Certified Error-Bound, Eckart-Young-Mirsky, Marchenko-Pastur & Global Budget-Optimal Rank Compression (`loraspectra compress`)**
+   - Applies optimal rank-$k$ SVD truncation $B_k = U_{:,:k}\Sigma_{:k,:k}^{1/2}$, $A_k = \Sigma_{:k,:k}^{1/2} V_{:,:k}^T$, minimizing Eckart-Young Frobenius error $\|\Delta W - \Delta W_k\|_F = \sqrt{\sum_{i>k}\sigma_i^2}$, spectral operator error $\|\Delta W - \Delta W_k\|_2 = \sigma_{k+1}$, and Mirsky nuclear trace-norm error $\sum_{i>k}\sigma_i$, while tracking Wedin singular subspace gap stability $(\sigma_k - \sigma_{k+1})/\sigma_1$ (`LS024`).
+   - Supports **Certified Truncation Error Bounds** (`--max-frobenius-error <tol>`, `--max-spectral-error <tol>`), **Global Budget-Optimal Heterogeneous Allocation** (`--target-rank <avg_r>`, `--budget-ratio <0..1>`, `--max-bytes <size>`) via $O(L r \log L)$ marginal spectral energy-per-byte water-filling (`(s_l * sigma_{l,j})^2 / c_l`), **Adaptive Per-Layer Energy Allocation** (`--energy 0.99`), **Fixed Rank** (`--rank K`), and **Hyperparameter-Free Marchenko-Pastur Denoising** (`--mp-denoise`), plus Weyl/triangle-inequality joint truncation + quantization certificates.
    - Emits a complete, scale-preserving HuggingFace PEFT `adapter_config.json` (`--peft-config adapter_config.json` or `--out-dir <dir>`) with exact per-module `rank_pattern` and `alpha_pattern` (`alpha_l = s_l * k_l` or `s_l * sqrt(k_l)` for `rsLoRA`), preserving upstream `base_model_name_or_path`, `task_type`, `target_modules` (including `"all-linear"` or inferred leaf modules), and `modules_to_save` so `PeftModel.from_pretrained` loads heterogeneous compressed LoRAs with identical forward-pass scaling.
 
 7. **Automated Subspace Interference Merge Advisor, N-Adapter `ortho-svd` Merge & Scale Baking (`interference` / `merge` / `info`)**
@@ -47,8 +48,8 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
    - Includes **`loraspectra info <adapter_or_hf_uri>`** to reverse-engineer the naming convention and base model family without requiring `adapter_config.json`, plus **`loraspectra extract`** to extract an optimal low-rank LoRA adapter directly from two dense `.safetensors` checkpoints ($\Delta W = W_{\text{tuned}} - W_{\text{base}}$).
 
 8. **OASIS SARIF v2.1.0 Code Scanning & CI Gate (`audit --sarif <file>` / `merge-check --sarif <file>` / `action.yml`)**
-   - Exports spectral health, adapter integrity, rsLoRA scaling, PiSSA residual hazards, DoRA magnitude-vs-direction anomalies, and multi-adapter merge conflict findings into standard OASIS SARIF v2.1.0 format (`$schema: sarif-2.1.0.json`), mapping rules `LS001` through `LS022` (dead LoRA layers, zero-norm embedding rows, collapsed rank, extreme alpha scaling, subspace collision, merge norm inflation, destructive sign cancellation, incompatible shapes, DoRA collapsed/mismatched magnitude vectors, DoRA directional stagnation or dispersion, rsLoRA scaling anomalies, and unconverted PiSSA residual hazards).
-   - Integrates directly with GitHub Code Scanning (`github/codeql-action/upload-sarif`) and provides the composite GitHub Action `SalyyS1/loraspectra@v1.2.0` (`action.yml`) to fail CI on critical fine-tuning or adapter-merge bugs.
+   - Exports spectral health, adapter integrity, rsLoRA scaling, PiSSA residual hazards, DoRA magnitude-vs-direction anomalies, NF4/FP4/INT8 quantization distortion, SVD truncation error bound violations, and multi-adapter merge conflict findings into standard OASIS SARIF v2.1.0 format (`$schema: sarif-2.1.0.json`), mapping rules `LS001` through `LS024`.
+   - Integrates directly with GitHub Code Scanning (`github/codeql-action/upload-sarif`) and provides the composite GitHub Action `SalyyS1/loraspectra@v1.3.0` (`action.yml`) to fail CI on critical fine-tuning or adapter-merge bugs.
 
 9. **LoRA, rsLoRA, PiSSA & DoRA Checkpoint Differential Drift (`loraspectra diff <a_uri> <b_uri> [--json]`)**
    - Compares two fine-tuning checkpoints (e.g. across training steps, `rsLoRA` vs standard `LoRA` configs, or unconverted `PiSSA + pissa_init` vs PEFT-converted rank-$2r$ `LoRA`) in $O((r_A + r_B)^2(d_{\text{in}} + d_{\text{out}}))$ time without dense matrix allocations.
@@ -62,14 +63,15 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
 
 ## Comparison with Existing Tools
 
-| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v1.2.0`) |
+| Capability | `kohya-ss/sd-scripts` (`resize_lora.py`) | `huggingface/peft` (`replace_lora_weights_loftq`) | `arcee-ai/mergekit` (`mergekit-svd`) | `loraspectra` (`v1.3.0`) |
 | :--- | :---: | :---: | :---: | :---: |
 | **SVD Algorithm & Complexity** | Dense $O(d^3)$ (`torch.linalg.svd(B @ A)`) | Dense / Low-rank approx | Dense $O(d^3)$ on delta weights | **Exact QR-Core SVD $O(r^2 d + r^3)$ (`1,050x-2,680x` faster)** |
 | **Runtime Dependencies** | Python + PyTorch + CUDA (`~4 GB`) | Python + PyTorch + Transformers | Python + PyTorch (`~4 GB`) | **Zero-dependency Rust binary (`< 1 MB`) + Local Web UI** |
-| **Client-Side Browser `.safetensors` Inspector** | No | No | No | **[Yes (8-byte header slice + JS SVD + `merge-check`, 0 uploads)](https://salyys1.github.io/loraspectra/)** |
+| **Client-Side Browser `.safetensors` Inspector** | No | No | No | **[Yes (8-byte header slice + JS SVD + NF4 SQNR + `merge-check`, 0 uploads)](https://salyys1.github.io/loraspectra/)** |
 | **Direct `hf://org/repo` Remote Inspection** | No | Python API only | Partial | **Yes (`hf://org/repo` + `${TMPDIR:-/tmp}/loraspectra-cache/` + `HF_TOKEN`)** |
 | **Silent SFT Bug & Integrity Audit (`audit`)** | No | No | No | **Yes (dead `<tool_call>` rows, `rsLoRA` $\alpha/\sqrt{r}$, `PiSSA` residual, DoRA checks)** |
-| **OASIS SARIF v2.1.0 & GitHub Actions Gate** | No | No | No | **Yes (`--sarif report.sarif` + `action.yml` rules `LS001-LS022`)** |
+| **NF4/FP4/INT8 Quantization & Truncation Bounds** | No | LoftQ init only | No | **Yes (`--quant nf4\|fp4\|int4\|int8`, `I8`/`U8` dequant, `--max-spectral-error`, `LS023-LS024`)** |
+| **OASIS SARIF v2.1.0 & GitHub Actions Gate** | No | No | No | **Yes (`--sarif report.sarif` + `action.yml` rules `LS001-LS024`)** |
 | **Multi-Adapter Pre-Merge Conflict Check (`merge-check`)** | No | No | No | **Yes (`loraspectra merge-check`, $N \ge 2$ subspace collision & norm inflation)** |
 | **Checkpoint Differential Drift (`diff`)** | No | No | No | **Yes (`loraspectra diff`, QR-Core drift + `rsLoRA`/`PiSSA` + DoRA coupling)** |
 | **HuggingFace Model Card Generator (`card`)** | No | Basic template | No | **Yes (`loraspectra card`, shields.io badges + spectral & bottleneck tables)** |
@@ -161,8 +163,8 @@ loraspectra audit hf://org/repo/adapter_model.safetensors
 loraspectra audit ./checkpoint-1000/adapter_model.safetensors
 loraspectra audit ./checkpoint-1000/adapter_model.safetensors --json
 
-# Export OASIS SARIF v2.1.0 report for GitHub Code Scanning
-loraspectra audit ./checkpoint-1000/adapter_model.safetensors --sarif audit.sarif
+# Audit NF4/FP4/INT8 quantization reconstruction SQNR + Eckart-Young/Mirsky truncation bounds and export SARIF v2.1.0
+loraspectra audit ./checkpoint-1000/adapter_model.safetensors --quant nf4 --max-truncation-error 0.05 --sarif audit.sarif
 ```
 
 Output:
@@ -220,6 +222,9 @@ Generated Markdown snippet:
 # Retain 99.0% Frobenius spectral energy per layer and export ready-to-load PEFT directory (adapter_model.safetensors + adapter_config.json)
 loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_slim --energy 0.99
 
+# Certified Eckart-Young spectral/Frobenius error-bound rank compression (selects minimal rank k per layer meeting bounds)
+loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_cert --max-spectral-error 0.05 --max-frobenius-error 0.08
+
 # Global budget-optimal heterogeneous rank allocation under an exact byte ceiling or target mean rank
 loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_16mb --max-bytes 16M --dtype bf16
 loraspectra compress ./checkpoint/adapter_model.safetensors adapter_r8.safetensors --target-rank 8 --peft-config adapter_config.json --json
@@ -272,7 +277,7 @@ loraspectra extract base_model.safetensors fine_tuned.safetensors extracted_lora
 
 ```yaml
 - name: Audit LoRA Checkpoint
-  uses: SalyyS1/loraspectra@v1.2.0
+  uses: SalyyS1/loraspectra@v1.3.0
   with:
     checkpoint: './checkpoints/adapter_model.safetensors'
     sarif: 'loraspectra-audit.sarif'

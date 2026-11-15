@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
 
-use crate::audit::estimate_marchenko_pastur_rank;
+use crate::audit::{compute_truncation_bounds, estimate_marchenko_pastur_rank};
 use crate::linalg::{
     jacobi_svd, matmul, multiply_q_cols_by_small, svd_to_lora_factors, thin_qr_columns, transpose,
     SvdDecomposition,
@@ -41,6 +41,15 @@ pub enum CompressionPolicy {
     /// subject to a global byte/parameter budget via marginal spectral energy-per-byte water-filling.
     TargetBudget {
         target: BudgetTarget,
+        min_rank: usize,
+        max_rank: usize,
+    },
+    /// Select the smallest rank `k in [min_rank, max_rank]` per layer certified by
+    /// Eckart-Young-Mirsky to satisfy prescribed relative Frobenius (`||DeltaW - DeltaW_k||_F / ||DeltaW||_F`)
+    /// and/or relative spectral (`sigma_{k+1} / sigma_1`) truncation error bounds.
+    ErrorBound {
+        max_frobenius_error: Option<f64>,
+        max_spectral_error: Option<f64>,
         min_rank: usize,
         max_rank: usize,
     },
@@ -90,6 +99,8 @@ pub struct LayerCompressionMetric {
     pub retained_energy_ratio: f64,
     pub relative_frobenius_error: f64,
     pub relative_spectral_error: f64,
+    pub relative_nuclear_error: f64,
+    pub wedin_spectral_gap: f64,
     pub original_bytes: usize,
     pub compressed_bytes: usize,
 }
@@ -271,6 +282,30 @@ fn select_local_layer_rank(
             );
             alloc[0]
         }
+        CompressionPolicy::ErrorBound {
+            max_frobenius_error,
+            max_spectral_error,
+            min_rank,
+            max_rank,
+        } => {
+            if total_energy <= 1e-18 {
+                min_rank.min(orig_r).max(1)
+            } else {
+                let mut chosen = orig_r;
+                for k in 1..=orig_r {
+                    let b = compute_truncation_bounds(sigma, k);
+                    let frob_ok = max_frobenius_error
+                        .map_or(true, |tol| b.relative_frobenius_error <= tol.max(0.0));
+                    let spec_ok = max_spectral_error
+                        .map_or(true, |tol| b.relative_spectral_error <= tol.max(0.0));
+                    if frob_ok && spec_ok {
+                        chosen = k;
+                        break;
+                    }
+                }
+                chosen.max(min_rank).min(max_rank).min(orig_r).max(1)
+            }
+        }
     }
 }
 
@@ -357,6 +392,7 @@ fn finalize_compressed_layer(
         b: b_new,
     };
 
+    let bounds = compute_truncation_bounds(&decomp.core_svd.sigma, k);
     let original_bytes = layer.raw_byte_size();
     let compressed_bytes = compressed_layer.raw_byte_size();
 
@@ -367,6 +403,8 @@ fn finalize_compressed_layer(
         retained_energy_ratio,
         relative_frobenius_error,
         relative_spectral_error,
+        relative_nuclear_error: bounds.relative_nuclear_error,
+        wedin_spectral_gap: bounds.wedin_spectral_gap,
         original_bytes,
         compressed_bytes,
     };
@@ -697,6 +735,7 @@ pub fn extract_lora_from_dense_models(
             0.0
         };
 
+        let bounds = compute_truncation_bounds(&cand.svd.sigma, k);
         let original_bytes = cand.rows * cand.cols * cand.dtype.byte_size();
         let compressed_bytes = layer.raw_byte_size();
         global_total_e += total_energy;
@@ -710,6 +749,8 @@ pub fn extract_lora_from_dense_models(
             retained_energy_ratio,
             relative_frobenius_error,
             relative_spectral_error,
+            relative_nuclear_error: bounds.relative_nuclear_error,
+            wedin_spectral_gap: bounds.wedin_spectral_gap,
             original_bytes,
             compressed_bytes,
         });

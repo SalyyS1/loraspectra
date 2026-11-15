@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.2.0 - Interactive .safetensors Header, Spectral SVD &amp; Multi-Adapter Merge Inspector</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, and multi-adapter merge-check analyzer + zero-dependency Rust CLI (v1.2.0).">
-  <meta property="og:title" content="loraspectra v1.2.0 - Interactive .safetensors Header, Spectral SVD &amp; Merge Inspector">
+  <title>loraspectra v1.3.0 - Interactive .safetensors Header, Spectral SVD, NF4 Quantization &amp; Merge Inspector</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, NF4/FP4/INT8 quantization &amp; Eckart-Young truncation bound analyzer, and multi-adapter merge-check + zero-dependency Rust CLI (v1.3.0).">
+  <meta property="og:title" content="loraspectra v1.3.0 - Interactive .safetensors Header, Spectral SVD, NF4 Quantization &amp; Merge Inspector">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -419,9 +419,9 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.2.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.3.0</span></h1>
         <p class="lead">
-          Spectral SVD Auditor, rsLoRA &amp; PiSSA Residual Validator, DoRA Directional vs Magnitude Analyzer, Zero-Copy <code>.safetensors</code> Header Inspector, Dynamic Rank Compressor, and Multi-Adapter Merge Conflict Analyzer
+          Spectral SVD Auditor, NF4/FP4/INT8 Quantization Reconstruction &amp; Eckart-Young Truncation Bound Analyzer, rsLoRA &amp; PiSSA Residual Validator, DoRA Analyzer, Zero-Copy <code>.safetensors</code> Header Inspector, Dynamic Rank Compressor, and Multi-Adapter Merge Conflict Analyzer
           - powered by exact QR-Core SVD
           (<code>O(r&sup2;d + r&sup3;)</code>) in your browser or native Rust CLI without PyTorch or GPU VRAM.
         </p>
@@ -444,7 +444,7 @@
       <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Drop .safetensors and optional adapter_config.json files or click to browse">
         <p class="dropzone-title">Drop 1 <code>.safetensors</code> (+ optional <code>adapter_config.json</code>) or 2+ files (Multi-Adapter <code>merge-check</code>)</p>
         <p class="dropzone-sub">
-          Reads 8-byte header slices in &lt;5 ms, decodes <code>F32</code>/<code>F16</code>/<code>BF16</code> LoRA/rsLoRA/PiSSA/DoRA factors, validates <code>alpha/sqrt(r)</code> &amp; <code>pissa_init</code> residuals, and checks multi-adapter collisions
+          Reads 8-byte header slices in &lt;5 ms, decodes <code>F32</code>/<code>F16</code>/<code>BF16</code>/<code>I8</code>/<code>U8</code> LoRA/QLoRA factors, computes NF4 SQNR &amp; Eckart-Young/Mirsky truncation bounds, validates <code>alpha/sqrt(r)</code> &amp; <code>pissa_init</code> residuals, and checks multi-adapter collisions
         </p>
         <div class="demo-bar" id="demo-bar">
           <button type="button" class="btn btn-accent btn-sm" id="btn-demo-peft">
@@ -606,10 +606,10 @@
           </div>
         </div>
 
-        <!-- Scaling, rsLoRA & PiSSA Integrity Diagnostics Panel -->
+        <!-- Scaling, rsLoRA, PiSSA, Quantization & Truncation Integrity Diagnostics Panel -->
         <div id="integrity-panel" class="cli-block" style="margin-bottom: 18px;">
           <div class="cli-block-head">
-            <span>Scaling, rsLoRA &amp; PiSSA Residual Diagnostics (SARIF <code>LS001-LS022</code>)</span>
+            <span>Scaling, rsLoRA, PiSSA, NF4 Quantization &amp; Truncation Bound Diagnostics (SARIF <code>LS001-LS024</code>)</span>
             <span class="badge" id="integrity-badge">SCALING_OK</span>
           </div>
           <div id="integrity-summary" style="padding: 10px 14px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--border);"></div>
@@ -715,12 +715,12 @@
       <div class="cli-block">
 <pre class="cli-code">cargo install --git https://github.com/SalyyS1/loraspectra
 
-# Audit LoRA, rsLoRA (alpha/sqrt(r)), PiSSA residuals, and DoRA magnitudes with SARIF v2.1.0 output
-loraspectra audit ./checkpoint/adapter_model.safetensors --sarif loraspectra.sarif
+# Audit LoRA, rsLoRA, PiSSA, DoRA, NF4 quantization SQNR, and SVD truncation bounds with SARIF v2.1.0 output
+loraspectra audit ./checkpoint/adapter_model.safetensors --quant nf4 --max-truncation-error 0.05 --sarif loraspectra.sarif
 loraspectra diff ./pissa_step500/adapter_model.safetensors ./lora_converted/adapter_model.safetensors
 
-# Compress a rank-collapsed LoRA/rsLoRA at 99% Frobenius energy or byte budget with scale-preserving alpha_pattern
-loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_slim --energy 0.99
+# Compress a rank-collapsed LoRA under certified Eckart-Young error bounds, 99% Frobenius energy, or byte ceiling
+loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_cert --max-spectral-error 0.05 --max-frobenius-error 0.08
 loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_16mb --max-bytes 16M --dtype bf16
 
 # Analyze N-adapter subspace collision and norm inflation prior to TIES/DARE/linear merging
@@ -1025,8 +1025,85 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       return "OPTIMAL";
     }
 
+    function computeTruncationBoundsJs(scaledSigma, keepRank) {
+      const r = scaledSigma.length;
+      if (r === 0) return { specErrRel: 0.0, frobErrRel: 0.0, nucErrRel: 0.0, wedinGap: 0.0, localGap: 0.0 };
+      const k = Math.min(Math.max(keepRank, 1), r);
+      const s1 = Math.max(scaledSigma[0], 0.0);
+      let totE = 0.0, totNuc = 0.0, tailE = 0.0, tailNuc = 0.0;
+      for (let i = 0; i < r; i++) {
+        const sv = Math.max(scaledSigma[i], 0.0);
+        totE += sv * sv;
+        totNuc += sv;
+        if (i >= k) {
+          tailE += sv * sv;
+          tailNuc += sv;
+        }
+      }
+      const specNext = k < r ? Math.max(scaledSigma[k], 0.0) : 0.0;
+      const sk = Math.max(scaledSigma[k - 1], 0.0);
+      const gap = Math.max(sk - specNext, 0.0);
+      return {
+        specErrRel: s1 > 1e-18 ? specNext / s1 : 0.0,
+        frobErrRel: totE > 1e-36 ? Math.sqrt(tailE / totE) : 0.0,
+        nucErrRel: totNuc > 1e-18 ? tailNuc / totNuc : 0.0,
+        wedinGap: s1 > 1e-18 ? gap / s1 : 0.0,
+        localGap: sk > 1e-18 ? gap / sk : 0.0
+      };
+    }
+
+    const NF4_CODEBOOK_JS = [
+      -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
+      -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0,
+      0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224,
+      0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0
+    ];
+
+    function quantizeDequantizeNf4Js(arr, blockSize) {
+      const n = arr.length;
+      const out = new Float64Array(n);
+      const blk = Math.max(blockSize || 64, 1);
+      for (let off = 0; off < n; off += blk) {
+        const end = Math.min(off + blk, n);
+        let absmax = 0.0;
+        for (let i = off; i < end; i++) {
+          const av = Math.abs(arr[i]);
+          if (Number.isFinite(av) && av > absmax) absmax = av;
+        }
+        if (absmax <= 1e-30) continue;
+        const inv = 1.0 / absmax;
+        for (let i = off; i < end; i++) {
+          const u = Math.max(-1.0, Math.min(1.0, arr[i] * inv));
+          let best = NF4_CODEBOOK_JS[0];
+          let bestErr = Math.abs(u - best);
+          for (let c = 1; c < 16; c++) {
+            const err = Math.abs(u - NF4_CODEBOOK_JS[c]);
+            if (err < bestErr) { bestErr = err; best = NF4_CODEBOOK_JS[c]; }
+          }
+          out[i] = best * absmax;
+        }
+      }
+      return out;
+    }
+
+    function computeLayerNf4SqnrJs(rawLayer) {
+      if (!rawLayer) return { sqnrDb: 0.0, relFrobErr: 0.0 };
+      const { aData, bData, dOut, dIn, r, scale } = rawLayer;
+      const sigSq = Math.max(0.0, lowRankFrobInnerJs(rawLayer, rawLayer));
+      if (sigSq <= 1e-24) return { sqnrDb: 0.0, relFrobErr: 0.0 };
+      const aQ = quantizeDequantizeNf4Js(aData, 64);
+      const bQ = quantizeDequantizeNf4Js(bData, 64);
+      const qLayer = { aData: aQ, bData: bQ, dOut, dIn, r, scale };
+      const qSq = Math.max(0.0, lowRankFrobInnerJs(qLayer, qLayer));
+      const cross = lowRankFrobInnerJs(rawLayer, qLayer);
+      const errSq = Math.max(0.0, sigSq + qSq - 2.0 * cross);
+      const relFrobErr = Math.sqrt(errSq / sigSq);
+      const sqnrDb = errSq <= 1e-36 ? 120.0 : Math.max(-60.0, Math.min(120.0, 10.0 * Math.log10(sigSq / errSq)));
+      return { sqnrDb, relFrobErr };
+    }
+
     function buildLayerAuditRecord(baseName, aKey, dOut, dIn, nominalRank, dtype, sigma, alphaVal) {
-      const elemBytes = dtype === "F32" ? 4 : 2;
+      const elemBytes = dtype === "F32" ? 4 : ((dtype === "I8" || dtype === "U8") ? 1 : 2);
       const scaledSigma = new Float64Array(sigma.length);
       const scale = (alphaVal !== null && alphaVal !== undefined && nominalRank > 0)
         ? Math.abs(alphaVal / nominalRank)
@@ -1057,6 +1134,7 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       const effectiveRank = frobeniusNorm < 1e-9 ? 0.0 : Math.exp(entropy);
       const mp = estimateMarchenkoPastur(scaledSigma, dOut, dIn);
       const k99 = computeEnergyRank(scaledSigma, totalEnergy, 0.99);
+      const truncBounds = computeTruncationBoundsJs(scaledSigma, k99);
       const rawBytes = nominalRank * (dOut + dIn) * elemBytes;
 
       return {
@@ -1078,6 +1156,7 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
         mpTau: mp.tau,
         rankAt99: k99,
         rankAtEnergy: k99,
+        truncBounds,
         bytesAtEnergy: k99 * (dOut + dIn) * elemBytes,
         rawBytes,
         health: classifyHealth(nominalRank, effectiveRank, frobeniusNorm, spectralNorm, k99)
@@ -1338,6 +1417,44 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
         });
       }
 
+      // NF4 quantization reconstruction & SVD truncation bound checks (LS023-LS024)
+      let sumSqnr = 0.0, sqnrCount = 0, maxQuantErr = 0.0, degenGapCount = 0, highMpSpecCount = 0;
+      for (const rec of records) {
+        const l = rawLayers.get(rec.baseName);
+        if (l && rec.frobeniusNorm > 1e-9) {
+          const qDiag = computeLayerNf4SqnrJs(l);
+          sumSqnr += qDiag.sqnrDb;
+          sqnrCount++;
+          if (qDiag.relFrobErr > maxQuantErr) maxQuantErr = qDiag.relFrobErr;
+        }
+        const b99 = computeTruncationBoundsJs(rec.sigma, rec.rankAt99);
+        if (rec.rankAt99 < rec.nominalRank && b99.localGap < 0.01 && b99.specErrRel > 0.08) degenGapCount++;
+        const bmp = computeTruncationBoundsJs(rec.sigma, rec.rankMp);
+        if (rec.rankMp < rec.nominalRank && bmp.specErrRel > 0.35) highMpSpecCount++;
+      }
+      const meanNf4SqnrDb = sqnrCount > 0 ? sumSqnr / sqnrCount : null;
+      if (maxQuantErr > 0.25) {
+        findings.push({
+          rule: "LS023",
+          severity: "WARN",
+          msg: "QUANT_RECONSTRUCTION_HIGH_ERROR: simulated NF4/block-64 quantization incurs up to " + (maxQuantErr * 100.0).toFixed(1) + "% relative Frobenius distortion."
+        });
+      }
+      if (highMpSpecCount > 0) {
+        findings.push({
+          rule: "LS024",
+          severity: "WARN",
+          msg: "SVD_TRUNCATION_BOUND_EXCEEDED: " + highMpSpecCount + " layer(s) incur >35% Eckart-Young spectral operator error at Marchenko-Pastur cutoff."
+        });
+      }
+      if (degenGapCount > 0) {
+        findings.push({
+          rule: "LS024",
+          severity: "WARN",
+          msg: "SVD_DEGENERATE_SPECTRAL_GAP: " + degenGapCount + " layer(s) bisect a nearly-degenerate singular doublet (<1% local gap) at K_99%."
+        });
+      }
+
       return {
         formula,
         useRslora,
@@ -1347,6 +1464,7 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
         minScale,
         maxScale,
         meanNetUpdateNorm,
+        meanNf4SqnrDb,
         findings
       };
     }
@@ -1371,6 +1489,8 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       if (u === "F32" || u === "FP32" || u === "FLOAT32") return "F32";
       if (u === "F16" || u === "FP16" || u === "FLOAT16") return "F16";
       if (u === "BF16" || u === "BFLOAT16") return "BF16";
+      if (u === "I8" || u === "INT8") return "I8";
+      if (u === "U8" || u === "UINT8") return "U8";
       return null;
     }
 
@@ -1383,6 +1503,10 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
         for (let i = 0; i < numel; i++) out[i] = F16_LUT[dv.getUint16(i * 2, true)];
       } else if (dtype === "BF16") {
         for (let i = 0; i < numel; i++) out[i] = BF16_LUT[dv.getUint16(i * 2, true)];
+      } else if (dtype === "I8") {
+        for (let i = 0; i < numel; i++) out[i] = dv.getInt8(i);
+      } else if (dtype === "U8") {
+        for (let i = 0; i < numel; i++) out[i] = dv.getUint8(i);
       }
       return out;
     }
@@ -1979,6 +2103,7 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       for (const rec of state.records) {
         const ke = computeEnergyRank(rec.sigma, rec.totalEnergy, thresh);
         rec.rankAtEnergy = ke;
+        rec.truncBounds = computeTruncationBoundsJs(rec.sigma, ke);
         rec.bytesAtEnergy = ke * (rec.dOut + rec.dIn) * rec.elemBytes;
         rec.health = classifyHealth(rec.nominalRank, rec.effectiveRank, rec.frobeniusNorm, rec.spectralNorm, ke);
       }
@@ -2056,10 +2181,11 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       const eStr = formatEnergyLabel(state.targetEnergyPct);
       document.getElementById("chart-layer-title").textContent = rec.baseName;
       const alphaTag = rec.alpha !== null ? " | alpha=" + rec.alpha : "";
+      const tb = rec.truncBounds || computeTruncationBoundsJs(rec.sigma, rec.rankAtEnergy);
       document.getElementById("chart-layer-meta").textContent =
         "Shape: " + rec.dOut + "\u00d7" + rec.dIn + " (r=" + rec.nominalRank + ", " + rec.dtype + alphaTag + ") | " +
         "r_eff=" + rec.effectiveRank.toFixed(2) + " | K_" + eStr + "%=" + rec.rankAtEnergy +
-        " | K_MP=" + rec.rankMp + " (\u03c4*=" + rec.mpTau.toFixed(4) + ") | ||\u0394W||_F=" + rec.frobeniusNorm.toFixed(4);
+        " (spec_err=" + (tb.specErrRel * 100.0).toFixed(2) + "%, nuc_err=" + (tb.nucErrRel * 100.0).toFixed(2) + "%) | K_MP=" + rec.rankMp + " (\u03c4*=" + rec.mpTau.toFixed(4) + ") | ||\u0394W||_F=" + rec.frobeniusNorm.toFixed(4);
 
       const W = 860, H = 270;
       const padL = 54, padR = 54, padT = 22, padB = 36;
@@ -2498,6 +2624,9 @@ loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora 
       if (diag.initWeights) parts.push("init_lora_weights: " + diag.initWeights);
       if (diag.meanNetUpdateNorm !== null) {
         parts.push("Mean Net Task Update ||s*B*A - B_init*A_init||_F: " + diag.meanNetUpdateNorm.toFixed(4));
+      }
+      if (diag.meanNf4SqnrDb !== null && diag.meanNf4SqnrDb !== undefined) {
+        parts.push("Mean NF4/block-64 SQNR: " + diag.meanNf4SqnrDb.toFixed(2) + " dB");
       }
       if (diag.doraCount > 0) parts.push("DoRA Vectors: " + diag.doraCount);
       summaryEl.textContent = parts.join("  |  ");

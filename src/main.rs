@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use loraspectra::audit::{
-    audit_adapter, audit_adapter_integrity_with_pissa, render_audit_json,
+    audit_adapter, audit_adapter_integrity_with_pissa, audit_truncation_error_bounds,
+    render_audit_json,
 };
 use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
@@ -19,6 +20,7 @@ use loraspectra::merge_check::{
     analyze_multi_adapter_merge, render_merge_check_json, render_merge_check_table,
     AdapterMergeInput,
 };
+use loraspectra::quant::{analyze_adapter_quantization, QuantScheme};
 use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
 use loraspectra::safetensors::{
     bake_adapter_scaling, cast_layers_dtype, compute_peft_alpha_pattern, convert_layers_key_format,
@@ -33,7 +35,7 @@ use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif};
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.2.0 - Spectral SVD Auditor, Dynamic Rank Compressor, Extractor & Orthogonal Merger for LoRA/DoRA/rsLoRA/PiSSA (.safetensors)
+        "loraspectra v1.3.0 - Spectral SVD Auditor, Quantization Reconstruction & Truncation Bound Analyzer, Compressor & Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -41,11 +43,11 @@ SOURCES:
 
 USAGE:
   loraspectra info <adapter_or_hf_uri> [--json]
-  loraspectra audit <adapter_or_hf_uri> [--json] [--config <adapter_config.json>] [--sarif <output.sarif>]
+  loraspectra audit <adapter_or_hf_uri> [--json] [--config <adapter_config.json>] [--quant nf4|fp4|int4|int8] [--block-size 64] [--truncation-rank K] [--max-truncation-error TOL] [--sarif <output.sarif>]
   loraspectra diff <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]
-  loraspectra card <adapter_or_hf_uri> [-o <model_card.md>] [--config <adapter_config.json>]
-  loraspectra compress <input_or_hf_uri> [output.safetensors | --out-dir <dir>] [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.25 | --max-bytes 16M] [--min-rank R] [--max-rank R] [--config <in_config.json>] [--peft-config <out_config.json>] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--json]
-  loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.05 | --max-bytes 16M] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
+  loraspectra card <adapter_or_hf_uri> [-o <model_card.md>] [--config <adapter_config.json>] [--quant nf4|fp4|int4|int8]
+  loraspectra compress <input_or_hf_uri> [output.safetensors | --out-dir <dir>] [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.25 | --max-bytes 16M | --max-frobenius-error TOL | --max-spectral-error TOL] [--min-rank R] [--max-rank R] [--config <in_config.json>] [--peft-config <out_config.json>] [--bake-alpha] [--rslora] [--alpha A] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--json]
+  loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.05 | --max-bytes 16M | --max-frobenius-error TOL | --max-spectral-error TOL] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
   loraspectra merge-check <in_1> <in_2> [in_3 ...] [--weights W1:W2[:W3...]] [--json] [--sarif <output.sarif>] [--fail-on-conflict]
   loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]"
@@ -194,7 +196,7 @@ fn main() {
 
     match args[1].as_str() {
         "-V" | "--version" | "version" => {
-            println!("loraspectra 1.2.0");
+            println!("loraspectra 1.3.0");
         }
         "info" => {
             let json_mode = args[2..].iter().any(|a| a == "--json");
@@ -262,6 +264,10 @@ fn main() {
             let mut json_mode = false;
             let mut config_opt: Option<String> = None;
             let mut sarif_opt: Option<String> = None;
+            let mut quant_opt: Option<QuantScheme> = None;
+            let mut block_size: usize = 64;
+            let mut trunc_rank_opt: Option<usize> = None;
+            let mut max_trunc_err_opt: Option<f64> = None;
             let mut pos: Vec<String> = Vec::new();
             let mut i = 2;
             while i < args.len() {
@@ -276,6 +282,30 @@ fn main() {
                     }
                     "--config" | "--peft-config" if i + 1 < args.len() => {
                         config_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--quant" if i + 1 < args.len() => {
+                        quant_opt = Some(QuantScheme::from_name(&args[i + 1]).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }));
+                        i += 2;
+                    }
+                    "--block-size" if i + 1 < args.len() => {
+                        block_size = args[i + 1].parse().expect("Invalid --block-size integer");
+                        i += 2;
+                    }
+                    "--truncation-rank" if i + 1 < args.len() => {
+                        trunc_rank_opt =
+                            Some(args[i + 1].parse().expect("Invalid --truncation-rank integer"));
+                        i += 2;
+                    }
+                    "--max-truncation-error" if i + 1 < args.len() => {
+                        max_trunc_err_opt = Some(
+                            args[i + 1]
+                                .parse()
+                                .expect("Invalid --max-truncation-error float"),
+                        );
                         i += 2;
                     }
                     a if !a.starts_with("--") => {
@@ -294,7 +324,7 @@ fn main() {
                 load_full_adapter_bundle_or_exit(source, config_opt.as_deref());
             let companion_pissa = load_companion_pissa_init(source, &tensors);
             let summary = audit_adapter(&layers);
-            let integrity = audit_adapter_integrity_with_pissa(
+            let mut integrity = audit_adapter_integrity_with_pissa(
                 &layers,
                 &tensors,
                 &alphas,
@@ -307,8 +337,35 @@ fn main() {
                 },
             );
 
+            let trunc_issues =
+                audit_truncation_error_bounds(&summary.layers, trunc_rank_opt, max_trunc_err_opt);
+            integrity.issues.extend(trunc_issues);
+
+            if let Some(scheme) = quant_opt {
+                let scales: Vec<f64> = layers
+                    .iter()
+                    .map(|l| {
+                        resolve_layer_scaling_params(
+                            l,
+                            &alphas,
+                            None,
+                            peft_config.as_ref(),
+                            false,
+                        )
+                        .1
+                    })
+                    .collect();
+                let (qsum, q_issues) =
+                    analyze_adapter_quantization(&layers, &scales, scheme, block_size);
+                integrity.quant_summary = Some(qsum);
+                integrity.issues.extend(q_issues);
+            }
+            if !integrity.issues.is_empty() {
+                integrity.status = "ISSUES_DETECTED";
+            }
+
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.2.0");
+                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.3.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                 } else {
@@ -371,6 +428,19 @@ fn main() {
                     integrity.alpha_summary.pissa_init_tensor_pairs,
                     integrity.embedding_entries.len()
                 );
+                if let Some(ref qs) = integrity.quant_summary {
+                    println!(
+                        "Quantization ({}, block {}): mean SQNR {:.2} dB (min {:.2} dB) | rel_frob {:.2}% (max {:.2}%, SVD-balanced {:.2}%) | max rel_spec {:.2}%",
+                        qs.scheme.as_str(),
+                        qs.block_size,
+                        qs.mean_sqnr_db,
+                        qs.min_sqnr_db,
+                        qs.mean_relative_frobenius_error * 100.0,
+                        qs.max_relative_frobenius_error * 100.0,
+                        qs.mean_balanced_relative_frobenius_error * 100.0,
+                        qs.max_relative_spectral_error * 100.0
+                    );
+                }
                 for issue in &integrity.issues {
                     println!(
                         "  [{}] {} ({}): {}",
@@ -443,6 +513,7 @@ fn main() {
         "card" => {
             let mut output_opt: Option<String> = None;
             let mut config_opt: Option<String> = None;
+            let mut quant_opt: Option<QuantScheme> = None;
             let mut pos: Vec<String> = Vec::new();
             let mut i = 2;
             while i < args.len() {
@@ -453,6 +524,13 @@ fn main() {
                     }
                     "--config" | "--peft-config" if i + 1 < args.len() => {
                         config_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--quant" if i + 1 < args.len() => {
+                        quant_opt = Some(QuantScheme::from_name(&args[i + 1]).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }));
                         i += 2;
                     }
                     a if !a.starts_with('-') => {
@@ -472,7 +550,7 @@ fn main() {
             let companion_pissa = load_companion_pissa_init(source, &tensors);
             let arch = inspect_adapter_architecture(&layers, &alphas);
             let summary = audit_adapter(&layers);
-            let integrity = audit_adapter_integrity_with_pissa(
+            let mut integrity = audit_adapter_integrity_with_pissa(
                 &layers,
                 &tensors,
                 &alphas,
@@ -484,6 +562,27 @@ fn main() {
                     Some(&companion_pissa)
                 },
             );
+            if let Some(scheme) = quant_opt {
+                let scales: Vec<f64> = layers
+                    .iter()
+                    .map(|l| {
+                        resolve_layer_scaling_params(
+                            l,
+                            &alphas,
+                            None,
+                            peft_config.as_ref(),
+                            false,
+                        )
+                        .1
+                    })
+                    .collect();
+                let (qsum, q_issues) = analyze_adapter_quantization(&layers, &scales, scheme, 64);
+                integrity.quant_summary = Some(qsum);
+                integrity.issues.extend(q_issues);
+                if !integrity.issues.is_empty() {
+                    integrity.status = "ISSUES_DETECTED";
+                }
+            }
             let card_md = generate_model_card(source, &arch, &summary, &integrity);
             if let Some(out_path) = output_opt {
                 if let Err(e) = std::fs::write(&out_path, card_md.as_bytes()) {
@@ -506,10 +605,16 @@ fn main() {
                 Energy(f64),
                 MpDenoise,
                 Budget(BudgetTarget),
+                ErrorBound {
+                    frob: Option<f64>,
+                    spec: Option<f64>,
+                },
             }
 
             let mut pos: Vec<String> = Vec::new();
             let mut policy_spec = PolicySpec::Energy(0.99);
+            let mut max_frob_err_opt: Option<f64> = None;
+            let mut max_spec_err_opt: Option<f64> = None;
             let mut min_rank: usize = 1;
             let mut max_rank: usize = 256;
             let mut input_config_opt: Option<String> = None;
@@ -568,6 +673,28 @@ fn main() {
                             process::exit(1);
                         });
                         policy_spec = PolicySpec::Budget(BudgetTarget::MaxBytes(bytes));
+                        i += 2;
+                    }
+                    "--max-frobenius-error" if i + 1 < args.len() => {
+                        let tol: f64 = args[i + 1]
+                            .parse()
+                            .expect("Invalid --max-frobenius-error float");
+                        max_frob_err_opt = Some(tol);
+                        policy_spec = PolicySpec::ErrorBound {
+                            frob: max_frob_err_opt,
+                            spec: max_spec_err_opt,
+                        };
+                        i += 2;
+                    }
+                    "--max-spectral-error" if i + 1 < args.len() => {
+                        let tol: f64 = args[i + 1]
+                            .parse()
+                            .expect("Invalid --max-spectral-error float");
+                        max_spec_err_opt = Some(tol);
+                        policy_spec = PolicySpec::ErrorBound {
+                            frob: max_frob_err_opt,
+                            spec: max_spec_err_opt,
+                        };
                         i += 2;
                     }
                     "--min-rank" if i + 1 < args.len() => {
@@ -660,6 +787,12 @@ fn main() {
                 PolicySpec::MpDenoise => CompressionPolicy::MarchenkoPastur { min_rank, max_rank },
                 PolicySpec::Budget(target) => CompressionPolicy::TargetBudget {
                     target,
+                    min_rank,
+                    max_rank,
+                },
+                PolicySpec::ErrorBound { frob, spec } => CompressionPolicy::ErrorBound {
+                    max_frobenius_error: frob,
+                    max_spectral_error: spec,
                     min_rank,
                     max_rank,
                 },
@@ -801,9 +934,22 @@ fn main() {
                     "  \"global_retained_energy\": {:.6},",
                     res.global_retained_energy
                 );
+                let max_rel_spec = res
+                    .metrics
+                    .iter()
+                    .map(|m| m.relative_spectral_error)
+                    .fold(0.0_f64, f64::max);
+                let mean_rel_nuc = res
+                    .metrics
+                    .iter()
+                    .map(|m| m.relative_nuclear_error)
+                    .sum::<f64>()
+                    / (res.metrics.len().max(1) as f64);
                 println!("  \"min_allocated_rank\": {},", min_alloc);
                 println!("  \"max_allocated_rank\": {},", max_alloc);
                 println!("  \"mean_allocated_rank\": {:.4},", mean_alloc);
+                println!("  \"max_relative_spectral_error\": {:.6},", max_rel_spec);
+                println!("  \"mean_relative_nuclear_error\": {:.6},", mean_rel_nuc);
                 println!("  \"rank_pattern\": {{");
                 let rp_entries: Vec<(&String, &usize)> = res.rank_pattern.iter().collect();
                 for (idx, (k, &r)) in rp_entries.iter().enumerate() {
@@ -852,11 +998,17 @@ fn main() {
                 Energy(f64),
                 MpDenoise,
                 Budget(BudgetTarget),
+                ErrorBound {
+                    frob: Option<f64>,
+                    spec: Option<f64>,
+                },
             }
             let base_path = &args[2];
             let tuned_path = &args[3];
             let output_path = &args[4];
             let mut policy_spec = ExtractPolicySpec::Fixed(16);
+            let mut max_frob_err_opt: Option<f64> = None;
+            let mut max_spec_err_opt: Option<f64> = None;
             let mut min_rank: usize = 1;
             let mut max_rank: usize = 128;
             let mut target_format = "peft".to_string();
@@ -898,6 +1050,28 @@ fn main() {
                         policy_spec = ExtractPolicySpec::Budget(BudgetTarget::MaxBytes(bytes));
                         i += 2;
                     }
+                    "--max-frobenius-error" if i + 1 < args.len() => {
+                        let tol: f64 = args[i + 1]
+                            .parse()
+                            .expect("Invalid --max-frobenius-error float");
+                        max_frob_err_opt = Some(tol);
+                        policy_spec = ExtractPolicySpec::ErrorBound {
+                            frob: max_frob_err_opt,
+                            spec: max_spec_err_opt,
+                        };
+                        i += 2;
+                    }
+                    "--max-spectral-error" if i + 1 < args.len() => {
+                        let tol: f64 = args[i + 1]
+                            .parse()
+                            .expect("Invalid --max-spectral-error float");
+                        max_spec_err_opt = Some(tol);
+                        policy_spec = ExtractPolicySpec::ErrorBound {
+                            frob: max_frob_err_opt,
+                            spec: max_spec_err_opt,
+                        };
+                        i += 2;
+                    }
                     "--min-rank" if i + 1 < args.len() => {
                         min_rank = args[i + 1].parse().expect("Invalid --min-rank integer");
                         i += 2;
@@ -933,6 +1107,12 @@ fn main() {
                 ExtractPolicySpec::MpDenoise => CompressionPolicy::MarchenkoPastur { min_rank, max_rank },
                 ExtractPolicySpec::Budget(target) => CompressionPolicy::TargetBudget {
                     target,
+                    min_rank,
+                    max_rank,
+                },
+                ExtractPolicySpec::ErrorBound { frob, spec } => CompressionPolicy::ErrorBound {
+                    max_frobenius_error: frob,
+                    max_spectral_error: spec,
                     min_rank,
                     max_rank,
                 },
@@ -1181,7 +1361,7 @@ fn main() {
             };
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_merge_check_sarif(&summary, "1.2.0");
+                let sarif_str = build_merge_check_sarif(&summary, "1.3.0");
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                     process::exit(1);

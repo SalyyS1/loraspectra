@@ -5,6 +5,7 @@ pub mod diff;
 pub mod linalg;
 pub mod merge;
 pub mod merge_check;
+pub mod quant;
 pub mod remote;
 pub mod safetensors;
 pub mod sarif;
@@ -124,6 +125,7 @@ mod tests {
                 DType::F32 => 1e-6,
                 DType::F16 => 2e-3,
                 DType::BF16 => 1e-2,
+                DType::I8 | DType::U8 => 1.0,
             };
             for (&orig, &dec) in layer.a.data.iter().zip(loaded_layers[0].a.data.iter()) {
                 assert!((orig - dec).abs() <= tol, "mismatch: {} vs {}", orig, dec);
@@ -2855,5 +2857,455 @@ mod tests {
             rep.frobenius_delta
         );
         assert!(rep.relative_drift < 1e-12);
+    }
+
+    #[test]
+    fn test_quantization_sqnr_ordering_and_exact_low_rank_difference_norms() {
+        use crate::quant::{
+            analyze_layer_quantization, exact_low_rank_difference_norms,
+            quantize_dequantize_tensor, QuantScheme, NF4_CODEBOOK,
+        };
+
+        // Verify NF4 codebook monotonicity, [-1, 1] endpoints, and exact zero at index 7
+        assert_eq!(NF4_CODEBOOK[0], -1.0);
+        assert_eq!(NF4_CODEBOOK[7], 0.0);
+        assert_eq!(NF4_CODEBOOK[15], 1.0);
+        for w in NF4_CODEBOOK.windows(2) {
+            assert!(w[0] < w[1], "NF4 codebook must be strictly increasing");
+        }
+
+        let mut rng = Rng64::new(13001);
+        let d_out = 96;
+        let d_in = 128;
+        let r = 8;
+        let layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d_in, &mut rng, DType::F32),
+            b: random_matrix(d_out, r, &mut rng, DType::F32),
+        };
+
+        // Verify exact_low_rank_difference_norms matches full dense SVD to machine precision
+        let a_nf4 = quantize_dequantize_tensor(&layer.a, QuantScheme::Nf4, 64);
+        let b_nf4 = quantize_dequantize_tensor(&layer.b, QuantScheme::Nf4, 64);
+        let scale = 2.0;
+        let (spec_fast, frob_fast) =
+            exact_low_rank_difference_norms(&layer.b, &layer.a, scale, &b_nf4, &a_nf4, scale);
+
+        let dw_orig = matmul(&layer.b, &layer.a);
+        let dw_q = matmul(&b_nf4, &a_nf4);
+        let mut dense_diff = Tensor2D::zeros(d_out, d_in, DType::F32);
+        for i in 0..dense_diff.data.len() {
+            dense_diff.data[i] = scale * (dw_orig.data[i] - dw_q.data[i]);
+        }
+        let dense_frob = dense_diff.frobenius_norm_sq().sqrt();
+        let dense_spec = jacobi_svd(&dense_diff).sigma[0];
+
+        assert!(
+            (frob_fast - dense_frob).abs() < 1e-11,
+            "Frobenius diff mismatch: fast={} vs dense={}",
+            frob_fast,
+            dense_frob
+        );
+        assert!(
+            (spec_fast - dense_spec).abs() < 1e-11,
+            "Spectral diff mismatch: fast={} vs dense={}",
+            spec_fast,
+            dense_spec
+        );
+
+        // On Gaussian weights, information-theoretically optimal NF4 outperforms FP4 and INT4, while INT8 dominates 4-bit
+        let rep_int8 = analyze_layer_quantization(&layer, scale, QuantScheme::Int8, 64);
+        let rep_nf4 = analyze_layer_quantization(&layer, scale, QuantScheme::Nf4, 64);
+        let rep_fp4 = analyze_layer_quantization(&layer, scale, QuantScheme::Fp4, 64);
+        let rep_int4 = analyze_layer_quantization(&layer, scale, QuantScheme::Int4, 64);
+
+        assert!(
+            rep_int8.sqnr_db > 35.0 && rep_int8.sqnr_db > rep_nf4.sqnr_db + 15.0,
+            "INT8 SQNR ({:.2} dB) must far exceed NF4 ({:.2} dB)",
+            rep_int8.sqnr_db,
+            rep_nf4.sqnr_db
+        );
+        assert!(
+            rep_nf4.sqnr_db > rep_fp4.sqnr_db,
+            "NF4 SQNR ({:.2} dB) should exceed FP4 ({:.2} dB) on Gaussian weights",
+            rep_nf4.sqnr_db,
+            rep_fp4.sqnr_db
+        );
+        assert!(
+            rep_nf4.sqnr_db > rep_int4.sqnr_db,
+            "NF4 SQNR ({:.2} dB) should exceed symmetric INT4 ({:.2} dB) on Gaussian weights",
+            rep_nf4.sqnr_db,
+            rep_int4.sqnr_db
+        );
+    }
+
+    #[test]
+    fn test_imbalanced_factor_quantization_loss_and_svd_rebalancing_ls023() {
+        use crate::quant::{analyze_adapter_quantization, QuantScheme};
+
+        let mut rng = Rng64::new(13002);
+        let d_out = 64;
+        let d_in = 64;
+        let r = 8;
+
+        // Construct a layer with severe channel outlier in A (100x spike on rank-0 col-0) while B has opposite compensation
+        let mut a = random_matrix(r, d_in, &mut rng, DType::F32);
+        let mut b = random_matrix(d_out, r, &mut rng, DType::F32);
+        // Scale rank-0 row of A up by 80x and rank-0 col of B down by 80x so B*A is unchanged,
+        // creating severe blockwise quantization dynamic-range starvation in A!
+        for c in 0..d_in {
+            a.set(0, c, a.get(0, c) * 0.02);
+        }
+        a.set(0, 0, 25.0);
+        for row in 0..d_out {
+            b.set(row, 0, b.get(row, 0) * 0.02);
+        }
+
+        let outlier_layer = LoraLayer {
+            base_name: "model.layers.0.mlp.up_proj".to_string(),
+            a_key: "model.layers.0.mlp.up_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.up_proj.lora_B.weight".to_string(),
+            a,
+            b,
+        };
+
+        // Also construct an extreme single-spike matrix that destroys 4-bit INT4 precision (>25% error)
+        let mut a_spike = random_matrix(r, d_in, &mut rng, DType::F32);
+        let b_spike = random_matrix(d_out, r, &mut rng, DType::F32);
+        a_spike.set(0, 0, 500.0); // dwarfs all other 63 weights in block 0 so they round to 0
+        for r_idx in 1..r {
+            a_spike.set(r_idx, 0, 500.0);
+        }
+        let severe_layer = LoraLayer {
+            base_name: "model.layers.0.mlp.down_proj".to_string(),
+            a_key: "model.layers.0.mlp.down_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.mlp.down_proj.lora_B.weight".to_string(),
+            a: a_spike,
+            b: b_spike,
+        };
+
+        let (q_summary, q_issues) = analyze_adapter_quantization(
+            &[outlier_layer.clone(), severe_layer.clone()],
+            &[1.0, 1.0],
+            QuantScheme::Int4,
+            64,
+        );
+        assert_eq!(q_summary.layers.len(), 2);
+        assert!(
+            q_summary.layers[0].balanced_relative_frobenius_error
+                < q_summary.layers[0].relative_frobenius_error,
+            "SVD rebalancing should reduce quantization error on imbalanced outlier factors ({} vs {})",
+            q_summary.layers[0].balanced_relative_frobenius_error,
+            q_summary.layers[0].relative_frobenius_error
+        );
+        assert!(
+            !q_issues.is_empty(),
+            "Expected LS023 quantization reconstruction warning/critical issue"
+        );
+
+        let layers = vec![outlier_layer, severe_layer];
+        let tensors = layers_to_tensor_map(&layers);
+        let mut integrity = audit_adapter_integrity(
+            &layers,
+            &tensors,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        integrity.quant_summary = Some(q_summary);
+        integrity.issues.extend(q_issues);
+        integrity.status = "ISSUES_DETECTED";
+
+        let sarif = crate::sarif::build_audit_sarif(
+            None,
+            Some(&integrity),
+            "qlora_adapter.safetensors",
+            "1.3.0",
+        );
+        assert!(sarif.contains("\"ruleId\": \"LS023\""));
+        let json = crate::audit::render_audit_json(
+            "qlora_adapter.safetensors",
+            &audit_adapter(&layers),
+            &integrity,
+        );
+        assert!(json.contains("\"quantization_diagnostics\": {"));
+        assert!(json.contains("\"scheme\": \"INT4\""));
+        assert!(!json.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn test_safetensors_bnb_nf4_double_quant_and_int8_scb_dequantization_and_metadata_audit() {
+        use crate::quant::NF4_CODEBOOK;
+
+        // 1. Build a packed 4-bit bitsandbytes__nf4 lora_A (shape 4 x 16 = 64 elements -> 32 packed U8 bytes)
+        //    with double quantization (U8 absmax + nested_absmax + nested_quant_map)
+        let rows_a = 4;
+        let cols_a = 16;
+        let mut expected_a = vec![0.0_f64; rows_a * cols_a];
+        let mut packed_u8 = vec![0.0_f64; (rows_a * cols_a) / 2];
+        let blocksize = 16; // 4 blocks of 16 elements
+        let block_scales = [0.5_f64, 1.25, 0.75, 2.0];
+
+        for i in 0..packed_u8.len() {
+            let idx_hi = (2 * i) % 16;
+            let idx_lo = (2 * i + 5) % 16;
+            let byte = ((idx_hi << 4) | idx_lo) as u8;
+            packed_u8[i] = byte as f64;
+            let s_hi = block_scales[(2 * i) / blocksize];
+            let s_lo = block_scales[(2 * i + 1) / blocksize];
+            expected_a[2 * i] = NF4_CODEBOOK[idx_hi] * s_hi;
+            expected_a[2 * i + 1] = NF4_CODEBOOK[idx_lo] * s_lo;
+        }
+
+        // Double quantization metadata: nested_quant_map[k] = k / 100.0, nested_absmax = [1.0], nested_offset = 0.0
+        // Then block_scales [0.50, 1.25, 0.75, 2.00] correspond exactly to U8 indices [50, 125, 75, 200]!
+        let mut nested_qmap = vec![0.0_f64; 256];
+        for k in 0..256 {
+            nested_qmap[k] = (k as f64) / 100.0;
+        }
+        let u8_absmax = vec![50.0, 125.0, 75.0, 200.0];
+        let state_json = br#"{"quant_type":"nf4","blocksize":16,"shape":[4,16],"dtype":"float16"}"#;
+        let state_u8: Vec<f64> = state_json.iter().map(|&b| b as f64).collect();
+
+        // 2. Build an LLM.int8() row-wise SCB quantized lora_B (shape 12 x 4)
+        let rows_b = 12;
+        let cols_b = 4;
+        let mut i8_b_vals = vec![0.0_f64; rows_b * cols_b];
+        let mut scb_vals = vec![0.0_f64; rows_b];
+        let mut expected_b = vec![0.0_f64; rows_b * cols_b];
+        for r in 0..rows_b {
+            let row_scb = 0.4 + 0.1 * (r as f64);
+            scb_vals[r] = row_scb;
+            for c in 0..cols_b {
+                let q = ((r as i32 * 11 - c as i32 * 23) % 100) as f64;
+                i8_b_vals[r * cols_b + c] = q;
+                expected_b[r * cols_b + c] = q * (row_scb / 127.0);
+            }
+        }
+
+        let mut map = BTreeMap::new();
+        map.insert(
+            "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            Tensor2D {
+                rows: packed_u8.len(),
+                cols: 1,
+                dtype: DType::U8,
+                data: packed_u8,
+            },
+        );
+        map.insert(
+            "model.layers.0.self_attn.q_proj.lora_A.weight.absmax".to_string(),
+            Tensor2D {
+                rows: 4,
+                cols: 1,
+                dtype: DType::U8,
+                data: u8_absmax,
+            },
+        );
+        map.insert(
+            "model.layers.0.self_attn.q_proj.lora_A.weight.nested_absmax".to_string(),
+            Tensor2D {
+                rows: 1,
+                cols: 1,
+                dtype: DType::F32,
+                data: vec![1.0],
+            },
+        );
+        map.insert(
+            "model.layers.0.self_attn.q_proj.lora_A.weight.nested_quant_map".to_string(),
+            Tensor2D {
+                rows: 256,
+                cols: 1,
+                dtype: DType::F32,
+                data: nested_qmap,
+            },
+        );
+        map.insert(
+            "model.layers.0.self_attn.q_proj.lora_A.weight.quant_state.bitsandbytes__nf4".to_string(),
+            Tensor2D {
+                rows: state_u8.len(),
+                cols: 1,
+                dtype: DType::U8,
+                data: state_u8,
+            },
+        );
+        map.insert(
+            "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            Tensor2D {
+                rows: rows_b,
+                cols: cols_b,
+                dtype: DType::I8,
+                data: i8_b_vals,
+            },
+        );
+        map.insert(
+            "model.layers.0.self_attn.q_proj.lora_B.SCB".to_string(),
+            Tensor2D {
+                rows: rows_b,
+                cols: 1,
+                dtype: DType::F32,
+                data: scb_vals,
+            },
+        );
+
+        // Roundtrip through real binary .safetensors file!
+        let tmp_path = std::env::temp_dir().join("test_bnb_nf4_i8_lora.safetensors");
+        write_safetensors(&tmp_path, &map).expect("write quantized safetensors");
+        let reloaded = read_safetensors(&tmp_path).expect("read quantized safetensors");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let layers = extract_lora_layers(&reloaded).expect("dequantize and extract LoRA layers");
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].rank(), 4);
+        assert_eq!(layers[0].d_in(), 16);
+        assert_eq!(layers[0].d_out(), 12);
+
+        for (got, exp) in layers[0].a.data.iter().zip(expected_a.iter()) {
+            assert!((got - exp).abs() < 1e-6, "NF4 dequant mismatch: {} vs {}", got, exp);
+        }
+        for (got, exp) in layers[0].b.data.iter().zip(expected_b.iter()) {
+            assert!((got - exp).abs() < 1e-6, "I8 SCB dequant mismatch: {} vs {}", got, exp);
+        }
+
+        // Healthy quantized metadata should pass integrity audit with zero issues
+        let healthy_rep = audit_adapter_integrity(
+            &layers,
+            &reloaded,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(healthy_rep.status, "HEALTHY", "unexpected issues: {:?}", healthy_rep.issues);
+
+        // Corrupting SCB with 0.0 and quant_map with wrong length triggers LS023 metadata issues
+        let mut corrupt_map = reloaded.clone();
+        corrupt_map
+            .get_mut("model.layers.0.self_attn.q_proj.lora_B.SCB")
+            .unwrap()
+            .data[0] = 0.0;
+        corrupt_map.insert(
+            "model.layers.0.self_attn.q_proj.lora_A.weight.quant_map".to_string(),
+            Tensor2D {
+                rows: 8,
+                cols: 1,
+                dtype: DType::F32,
+                data: vec![0.1; 8],
+            },
+        );
+        let corrupt_rep = audit_adapter_integrity(
+            &layers,
+            &corrupt_map,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(corrupt_rep
+            .issues
+            .iter()
+            .any(|i| i.code == "QUANT_ZERO_OR_NAN_ABSMAX"));
+        assert!(corrupt_rep
+            .issues
+            .iter()
+            .any(|i| i.code == "QUANT_CORRUPT_METADATA"));
+    }
+
+    #[test]
+    fn test_svd_truncation_error_bounds_weyl_certificate_and_error_bound_compression_ls024() {
+        use crate::audit::{audit_truncation_error_bounds, compute_truncation_bounds};
+        use crate::linalg::{qr_core_svd_truncated, svd_to_lora_factors};
+        use crate::quant::{compute_combined_truncation_quant_certificate, QuantScheme};
+
+        // Construct a rank-6 layer with controlled singular spectrum [10.0, 5.0, 2.0, 1.995, 0.5, 0.1]
+        // Note the nearly-degenerate singular doublet at k=3: sigma_3 = 2.0, sigma_4 = 1.995 (local gap = 0.25%)!
+        let mut rng = Rng64::new(13004);
+        let d_out = 48;
+        let d_in = 48;
+        let r = 6;
+        let base_b = random_matrix(d_out, r, &mut rng, DType::F32);
+        let base_a = random_matrix(r, d_in, &mut rng, DType::F32);
+        let mut svd = qr_core_svd_truncated(&base_b, &base_a, r);
+        svd.sigma = vec![10.0, 5.0, 2.0, 1.995, 0.5, 0.1];
+        let (b, a) = svd_to_lora_factors(&svd, r, DType::F32);
+        let layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.o_proj".to_string(),
+            a_key: "model.layers.0.self_attn.o_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.o_proj.lora_B.weight".to_string(),
+            a,
+            b,
+        };
+
+        // 1. Verify exact Eckart-Young spectral/Frobenius, Mirsky nuclear, and Wedin gap at k=3
+        let bounds_k3 = compute_truncation_bounds(&svd.sigma, 3);
+        let expected_frob_err = (1.995_f64.powi(2) + 0.5_f64.powi(2) + 0.1_f64.powi(2)).sqrt();
+        let expected_nuc_err = 1.995 + 0.5 + 0.1;
+        assert!((bounds_k3.spectral_error - 1.995).abs() < 1e-12);
+        assert!((bounds_k3.relative_spectral_error - 0.1995).abs() < 1e-12);
+        assert!((bounds_k3.frobenius_error - expected_frob_err).abs() < 1e-12);
+        assert!((bounds_k3.nuclear_error - expected_nuc_err).abs() < 1e-12);
+        assert!((bounds_k3.wedin_spectral_gap - (0.005 / 10.0)).abs() < 1e-12);
+
+        // 2. Verify Weyl lower bound & triangle inequality sandwich certificate under NF4 quantization
+        let cert =
+            compute_combined_truncation_quant_certificate(&layer, 1.0, 3, QuantScheme::Nf4, 64);
+        assert!(
+            cert.exact_total_spectral_error + 1e-12 >= cert.weyl_spectral_lower_bound,
+            "Weyl lower bound violated: exact={} < weyl={}",
+            cert.exact_total_spectral_error,
+            cert.weyl_spectral_lower_bound
+        );
+        assert!(
+            cert.exact_total_spectral_error <= cert.triangle_spectral_upper_bound + 1e-12,
+            "Triangle spectral upper bound violated: exact={} > upper={}",
+            cert.exact_total_spectral_error,
+            cert.triangle_spectral_upper_bound
+        );
+        assert!(
+            cert.exact_total_frobenius_error <= cert.triangle_frobenius_upper_bound + 1e-12,
+            "Triangle Frobenius upper bound violated: exact={} > upper={}",
+            cert.exact_total_frobenius_error,
+            cert.triangle_frobenius_upper_bound
+        );
+
+        // 3. Verify CompressionPolicy::ErrorBound selects smallest rank meeting spectral <= 0.06 (sigma_{k+1}/10 <= 0.06 -> k=4 where sigma_5=0.5 -> 0.05)
+        let (_comp_layer, metric) = compress_layer(
+            &layer,
+            CompressionPolicy::ErrorBound {
+                max_frobenius_error: Some(0.06),
+                max_spectral_error: Some(0.06),
+                min_rank: 1,
+                max_rank: 6,
+            },
+        );
+        assert_eq!(metric.compressed_rank, 4);
+        assert!(metric.relative_spectral_error <= 0.06);
+        assert!(metric.relative_frobenius_error <= 0.06);
+        assert!(metric.relative_nuclear_error > 0.0);
+
+        // 4. Verify LS024 audit issues at k=3 with max_error_tol=0.10 (triggers both SVD_TRUNCATION_BOUND_EXCEEDED and SVD_DEGENERATE_SPECTRAL_GAP)
+        let summary = audit_adapter(std::slice::from_ref(&layer));
+        let trunc_issues = audit_truncation_error_bounds(&summary.layers, Some(3), Some(0.10));
+        assert!(trunc_issues
+            .iter()
+            .any(|i| i.code == "SVD_TRUNCATION_BOUND_EXCEEDED"));
+        assert!(trunc_issues
+            .iter()
+            .any(|i| i.code == "SVD_DEGENERATE_SPECTRAL_GAP"));
+
+        let tensors = layers_to_tensor_map(std::slice::from_ref(&layer));
+        let mut integrity = audit_adapter_integrity(
+            std::slice::from_ref(&layer),
+            &tensors,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        integrity.issues.extend(trunc_issues);
+        integrity.status = "ISSUES_DETECTED";
+
+        let sarif =
+            crate::sarif::build_audit_sarif(Some(&summary), Some(&integrity), "trunc.safetensors", "1.3.0");
+        assert!(sarif.contains("\"ruleId\": \"LS024\""));
     }
 }

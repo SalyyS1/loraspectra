@@ -226,6 +226,16 @@ pub fn generate_model_card(
         summary.compressible_byte_ratio * 100.0,
         format_bytes_human(summary.total_optimal_99_bytes)
     ));
+    if let Some(ref qs) = integrity.quant_summary {
+        md.push_str(&format!(
+            "| **Quantization Reconstruction (`{}` / block `{}`)** | Mean SQNR **{:.1} dB** (mean rel Frobenius error `{:.2}%`, max `{:.2}%`) |\n",
+            qs.scheme.as_str(),
+            qs.block_size,
+            qs.mean_sqnr_db,
+            qs.mean_relative_frobenius_error * 100.0,
+            qs.max_relative_frobenius_error * 100.0
+        ));
+    }
     md.push_str(&format!(
         "| **DoRA / Alpha & SFT Health** | {} |\n\n",
         escape_md_cell(&health_summary)

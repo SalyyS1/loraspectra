@@ -3,12 +3,14 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Supported floating-point storage formats in HuggingFace `.safetensors` files.
+/// Supported floating-point and low-bit quantized storage formats in HuggingFace `.safetensors` files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DType {
     F32,
     F16,
     BF16,
+    I8,
+    U8,
 }
 
 impl DType {
@@ -17,6 +19,8 @@ impl DType {
             DType::F32 => "F32",
             DType::F16 => "F16",
             DType::BF16 => "BF16",
+            DType::I8 => "I8",
+            DType::U8 => "U8",
         }
     }
 
@@ -24,6 +28,7 @@ impl DType {
         match self {
             DType::F32 => 4,
             DType::F16 | DType::BF16 => 2,
+            DType::I8 | DType::U8 => 1,
         }
     }
 
@@ -32,6 +37,8 @@ impl DType {
             "F32" | "FP32" | "FLOAT32" => Ok(DType::F32),
             "F16" | "FP16" | "FLOAT16" => Ok(DType::F16),
             "BF16" | "BFLOAT16" => Ok(DType::BF16),
+            "I8" | "INT8" => Ok(DType::I8),
+            "U8" | "UINT8" => Ok(DType::U8),
             other => Err(format!("Unsupported safetensors dtype: {}", other)),
         }
     }
@@ -435,7 +442,11 @@ pub fn read_safetensors(path: &Path) -> Result<BTreeMap<String, Tensor2D>, Strin
         let (rows, cols) = if entry.shape.len() == 2 {
             (entry.shape[0], entry.shape[1])
         } else if (entry.shape.is_empty() || (entry.shape.len() == 1 && entry.shape[0] == 1))
-            && name.ends_with(".alpha")
+            && (name.ends_with(".alpha")
+                || name.ends_with(".nested_offset")
+                || name.ends_with(".offset")
+                || name.ends_with(".weight_scale")
+                || name.ends_with(".scale"))
         {
             (1, 1)
         } else if entry.shape.len() == 1
@@ -443,7 +454,16 @@ pub fn read_safetensors(path: &Path) -> Result<BTreeMap<String, Tensor2D>, Strin
                 || name.ends_with(".lora_magnitude_vector.weight")
                 || name.ends_with(".lora_magnitude_vector.default.weight")
                 || name.ends_with(".dora_scale")
-                || name.ends_with(".magnitude"))
+                || name.ends_with(".magnitude")
+                || name.ends_with(".absmax")
+                || name.ends_with(".quant_map")
+                || name.ends_with(".nested_absmax")
+                || name.ends_with(".nested_quant_map")
+                || name.ends_with(".SCB")
+                || name.ends_with(".weight_scale")
+                || name.ends_with(".scale")
+                || name.contains(".quant_state.bitsandbytes__")
+                || (entry.dtype == DType::U8 && name.ends_with(".weight")))
         {
             (entry.shape[0], 1)
         } else {
@@ -475,6 +495,16 @@ pub fn read_safetensors(path: &Path) -> Result<BTreeMap<String, Tensor2D>, Strin
                     data.push(bf16_to_f32(bits) as f64);
                 }
             }
+            DType::I8 => {
+                for &b in slice {
+                    data.push((b as i8) as f64);
+                }
+            }
+            DType::U8 => {
+                for &b in slice {
+                    data.push(b as f64);
+                }
+            }
         }
         out.insert(
             name,
@@ -502,7 +532,10 @@ pub fn write_safetensors(path: &Path, tensors: &BTreeMap<String, Tensor2D>) -> i
         let start = current_offset;
         let end = start + byte_len;
         current_offset = end;
-        if name.ends_with(".alpha") && tensor.rows == 1 && tensor.cols == 1 {
+        if (name.ends_with(".alpha") || name.ends_with(".nested_offset") || name.ends_with(".offset"))
+            && tensor.rows == 1
+            && tensor.cols == 1
+        {
             header_parts.push(format!(
                 "\"{}\":{{\"dtype\":\"{}\",\"shape\":[],\"data_offsets\":[{},{}]}}",
                 name,
@@ -514,7 +547,15 @@ pub fn write_safetensors(path: &Path, tensors: &BTreeMap<String, Tensor2D>) -> i
             || name.ends_with(".lora_magnitude_vector.weight")
             || name.ends_with(".lora_magnitude_vector.default.weight")
             || name.ends_with(".dora_scale")
-            || name.ends_with(".magnitude"))
+            || name.ends_with(".magnitude")
+            || name.ends_with(".absmax")
+            || name.ends_with(".quant_map")
+            || name.ends_with(".nested_absmax")
+            || name.ends_with(".nested_quant_map")
+            || name.ends_with(".SCB")
+            || name.ends_with(".weight_scale")
+            || name.ends_with(".scale")
+            || name.contains(".quant_state.bitsandbytes__"))
             && tensor.cols == 1
         {
             header_parts.push(format!(
@@ -568,6 +609,18 @@ pub fn write_safetensors(path: &Path, tensors: &BTreeMap<String, Tensor2D>) -> i
                     buf.extend_from_slice(&f32_to_bf16(v as f32).to_le_bytes());
                 }
             }
+            DType::I8 => {
+                for &v in &tensor.data {
+                    let b = (v.round().clamp(-128.0, 127.0) as i8) as u8;
+                    buf.push(b);
+                }
+            }
+            DType::U8 => {
+                for &v in &tensor.data {
+                    let b = v.round().clamp(0.0, 255.0) as u8;
+                    buf.push(b);
+                }
+            }
         }
     }
 
@@ -602,7 +655,8 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
                 .strip_suffix(".dora_layer")
                 .or_else(|| raw_base.strip_suffix(".lora_layer"))
                 .unwrap_or(raw_base);
-            a_map.insert(base.to_string(), (key.clone(), tensor.clone()));
+            let decoded = crate::quant::try_dequantize_lora_tensor(key, tensor, tensors)?;
+            a_map.insert(base.to_string(), (key.clone(), decoded));
         } else if let Some(raw_base) = key
             .strip_suffix(".lora_B.weight")
             .or_else(|| key.strip_suffix(".lora_B.default.weight"))
@@ -619,7 +673,8 @@ pub fn extract_lora_layers(tensors: &BTreeMap<String, Tensor2D>) -> Result<Vec<L
                 .strip_suffix(".dora_layer")
                 .or_else(|| raw_base.strip_suffix(".lora_layer"))
                 .unwrap_or(raw_base);
-            b_map.insert(base.to_string(), (key.clone(), tensor.clone()));
+            let decoded = crate::quant::try_dequantize_lora_tensor(key, tensor, tensors)?;
+            b_map.insert(base.to_string(), (key.clone(), decoded));
         }
     }
 

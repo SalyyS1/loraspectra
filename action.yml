@@ -1,5 +1,5 @@
 name: 'LoRA Adapter Spectral Audit'
-description: 'Fast spectral SVD audit, rank collapse checks, and silent SFT bug diagnostics with OASIS SARIF v2.1.0 output for .safetensors LoRA adapters'
+description: 'Fast spectral SVD audit, NF4/FP4/INT8 quantization & truncation bounds, and silent SFT bug diagnostics with SARIF v2.1.0 output'
 author: 'SalyyS1'
 branding:
   icon: 'activity'
