@@ -178,6 +178,34 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         full_description: "Truncating the LoRA singular value spectrum at the target or denoised rank exceeds prescribed Eckart-Young spectral/Frobenius/nuclear error bounds or bisects a nearly-degenerate singular doublet with near-zero Wedin gap.",
         default_level: "warning",
     },
+    SarifRuleDefinition {
+        id: "LS025",
+        name: "VeraScalingLayerFailure",
+        short_description: "VeRA scaling vector pair has non-finite, all-zero, or dead entries",
+        full_description: "A VeRA (Vector-based Random Matrix Adaptation) layer's lambda_b or lambda_d scaling vector contains NaN/Inf entries, or is effectively all-zero across rank or output channels, making the layer's weight update dead during inference.",
+        default_level: "error",
+    },
+    SarifRuleDefinition {
+        id: "LS026",
+        name: "VeraScalingDispersionAnomaly",
+        short_description: "VeRA scaling vectors exhibit extreme output channel or rank dispersion",
+        full_description: "VeRA lambda_b or lambda_d vectors contain negative entries that flip adapter update signs, or display extreme coefficient of variation (>2.0) indicating heavily imbalanced scaling across output channels or rank dimensions.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS027",
+        name: "SubspaceTrainingStagnation",
+        short_description: "LoRA singular subspace has not rotated between checkpoints (stagnant training)",
+        full_description: "The mean principal angle between right/left singular vector subspaces across two checkpoints is below 5 degrees, indicating gradient flow has stalled and adapter weights are not updating meaningfully.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS028",
+        name: "CatastrophicSubspaceDrift",
+        short_description: "LoRA singular subspace has rotated catastrophically between checkpoints",
+        full_description: "The mean principal angle between right/left singular vector subspaces across two checkpoints exceeds 60 degrees, indicating the adapter's learned low-rank subspace has been completely overwritten, risking catastrophic forgetting of earlier fine-tuning signal.",
+        default_level: "error",
+    },
 ];
 
 fn escape_json(s: &str) -> String {

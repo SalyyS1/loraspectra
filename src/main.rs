@@ -12,7 +12,7 @@ use loraspectra::compress::{
     compress_adapter_with_options, extract_lora_from_dense_models, parse_byte_budget, BudgetTarget,
     CompressionPolicy,
 };
-use loraspectra::diff::{diff_adapters_full, render_diff_json, render_diff_table};
+use loraspectra::diff::{diff_adapters_full, render_diff_json, render_diff_table, analyze_subspace_drift, render_subspace_drift_json, render_subspace_drift_table};
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
@@ -32,10 +32,11 @@ use loraspectra::safetensors::{
     PeftAdapterConfig, Tensor2D,
 };
 use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif};
+use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table};
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.3.0 - Spectral SVD Auditor, Quantization Reconstruction & Truncation Bound Analyzer, Compressor & Merger (.safetensors)
+        "loraspectra v1.4.0 - Spectral SVD Auditor, VeRA Fingerprinter, Subspace Drift Detector, Compressor & Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -50,7 +51,9 @@ USAGE:
   loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.05 | --max-bytes 16M | --max-frobenius-error TOL | --max-spectral-error TOL] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
   loraspectra merge-check <in_1> <in_2> [in_3 ...] [--weights W1:W2[:W3...]] [--json] [--sarif <output.sarif>] [--fail-on-conflict]
-  loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]"
+  loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]
+  loraspectra vera <adapter_or_hf_uri> [--json]
+  loraspectra subspace-drift <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]"
     );
 }
 
@@ -1531,6 +1534,103 @@ fn main() {
                 output_path,
                 bytes
             );
+        }
+        "vera" => {
+            // VeRA scaling vector fingerprinting
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra vera <adapter_or_hf_uri> [--json]");
+                process::exit(1);
+            }
+            let input_path = resolve_input_or_exit(&args[2]);
+            let use_json = args.iter().any(|a| a == "--json");
+            let tensor_map = read_safetensors(&input_path).unwrap_or_else(|e| {
+                eprintln!("Error reading {}: {}", args[2], e);
+                process::exit(1);
+            });
+            let report = audit_vera_adapter(&tensor_map);
+            if report.total_layers == 0 {
+                eprintln!("No VeRA scaling vectors (vera_lambda_b/vera_lambda_d or scaling_b/scaling_d) found in {}", args[2]);
+                process::exit(1);
+            }
+            if use_json {
+                println!("{}", render_vera_json(&report));
+            } else {
+                print!("{}", render_vera_table(&report));
+            }
+            if report.non_finite_layers > 0 || report.dead_rank_layers > 0 || report.dead_output_layers > 0 {
+                process::exit(2);
+            }
+        }
+        "subspace-drift" => {
+            // Subspace drift analysis between two LoRA checkpoints
+            if args.len() < 4 {
+                eprintln!("Usage: loraspectra subspace-drift <adapter_a> <adapter_b> [--config-a <cfg.json>] [--config-b <cfg.json>] [--json]");
+                process::exit(1);
+            }
+            let path_a = resolve_input_or_exit(&args[2]);
+            let path_b = resolve_input_or_exit(&args[3]);
+            let use_json = args.iter().any(|a| a == "--json");
+
+            let config_a_path = args.windows(2).find(|w| w[0] == "--config-a").map(|w| w[1].clone())
+                .or_else(|| resolve_companion_config_path(&args[2], &path_a).map(|p| p.to_string_lossy().to_string()));
+            let config_b_path = args.windows(2).find(|w| w[0] == "--config-b").map(|w| w[1].clone())
+                .or_else(|| resolve_companion_config_path(&args[3], &path_b).map(|p| p.to_string_lossy().to_string()));
+
+            let map_a = read_safetensors(&path_a).unwrap_or_else(|e| {
+                eprintln!("Error reading {}: {}", args[2], e);
+                process::exit(1);
+            });
+            let map_b = read_safetensors(&path_b).unwrap_or_else(|e| {
+                eprintln!("Error reading {}: {}", args[3], e);
+                process::exit(1);
+            });
+
+            let layers_a = extract_lora_layers(&map_a).unwrap_or_else(|e| {
+                eprintln!("Error extracting LoRA layers from {}: {}", args[2], e);
+                process::exit(1);
+            });
+            let layers_b = extract_lora_layers(&map_b).unwrap_or_else(|e| {
+                eprintln!("Error extracting LoRA layers from {}: {}", args[3], e);
+                process::exit(1);
+            });
+
+            let alphas_a = extract_lora_alphas(&map_a);
+            let alphas_b = extract_lora_alphas(&map_b);
+
+            let cfg_a = config_a_path.as_deref().and_then(|p| read_peft_adapter_config(Path::new(p)).ok());
+            let cfg_b = config_b_path.as_deref().and_then(|p| read_peft_adapter_config(Path::new(p)).ok());
+
+            let mut full_alphas_a = alphas_a;
+            if let Some(cfg) = &cfg_a {
+                if let Some(a) = cfg.lora_alpha {
+                    for layer in &layers_a {
+                        full_alphas_a.entry(layer.base_name.clone()).or_insert(a);
+                    }
+                }
+            }
+            let mut full_alphas_b = alphas_b;
+            if let Some(cfg) = &cfg_b {
+                if let Some(a) = cfg.lora_alpha {
+                    for layer in &layers_b {
+                        full_alphas_b.entry(layer.base_name.clone()).or_insert(a);
+                    }
+                }
+            }
+
+            let summary = analyze_subspace_drift(&layers_a, &full_alphas_a, &layers_b, &full_alphas_b);
+            if summary.total_shared_layers == 0 {
+                eprintln!("No shared LoRA layers found between the two adapters.");
+                process::exit(1);
+            }
+
+            if use_json {
+                println!("{}", render_subspace_drift_json(&summary));
+            } else {
+                print!("{}", render_subspace_drift_table(&summary));
+            }
+            if summary.catastrophic_drift_layers > 0 {
+                process::exit(2);
+            }
         }
         _ => {
             print_usage();

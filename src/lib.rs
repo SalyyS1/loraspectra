@@ -9,6 +9,7 @@ pub mod quant;
 pub mod remote;
 pub mod safetensors;
 pub mod sarif;
+pub mod vera;
 
 /// Deterministic SplitMix64 pseudo-random generator for reproducible synthetic LoRA benchmarks and tests.
 #[derive(Debug, Clone)]
@@ -3305,7 +3306,212 @@ mod tests {
         integrity.status = "ISSUES_DETECTED";
 
         let sarif =
-            crate::sarif::build_audit_sarif(Some(&summary), Some(&integrity), "trunc.safetensors", "1.3.0");
+            crate::sarif::build_audit_sarif(Some(&summary), Some(&integrity), "trunc.safetensors", "1.4.0");
         assert!(sarif.contains("\"ruleId\": \"LS024\""));
+    }
+
+    // ---- Subspace Drift Tests ----------------------------------------------------------------
+
+    #[test]
+    fn test_subspace_drift_stagnant_detection() {
+        use crate::diff::{compute_layer_subspace_drift, SubspaceDriftClass};
+
+        let mut rng = Rng64::new(5001);
+        let d = 64;
+        let r = 8;
+
+        // Two identical layers -> zero principal angle -> STAGNANT
+        let a = random_matrix(r, d, &mut rng, DType::F32);
+        let b = random_matrix(d, r, &mut rng, DType::F32);
+
+        let layer_a = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: a.clone(),
+            b: b.clone(),
+        };
+        let layer_b = layer_a.clone();
+
+        let report = compute_layer_subspace_drift(&layer_a, 1.0, &layer_b, 1.0).unwrap();
+        assert_eq!(report.classification, SubspaceDriftClass::Stagnant);
+        assert!(report.mean_angle_deg < 1.0, "Identical layers should have near-zero angle, got {}", report.mean_angle_deg);
+        assert!(report.issues.contains(&"LS027"));
+        assert!(!report.issues.contains(&"LS028"));
+    }
+
+    #[test]
+    fn test_subspace_drift_healthy_detection() {
+        use crate::diff::{compute_layer_subspace_drift, SubspaceDriftClass};
+
+        let mut rng_a = Rng64::new(5002);
+        let mut rng_b = Rng64::new(5003);
+        let d = 128;
+        let r = 8;
+
+        // Two random independent adapters -> substantial principal angles -> likely HEALTHY or HEAVY
+        let layer_a = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng_a, DType::F32),
+            b: random_matrix(d, r, &mut rng_a, DType::F32),
+        };
+        let layer_b = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(r, d, &mut rng_b, DType::F32),
+            b: random_matrix(d, r, &mut rng_b, DType::F32),
+        };
+
+        let report = compute_layer_subspace_drift(&layer_a, 1.0, &layer_b, 1.0).unwrap();
+        // For random d=128, r=8: expected principal angles ~arcsin(sqrt(r/d)) ~ arcsin(0.25) ~ 14.5 deg
+        // Could be healthy or heavy depending on seed; just verify it's not stagnant or zero
+        assert!(report.mean_angle_deg > 2.0, "Random adapters should have non-zero principal angles, got {}", report.mean_angle_deg);
+        assert_eq!(report.rank_a, r);
+        assert_eq!(report.rank_b, r);
+    }
+
+    #[test]
+    fn test_subspace_drift_catastrophic_detection() {
+        use crate::diff::{compute_layer_subspace_drift, SubspaceDriftClass};
+        use crate::linalg::thin_qr_columns;
+
+        let mut rng = Rng64::new(5004);
+        let d = 64;
+        let r = 4;
+
+        // Build two completely orthogonal rank-4 subspaces using QR
+        let raw = random_matrix(d, 2 * r, &mut rng, DType::F32);
+        let (all_cols, _) = thin_qr_columns(&raw);
+
+        // Adapter A uses columns 0..r
+        let mut b_a = Tensor2D::zeros(d, r, DType::F32);
+        let mut a_a = Tensor2D::zeros(r, d, DType::F32);
+        for j in 0..r {
+            for row in 0..d {
+                b_a.set(row, j, all_cols[j][row]);
+                a_a.set(j, row, all_cols[j][row]);
+            }
+        }
+
+        // Adapter B uses columns r..2r (orthogonal to A's space)
+        let mut b_b = Tensor2D::zeros(d, r, DType::F32);
+        let mut a_b = Tensor2D::zeros(r, d, DType::F32);
+        for j in 0..r {
+            for row in 0..d {
+                b_b.set(row, j, all_cols[r + j][row]);
+                a_b.set(j, row, all_cols[r + j][row]);
+            }
+        }
+
+        let layer_a = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: a_a, b: b_a,
+        };
+        let layer_b = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: a_b, b: b_b,
+        };
+
+        let report = compute_layer_subspace_drift(&layer_a, 1.0, &layer_b, 1.0).unwrap();
+        // Orthogonal subspaces -> principal angles = 90 deg -> CATASTROPHIC_DRIFT
+        assert_eq!(report.classification, SubspaceDriftClass::CatastrophicDrift,
+            "Orthogonal subspaces should trigger catastrophic drift, got {} deg", report.mean_angle_deg);
+        assert!(report.mean_angle_deg > 60.0, "Expected >60 deg, got {}", report.mean_angle_deg);
+        assert!(report.issues.contains(&"LS028"));
+    }
+
+    #[test]
+    fn test_subspace_drift_dimension_mismatch_returns_none() {
+        use crate::diff::compute_layer_subspace_drift;
+
+        let mut rng = Rng64::new(5005);
+        let layer_a = LoraLayer {
+            base_name: "model.q_proj".to_string(),
+            a_key: "model.q_proj.lora_A.weight".to_string(),
+            b_key: "model.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, 32, &mut rng, DType::F32),
+            b: random_matrix(32, 4, &mut rng, DType::F32),
+        };
+        let layer_b = LoraLayer {
+            base_name: "model.q_proj".to_string(),
+            a_key: "model.q_proj.lora_A.weight".to_string(),
+            b_key: "model.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, 64, &mut rng, DType::F32), // different d_in
+            b: random_matrix(64, 4, &mut rng, DType::F32),
+        };
+        assert!(compute_layer_subspace_drift(&layer_a, 1.0, &layer_b, 1.0).is_none());
+    }
+
+    #[test]
+    fn test_subspace_drift_summary_aggregation() {
+        use crate::diff::{analyze_subspace_drift, SubspaceDriftClass};
+        use std::collections::BTreeMap;
+
+        let mut rng1 = Rng64::new(5006);
+        let mut rng2 = Rng64::new(5007);
+        let d = 64;
+        let r = 4;
+
+        let make_layer = |name: &str, rng: &mut Rng64| LoraLayer {
+            base_name: name.to_string(),
+            a_key: format!("{}.lora_A.weight", name),
+            b_key: format!("{}.lora_B.weight", name),
+            a: random_matrix(r, d, rng, DType::F32),
+            b: random_matrix(d, r, rng, DType::F32),
+        };
+
+        // Adapter A: two layers
+        let layers_a = vec![
+            make_layer("model.layers.0.q_proj", &mut rng1),
+            make_layer("model.layers.1.q_proj", &mut rng1),
+        ];
+        // Adapter B: same keys but different weights
+        let layers_b = vec![
+            make_layer("model.layers.0.q_proj", &mut rng2),
+            make_layer("model.layers.1.q_proj", &mut rng2),
+        ];
+
+        let alphas: BTreeMap<String, f64> = BTreeMap::new();
+        let summary = analyze_subspace_drift(&layers_a, &alphas, &layers_b, &alphas);
+        assert_eq!(summary.total_shared_layers, 2);
+        assert_eq!(summary.stagnant_layers + summary.healthy_layers + summary.heavy_drift_layers + summary.catastrophic_drift_layers, 2);
+    }
+
+    #[test]
+    fn test_subspace_drift_json_render() {
+        use crate::diff::{analyze_subspace_drift, render_subspace_drift_json};
+        use std::collections::BTreeMap;
+
+        let mut rng1 = Rng64::new(5008);
+        let mut rng2 = Rng64::new(5009);
+
+        let layers_a = vec![LoraLayer {
+            base_name: "model.q_proj".to_string(),
+            a_key: "model.q_proj.lora_A.weight".to_string(),
+            b_key: "model.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, 32, &mut rng1, DType::F32),
+            b: random_matrix(32, 4, &mut rng1, DType::F32),
+        }];
+        let layers_b = vec![LoraLayer {
+            base_name: "model.q_proj".to_string(),
+            a_key: "model.q_proj.lora_A.weight".to_string(),
+            b_key: "model.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, 32, &mut rng2, DType::F32),
+            b: random_matrix(32, 4, &mut rng2, DType::F32),
+        }];
+
+        let alphas: BTreeMap<String, f64> = BTreeMap::new();
+        let summary = analyze_subspace_drift(&layers_a, &alphas, &layers_b, &alphas);
+        let json = render_subspace_drift_json(&summary);
+        assert!(json.contains("\"total_shared_layers\""));
+        assert!(json.contains("\"mean_angle_deg\""));
+        assert!(json.contains("\"classification\""));
     }
 }

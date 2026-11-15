@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::audit::pearson_correlation;
-use crate::linalg::{dot_slice, matmul, thin_qr_columns, transpose};
+use crate::linalg::{dot_slice, jacobi_svd, matmul, thin_qr_columns, transpose};
 use crate::safetensors::{
     resolve_layer_scaling_params, subtract_pissa_residual_layer, DType, LoraLayer,
     PeftAdapterConfig, Tensor2D,
@@ -713,5 +713,388 @@ pub fn render_diff_table(summary: &AdapterDiffSummary) -> String {
         ));
     }
 
+    out
+}
+
+// ---- Subspace Drift Analysis ----------------------------------------------------------------
+
+/// Classification of subspace rotation magnitude between two LoRA checkpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubspaceDriftClass {
+    /// Mean principal angle < 5 deg: subspace essentially unchanged (training stalled).
+    Stagnant,
+    /// Mean principal angle 5-30 deg: healthy gradient exploration.
+    Healthy,
+    /// Mean principal angle > 60 deg: catastrophic rotation, adapter overwritten.
+    CatastrophicDrift,
+    /// Mean principal angle 30-60 deg: heavy drift, possible destructive fine-tuning.
+    HeavyDrift,
+}
+
+impl SubspaceDriftClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SubspaceDriftClass::Stagnant => "STAGNANT",
+            SubspaceDriftClass::Healthy => "HEALTHY",
+            SubspaceDriftClass::HeavyDrift => "HEAVY_DRIFT",
+            SubspaceDriftClass::CatastrophicDrift => "CATASTROPHIC_DRIFT",
+        }
+    }
+}
+
+/// Per-layer subspace drift result.
+#[derive(Debug, Clone)]
+pub struct LayerSubspaceDrift {
+    pub base_name: String,
+    /// Rank of checkpoint A.
+    pub rank_a: usize,
+    /// Rank of checkpoint B.
+    pub rank_b: usize,
+    /// Number of principal angle pairs computed (= min(rank_a, rank_b)).
+    pub k: usize,
+    /// Principal angles between right singular spaces V_A and V_B (input subspace), radians.
+    pub principal_angles_input: Vec<f64>,
+    /// Mean principal angle (input), degrees.
+    pub mean_angle_input_deg: f64,
+    /// Principal angles between left singular spaces U_A and U_B (output subspace), radians.
+    pub principal_angles_output: Vec<f64>,
+    /// Mean principal angle (output), degrees.
+    pub mean_angle_output_deg: f64,
+    /// Average of input and output mean angles, degrees.
+    pub mean_angle_deg: f64,
+    /// Frobenius norm of checkpoint A's effective update (||s_A * B_A * A_A||_F).
+    pub frob_a: f64,
+    /// Frobenius norm of checkpoint B's effective update.
+    pub frob_b: f64,
+    /// Relative Frobenius drift: |frob_b - frob_a| / max(frob_a, 1e-12).
+    pub relative_frob_drift: f64,
+    /// Drift classification.
+    pub classification: SubspaceDriftClass,
+    /// SARIF rules triggered.
+    pub issues: Vec<&'static str>,
+}
+
+/// Summary of subspace drift across all shared layers between two checkpoints.
+#[derive(Debug, Clone)]
+pub struct AdapterSubspaceDriftSummary {
+    pub total_shared_layers: usize,
+    pub stagnant_layers: usize,
+    pub healthy_layers: usize,
+    pub heavy_drift_layers: usize,
+    pub catastrophic_drift_layers: usize,
+    pub mean_angle_deg: f64,
+    pub max_angle_deg: f64,
+    pub max_drift_layer: Option<String>,
+    pub layers: Vec<LayerSubspaceDrift>,
+}
+
+/// Compute principal angles between two column-orthonormal bases Q1 and Q2.
+/// Q1 has shape (d, k1) stored as k1 column-vectors (q_cols format from thin_qr_columns).
+/// Q2 has shape (d, k2).  Returns up to min(k1, k2) principal angles in radians.
+///
+/// Algorithm: sigma_i = SVD(Q1^T Q2) -- singular values are cosines of principal angles.
+fn principal_angles_from_q_cols(
+    q1_cols: &[Vec<f64>],
+    q2_cols: &[Vec<f64>],
+) -> Vec<f64> {
+    let k1 = q1_cols.len();
+    let k2 = q2_cols.len();
+    if k1 == 0 || k2 == 0 {
+        return Vec::new();
+    }
+    // Build cross-Gram matrix G = Q1^T Q2 of shape (k1, k2)
+    let mut g = Tensor2D::zeros(k1, k2, DType::F32);
+    for i in 0..k1 {
+        for j in 0..k2 {
+            let dot = dot_slice(&q1_cols[i], &q2_cols[j]);
+            g.set(i, j, dot);
+        }
+    }
+    // SVD of G: singular values are cosines of principal angles
+    let svd = jacobi_svd(&g);
+    let k = k1.min(k2);
+    svd.sigma[..k]
+        .iter()
+        .map(|&cos_theta| {
+            let cos = cos_theta.clamp(-1.0, 1.0).abs().min(1.0);
+            cos.acos()
+        })
+        .collect()
+}
+
+/// Compute subspace drift between two matching LoRA layers.
+pub fn compute_layer_subspace_drift(
+    layer_a: &LoraLayer,
+    scale_a: f64,
+    layer_b: &LoraLayer,
+    scale_b: f64,
+) -> Option<LayerSubspaceDrift> {
+    if layer_a.d_out() != layer_b.d_out() || layer_a.d_in() != layer_b.d_in() {
+        return None;
+    }
+    if layer_a.rank() == 0 || layer_b.rank() == 0 {
+        return None;
+    }
+
+    let d_out = layer_a.d_out();
+    let d_in = layer_a.d_in();
+    let r_a = layer_a.rank();
+    let r_b = layer_b.rank();
+
+    // Frobenius norms via Gram traces
+    let frob_a = {
+        let mut fn_sq = 0.0;
+        for i in 0..r_a {
+            for j in 0..r_a {
+                let ma_ij: f64 = {
+                    let ri = &layer_a.a.data[i * d_in..(i + 1) * d_in];
+                    let rj = &layer_a.a.data[j * d_in..(j + 1) * d_in];
+                    dot_slice(ri, rj)
+                };
+                let na_ij: f64 = (0..d_out)
+                    .map(|k| layer_a.b.data[k * r_a + i] * layer_a.b.data[k * r_a + j])
+                    .sum();
+                fn_sq += na_ij * ma_ij;
+            }
+        }
+        (scale_a * scale_a * fn_sq.max(0.0)).sqrt()
+    };
+
+    let frob_b = {
+        let mut fn_sq = 0.0;
+        for i in 0..r_b {
+            for j in 0..r_b {
+                let mb_ij: f64 = {
+                    let ri = &layer_b.a.data[i * d_in..(i + 1) * d_in];
+                    let rj = &layer_b.a.data[j * d_in..(j + 1) * d_in];
+                    dot_slice(ri, rj)
+                };
+                let nb_ij: f64 = (0..d_out)
+                    .map(|k| layer_b.b.data[k * r_b + i] * layer_b.b.data[k * r_b + j])
+                    .sum();
+                fn_sq += nb_ij * mb_ij;
+            }
+        }
+        (scale_b * scale_b * fn_sq.max(0.0)).sqrt()
+    };
+
+    let relative_frob_drift = (frob_b - frob_a).abs() / frob_a.max(1e-12);
+
+    // Build row-major A matrices so thin_qr_columns can orthonormalize columns of A^T
+    // A_a: (r_a, d_in) -> we want V_a = right singular space = QR of A_a^T (d_in x r_a)
+    let a_a_t = transpose(&layer_a.a);
+    let (v_a_cols, _) = thin_qr_columns(&a_a_t);
+
+    let a_b_t = transpose(&layer_b.a);
+    let (v_b_cols, _) = thin_qr_columns(&a_b_t);
+
+    // B matrices: (d_out, r) -> we want U = QR of B (d_out x r)
+    let (u_a_cols, _) = thin_qr_columns(&layer_a.b);
+    let (u_b_cols, _) = thin_qr_columns(&layer_b.b);
+
+    let angles_input = principal_angles_from_q_cols(&v_a_cols, &v_b_cols);
+    let angles_output = principal_angles_from_q_cols(&u_a_cols, &u_b_cols);
+
+    let k = r_a.min(r_b);
+
+    let mean_angle_input_deg = if angles_input.is_empty() {
+        0.0
+    } else {
+        angles_input.iter().map(|a| a.to_degrees()).sum::<f64>() / angles_input.len() as f64
+    };
+    let mean_angle_output_deg = if angles_output.is_empty() {
+        0.0
+    } else {
+        angles_output.iter().map(|a| a.to_degrees()).sum::<f64>() / angles_output.len() as f64
+    };
+    let mean_angle_deg = (mean_angle_input_deg + mean_angle_output_deg) / 2.0;
+
+    let classification = if mean_angle_deg < 5.0 {
+        SubspaceDriftClass::Stagnant
+    } else if mean_angle_deg < 30.0 {
+        SubspaceDriftClass::Healthy
+    } else if mean_angle_deg < 60.0 {
+        SubspaceDriftClass::HeavyDrift
+    } else {
+        SubspaceDriftClass::CatastrophicDrift
+    };
+
+    let mut issues: Vec<&'static str> = Vec::new();
+    if classification == SubspaceDriftClass::Stagnant {
+        issues.push("LS027");
+    }
+    if classification == SubspaceDriftClass::CatastrophicDrift {
+        issues.push("LS028");
+    }
+
+    Some(LayerSubspaceDrift {
+        base_name: layer_a.base_name.clone(),
+        rank_a: r_a,
+        rank_b: r_b,
+        k,
+        principal_angles_input: angles_input,
+        mean_angle_input_deg,
+        principal_angles_output: angles_output,
+        mean_angle_output_deg,
+        mean_angle_deg,
+        frob_a,
+        frob_b,
+        relative_frob_drift,
+        classification,
+        issues,
+    })
+}
+
+/// Compute subspace drift summary between two entire adapters.
+pub fn analyze_subspace_drift(
+    layers_a: &[LoraLayer],
+    alphas_a: &BTreeMap<String, f64>,
+    layers_b: &[LoraLayer],
+    alphas_b: &BTreeMap<String, f64>,
+) -> AdapterSubspaceDriftSummary {
+    let map_a: BTreeMap<&str, &LoraLayer> =
+        layers_a.iter().map(|l| (l.base_name.as_str(), l)).collect();
+    let map_b: BTreeMap<&str, &LoraLayer> =
+        layers_b.iter().map(|l| (l.base_name.as_str(), l)).collect();
+
+    let mut drift_reports: Vec<LayerSubspaceDrift> = Vec::new();
+
+    for (base_name, la) in &map_a {
+        if let Some(lb) = map_b.get(base_name) {
+            let scale_a = {
+                let r = la.rank();
+                if let Some(&alpha) = alphas_a.get(*base_name) {
+                    alpha / r.max(1) as f64
+                } else {
+                    1.0
+                }
+            };
+            let scale_b = {
+                let r = lb.rank();
+                if let Some(&alpha) = alphas_b.get(*base_name) {
+                    alpha / r.max(1) as f64
+                } else {
+                    1.0
+                }
+            };
+            if let Some(report) = compute_layer_subspace_drift(la, scale_a, lb, scale_b) {
+                drift_reports.push(report);
+            }
+        }
+    }
+
+    drift_reports.sort_by(|a, b| b.mean_angle_deg.partial_cmp(&a.mean_angle_deg).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total = drift_reports.len();
+    let stagnant = drift_reports.iter().filter(|r| r.classification == SubspaceDriftClass::Stagnant).count();
+    let healthy = drift_reports.iter().filter(|r| r.classification == SubspaceDriftClass::Healthy).count();
+    let heavy = drift_reports.iter().filter(|r| r.classification == SubspaceDriftClass::HeavyDrift).count();
+    let catastrophic = drift_reports.iter().filter(|r| r.classification == SubspaceDriftClass::CatastrophicDrift).count();
+
+    let mean_angle_deg = if total > 0 {
+        drift_reports.iter().map(|r| r.mean_angle_deg).sum::<f64>() / total as f64
+    } else {
+        0.0
+    };
+    let max_angle_deg = drift_reports.iter().map(|r| r.mean_angle_deg).fold(0.0_f64, f64::max);
+    let max_drift_layer = drift_reports.first().map(|r| r.base_name.clone());
+
+    AdapterSubspaceDriftSummary {
+        total_shared_layers: total,
+        stagnant_layers: stagnant,
+        healthy_layers: healthy,
+        heavy_drift_layers: heavy,
+        catastrophic_drift_layers: catastrophic,
+        mean_angle_deg,
+        max_angle_deg,
+        max_drift_layer,
+        layers: drift_reports,
+    }
+}
+
+/// Render subspace drift summary as compact JSON.
+pub fn render_subspace_drift_json(summary: &AdapterSubspaceDriftSummary) -> String {
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str(&format!("  \"total_shared_layers\": {},\n", summary.total_shared_layers));
+    out.push_str(&format!("  \"stagnant_layers\": {},\n", summary.stagnant_layers));
+    out.push_str(&format!("  \"healthy_layers\": {},\n", summary.healthy_layers));
+    out.push_str(&format!("  \"heavy_drift_layers\": {},\n", summary.heavy_drift_layers));
+    out.push_str(&format!("  \"catastrophic_drift_layers\": {},\n", summary.catastrophic_drift_layers));
+    out.push_str(&format!("  \"mean_angle_deg\": {:.4},\n", summary.mean_angle_deg));
+    out.push_str(&format!("  \"max_angle_deg\": {:.4},\n", summary.max_angle_deg));
+    if let Some(ref layer) = summary.max_drift_layer {
+        out.push_str(&format!("  \"max_drift_layer\": \"{}\",\n", layer));
+    } else {
+        out.push_str("  \"max_drift_layer\": null,\n");
+    }
+    out.push_str("  \"layers\": [\n");
+    for (i, layer) in summary.layers.iter().enumerate() {
+        out.push_str("    {\n");
+        out.push_str(&format!("      \"base_name\": \"{}\",\n", layer.base_name));
+        out.push_str(&format!("      \"rank_a\": {},\n", layer.rank_a));
+        out.push_str(&format!("      \"rank_b\": {},\n", layer.rank_b));
+        out.push_str(&format!("      \"mean_angle_input_deg\": {:.4},\n", layer.mean_angle_input_deg));
+        out.push_str(&format!("      \"mean_angle_output_deg\": {:.4},\n", layer.mean_angle_output_deg));
+        out.push_str(&format!("      \"mean_angle_deg\": {:.4},\n", layer.mean_angle_deg));
+        out.push_str(&format!("      \"frob_a\": {:.6},\n", layer.frob_a));
+        out.push_str(&format!("      \"frob_b\": {:.6},\n", layer.frob_b));
+        out.push_str(&format!("      \"relative_frob_drift\": {:.6},\n", layer.relative_frob_drift));
+        out.push_str(&format!("      \"classification\": \"{}\",\n", layer.classification.as_str()));
+        out.push_str(&format!(
+            "      \"issues\": [{}]\n",
+            layer.issues.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ")
+        ));
+        out.push_str("    }");
+        if i + 1 < summary.layers.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("  ]\n");
+    out.push('}');
+    out
+}
+
+/// Render subspace drift summary as a human-readable table.
+pub fn render_subspace_drift_table(summary: &AdapterSubspaceDriftSummary) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Subspace Drift Analysis: {}/{} healthy, {} stagnant, {} catastrophic drift\n",
+        summary.healthy_layers, summary.total_shared_layers, summary.stagnant_layers, summary.catastrophic_drift_layers
+    ));
+    out.push_str(&format!(
+        "Mean angle: {:.2} deg  Max angle: {:.2} deg\n\n",
+        summary.mean_angle_deg, summary.max_angle_deg
+    ));
+    out.push_str(&format!(
+        "{:<50} {:>5} {:>5} {:>12} {:>13} {:>12} {:<}\n",
+        "Layer", "r_A", "r_B", "angle_in(deg)", "angle_out(deg)", "rel_frob", "class"
+    ));
+    out.push_str(&"-".repeat(115));
+    out.push('\n');
+    for layer in &summary.layers {
+        let short = if layer.base_name.len() > 50 {
+            format!("...{}", &layer.base_name[layer.base_name.len() - 47..])
+        } else {
+            layer.base_name.clone()
+        };
+        let issues_str = if layer.issues.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", layer.issues.join(", "))
+        };
+        out.push_str(&format!(
+            "{:<50} {:>5} {:>5} {:>12.4} {:>13.4} {:>12.4} {}{}\n",
+            short,
+            layer.rank_a,
+            layer.rank_b,
+            layer.mean_angle_input_deg,
+            layer.mean_angle_output_deg,
+            layer.relative_frob_drift,
+            layer.classification.as_str(),
+            issues_str
+        ));
+    }
     out
 }
