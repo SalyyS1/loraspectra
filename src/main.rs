@@ -20,7 +20,9 @@ use loraspectra::merge_check::{
     analyze_multi_adapter_merge, render_merge_check_json, render_merge_check_table,
     AdapterMergeInput,
 };
+use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
 use loraspectra::quant::{analyze_adapter_quantization, QuantScheme};
+use loraspectra::quant_fp8::{validate_fp8_scale_factors, render_fp8_scale_json, render_fp8_scale_table, Fp8Format};
 use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
 use loraspectra::safetensors::{
     bake_adapter_scaling, cast_layers_dtype, compute_peft_alpha_pattern, convert_layers_key_format,
@@ -36,7 +38,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.4.0 - Spectral SVD Auditor, VeRA Fingerprinter, Subspace Drift Detector, Compressor & Merger (.safetensors)
+        "loraspectra v1.5.0 - Spectral SVD Auditor, VeRA Fingerprinter, Subspace Drift Detector, Cross-Layer Alignment, FP8 Scale Validator, Compressor & Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -53,7 +55,9 @@ USAGE:
   loraspectra merge-check <in_1> <in_2> [in_3 ...] [--weights W1:W2[:W3...]] [--json] [--sarif <output.sarif>] [--fail-on-conflict]
   loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]
   loraspectra vera <adapter_or_hf_uri> [--json]
-  loraspectra subspace-drift <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]"
+  loraspectra subspace-drift <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]
+  loraspectra align <adapter_or_hf_uri> [--config <adapter_config.json>] [--json]
+  loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]"
     );
 }
 
@@ -1629,6 +1633,66 @@ fn main() {
                 print!("{}", render_subspace_drift_table(&summary));
             }
             if summary.catastrophic_drift_layers > 0 {
+                process::exit(2);
+            }
+        }
+        "align" => {
+            // Cross-layer subspace alignment matrix (Grassmannian distance between adjacent layers)
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra align <adapter_or_hf_uri> [--config <adapter_config.json>] [--json]");
+                process::exit(1);
+            }
+            let (tensors, layers, alphas, _dora_scales, cfg) =
+                load_full_adapter_bundle_or_exit(&args[2], args.windows(2).find(|w| w[0] == "--config").map(|w| w[1].as_str()));
+            let _ = (tensors, alphas, cfg);
+            let use_json = args.iter().any(|a| a == "--json");
+            if layers.is_empty() {
+                eprintln!("No LoRA layers found in {}", args[2]);
+                process::exit(1);
+            }
+            let matrix = analyze_cross_layer_alignment(&layers);
+            if use_json {
+                println!("{}", render_alignment_json(&matrix));
+            } else {
+                print!("{}", render_alignment_table(&matrix));
+            }
+            if matrix.redundant_pairs > 0 || matrix.disjoint_pairs > 0 {
+                process::exit(2);
+            }
+        }
+        "fp8-validate" => {
+            // FP8 E4M3/E5M2 scale factor validation
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]");
+                process::exit(1);
+            }
+            let input_path = resolve_input_or_exit(&args[2]);
+            let use_json = args.iter().any(|a| a == "--json");
+            let fmt_str = args.windows(2)
+                .find(|w| w[0] == "--format")
+                .map(|w| w[1].as_str())
+                .unwrap_or("e4m3");
+            let fp8_format = match Fp8Format::from_name(fmt_str) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            };
+            let tensor_map = match loraspectra::safetensors::read_safetensors(&input_path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error reading {}: {}", args[2], e);
+                    process::exit(1);
+                }
+            };
+            let report = validate_fp8_scale_factors(&tensor_map, fp8_format);
+            if use_json {
+                println!("{}", render_fp8_scale_json(&report));
+            } else {
+                print!("{}", render_fp8_scale_table(&report));
+            }
+            if report.has_blocking_issues() {
                 process::exit(2);
             }
         }

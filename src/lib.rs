@@ -1,3 +1,4 @@
+pub mod align;
 pub mod audit;
 pub mod card;
 pub mod compress;
@@ -6,6 +7,7 @@ pub mod linalg;
 pub mod merge;
 pub mod merge_check;
 pub mod quant;
+pub mod quant_fp8;
 pub mod remote;
 pub mod safetensors;
 pub mod sarif;
