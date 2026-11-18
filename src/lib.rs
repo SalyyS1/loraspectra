@@ -4,8 +4,10 @@ pub mod card;
 pub mod compress;
 pub mod diff;
 pub mod linalg;
+pub mod lora_ga;
 pub mod merge;
 pub mod merge_check;
+pub mod ortho_proj;
 pub mod quant;
 pub mod quant_fp8;
 pub mod remote;
@@ -3516,5 +3518,111 @@ mod tests {
         assert!(json.contains("\"total_shared_layers\""));
         assert!(json.contains("\"mean_angle_deg\""));
         assert!(json.contains("\"classification\""));
+    }
+
+    #[test]
+    fn test_v170_lora_ga_and_ortho_proj_sarif_and_safetensors_roundtrip() {
+        use crate::lora_ga::{optimize_lora_ga_init, GradientSource, LoraGaConfig};
+        use crate::merge_check::AdapterMergeInput;
+        use crate::ortho_proj::{project_adapter_orthogonal, OrthoDomain, OrthoProjectConfig};
+        use crate::sarif::{build_lora_ga_sarif, build_ortho_proj_sarif, LORASPECTRA_SARIF_RULES};
+
+        assert_eq!(LORASPECTRA_SARIF_RULES.len(), 42);
+        assert_eq!(LORASPECTRA_SARIF_RULES[38].id, "LS039");
+        assert_eq!(LORASPECTRA_SARIF_RULES[39].id, "LS040");
+        assert_eq!(LORASPECTRA_SARIF_RULES[40].id, "LS041");
+        assert_eq!(LORASPECTRA_SARIF_RULES[41].id, "LS042");
+
+        let mut rng = Rng64::new(7001);
+        let warm_layer = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, 24, &mut rng, DType::F32),
+            b: random_matrix(24, 4, &mut rng, DType::F32),
+        };
+        let alphas = BTreeMap::new();
+        let ga_cfg = LoraGaConfig {
+            target_rank: 4,
+            base_compensated: false,
+            emit_init_reference: false,
+            ..LoraGaConfig::default()
+        };
+        let ga_sum = optimize_lora_ga_init(
+            "warmup.safetensors",
+            GradientSource::LowRank {
+                layers: std::slice::from_ref(&warm_layer),
+                alphas: &alphas,
+                peft_config: None,
+            },
+            &ga_cfg,
+        )
+        .expect("lora_ga");
+        let ga_sarif = build_lora_ga_sarif(&ga_sum, "1.7.0");
+        assert!(ga_sarif.contains("\"ruleId\": \"LS039\""));
+        assert!(ga_sarif.contains("\"ruleId\": \"LS040\""));
+
+        let out_map = layers_to_tensor_map(&ga_sum.layers);
+        let tmp = std::env::temp_dir().join("test_v170_ga_init.safetensors");
+        write_safetensors(&tmp, &out_map).expect("write ga safetensors");
+        let reloaded = extract_lora_layers(&read_safetensors(&tmp).unwrap()).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].rank(), 4);
+        let _ = std::fs::remove_file(&tmp);
+
+        // Orthogonal projection SARIF check
+        let anchor_big = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(20, 24, &mut rng, DType::F32),
+            b: random_matrix(24, 20, &mut rng, DType::F32),
+        };
+        let mut clone_a = Tensor2D::zeros(4, 24, DType::F32);
+        let mut clone_b = Tensor2D::zeros(24, 4, DType::F32);
+        for r in 0..4 {
+            for c in 0..24 {
+                clone_a.set(r, c, anchor_big.a.get(r, c));
+            }
+        }
+        for r in 0..24 {
+            for c in 0..4 {
+                clone_b.set(r, c, anchor_big.b.get(r, c));
+            }
+        }
+        let cand_in = AdapterMergeInput {
+            name: "cand.safetensors".to_string(),
+            layers: vec![LoraLayer {
+                base_name: "model.layers.0.q_proj".to_string(),
+                a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+                b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+                a: clone_a,
+                b: clone_b,
+            }],
+            alphas: BTreeMap::new(),
+            peft_config: None,
+            weight: 1.0,
+        };
+        let anc_in = AdapterMergeInput {
+            name: "anc.safetensors".to_string(),
+            layers: vec![anchor_big],
+            alphas: BTreeMap::new(),
+            peft_config: None,
+            weight: 1.0,
+        };
+        let proj_sum = project_adapter_orthogonal(
+            &cand_in,
+            &[anc_in],
+            &OrthoProjectConfig {
+                domain: OrthoDomain::Right,
+                anchor_energy_threshold: 1.0,
+                strength: 1.0,
+                ..OrthoProjectConfig::default()
+            },
+        )
+        .expect("ortho_proj");
+        let proj_sarif = build_ortho_proj_sarif(&proj_sum, "1.7.0");
+        assert!(proj_sarif.contains("\"ruleId\": \"LS041\""));
+        assert!(proj_sarif.contains("\"ruleId\": \"LS042\""));
     }
 }

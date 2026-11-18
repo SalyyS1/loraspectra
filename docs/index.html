@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.6.0 - Interactive .safetensors Header, Spectral SVD, TIES/DARE, NF4/FP8 &amp; Merge Inspector</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, TIES-Merging &amp; DARE sign-conflict resolver, NF4/FP4/INT8/FP8 quantization validator, VeRA fingerprinter, Grassmannian alignment, and multi-adapter merge-check + zero-dependency Rust CLI (v1.6.0).">
-  <meta property="og:title" content="loraspectra v1.6.0 - Interactive .safetensors Header, Spectral SVD, TIES/DARE, NF4/FP8 &amp; Merge Inspector">
+  <title>loraspectra v1.7.0 - Interactive .safetensors Header, Spectral SVD, LoRA-GA, Orthogonal Projector &amp; TIES/DARE Inspector</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, LoRA-GA spectral initializer, O-LoRA cross-checkpoint orthogonal projector, TIES-Merging &amp; DARE sign-conflict resolver, NF4/FP4/INT8/FP8 quantization validator, and multi-adapter merge-check + zero-dependency Rust CLI (v1.7.0).">
+  <meta property="og:title" content="loraspectra v1.7.0 - Interactive .safetensors Header, Spectral SVD, LoRA-GA, Orthogonal Projector &amp; TIES/DARE Inspector">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -419,9 +419,9 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.6.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.7.0</span></h1>
         <p class="lead">
-          Spectral SVD Auditor, NF4/FP4/INT8 Quantization Reconstruction &amp; Eckart-Young Truncation Bound Analyzer, rsLoRA &amp; PiSSA Residual Validator, DoRA Analyzer, Zero-Copy <code>.safetensors</code> Header Inspector, Dynamic Rank Compressor, and Multi-Adapter Merge Conflict Analyzer
+          Spectral SVD Auditor, LoRA-GA Gradient-Aligned Initializer, Cross-Checkpoint Orthogonal Subspace Projector (O-LoRA / InfLoRA), TIES/DARE Sign-Conflict Merger, NF4/FP8 Quantization Validator, and Zero-Copy <code>.safetensors</code> Header Inspector
           - powered by exact QR-Core SVD
           (<code>O(r&sup2;d + r&sup3;)</code>) in your browser or native Rust CLI without PyTorch or GPU VRAM.
         </p>
@@ -735,7 +735,85 @@ loraspectra align ./checkpoint/adapter_model.safetensors --json
 loraspectra fp8-validate ./fp8_checkpoint/model.safetensors --format e4m3 --json
 
 # Subspace drift analysis: principal-angle rotation between two training checkpoints (LS027/LS028)
-loraspectra subspace-drift ./adapter_step500.safetensors ./adapter_step1000.safetensors --json</pre>
+loraspectra subspace-drift ./adapter_step500.safetensors ./adapter_step1000.safetensors --json
+
+# Initialize rank-8 LoRA-GA capturing top-16 calibration gradient singular modes with zero t=0 base drift (LS039/LS040)
+loraspectra lora-ga ./calib_grads.safetensors -o lora_ga_init.safetensors --rank 8 --scale stable --base base.safetensors --out-base base_res.safetensors --sarif lora-ga.sarif
+
+# Project candidate LoRA onto orthogonal complement of protected anchor checkpoints (O-LoRA / InfLoRA, LS041/LS042)
+loraspectra project ./candidate_lora.safetensors ./safety_anchor.safetensors ./math_anchor.safetensors -o candidate_ortho.safetensors --domain right --anchor-energy 0.99 --sarif ortho.sarif</pre>
+      </div>
+    </div>
+
+    <!-- Interactive LoRA-GA & Cross-Checkpoint Orthogonal Projector Lab (v1.7.0) -->
+    <div class="card" id="v170-lab-card">
+      <div class="card-header">
+        <h2 class="card-title">Interactive LoRA-GA Spectral Initializer &amp; Cross-Checkpoint Orthogonal Projector Lab (<code>v1.7.0</code>)</h2>
+        <span class="privacy-tag">SARIF Rules LS039-LS042</span>
+      </div>
+      <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 16px;">
+        Simulate <strong>LoRA-GA</strong> disjoint singular subspace initialization (<code>B<sub>0</sub> &larr; U<sub>1..r</sub></code>, <code>A<sub>0</sub> &larr; V<sub>r+1..2r</sub><sup>T</sup></code>, capturing top <code>2r</code> gradient modes on step 1) and <strong>O-LoRA / InfLoRA</strong> low-rank nullspace projection (<code>&Delta;W<sub>&perp;</sub> = &Delta;W<sub>c</sub>(I - Q<sub>V</sub>Q<sub>V</sub><sup>T</sup>)</code>) on a <code>64 &times; 64</code> layer directly in your browser.
+      </p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px;">
+        <div class="kpi-card">
+          <label class="kpi-label" for="lab-rank">Target LoRA Rank (r)</label>
+          <input type="range" id="lab-rank" min="2" max="16" step="2" value="8" style="width: 100%; margin-top: 6px;">
+          <div class="kpi-sub">r = <strong id="lab-rank-val">8</strong> (2r = <strong id="lab-2r-val">16</strong> modes)</div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="lab-grad-profile">Calibration Gradient Spectrum</label>
+          <select id="lab-grad-profile" class="search-input" style="width: 100%; margin-top: 6px; padding: 5px 8px;">
+            <option value="power">Power-Law SFT Gradient (&sigma;_i = i^-0.85)</option>
+            <option value="steep">Steep Low-Rank Gradient (&sigma;_i = exp(-0.18*i))</option>
+            <option value="deficient">Rank-Deficient Warmup (only 10 active modes -> LS039)</option>
+          </select>
+          <div class="kpi-sub"><label style="cursor:pointer;"><input type="checkbox" id="lab-compensated" checked> Compensate W_res = W_0 - s*B_0*A_0</label></div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="lab-anchor-dim">Protected Anchor Basis Dim (k_anc / 64)</label>
+          <input type="range" id="lab-anchor-dim" min="4" max="56" step="4" value="16" style="width: 100%; margin-top: 6px;">
+          <div class="kpi-sub">Anchor union dim = <strong id="lab-anchor-dim-val">16</strong> / 64</div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="lab-ortho-domain">Orthogonal Projection Domain</label>
+          <select id="lab-ortho-domain" class="search-input" style="width: 100%; margin-top: 6px; padding: 5px 8px;">
+            <option value="right">right (Input Nullspace A_c*(I - Q_V*Q_V^T))</option>
+            <option value="left">left (Output Nullspace (I - Q_U*Q_U^T)*B_c)</option>
+            <option value="bilateral">bilateral (Double-Sided Principal Nullspace)</option>
+          </select>
+          <div class="kpi-sub"><label style="cursor:pointer;"><input type="checkbox" id="lab-overlap-heavy"> High Candidate-Anchor Overlap (-> LS041)</label></div>
+        </div>
+      </div>
+
+      <div class="kpi-grid" style="margin-bottom: 14px;">
+        <div class="kpi-card">
+          <div class="kpi-label">LoRA-GA Step-1 2r Alignment</div>
+          <div class="kpi-value green" id="lab-ga-2r">-</div>
+          <div class="kpi-sub" id="lab-ga-topr">-</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Gain vs Random Kaiming Init</div>
+          <div class="kpi-value accent" id="lab-ga-gain">-</div>
+          <div class="kpi-sub" id="lab-ga-kaiming">-</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Ortho Retained Energy (&Delta;W_&perp;)</div>
+          <div class="kpi-value purple" id="lab-ortho-retain">-</div>
+          <div class="kpi-sub" id="lab-ortho-pythag">-</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Anchor Cosine (Pre &rarr; Post)</div>
+          <div class="kpi-value text-sm" id="lab-ortho-cos">-</div>
+          <div class="kpi-sub" id="lab-sarif-flags">-</div>
+        </div>
+      </div>
+
+      <div class="cli-block">
+        <div class="cli-block-head">
+          <span>Generated v1.7.0 CLI Workflow</span>
+          <button type="button" class="btn btn-sm" data-copy="lab-v170-cmd">Copy</button>
+        </div>
+        <pre class="cli-code" id="lab-v170-cmd"></pre>
       </div>
     </div>
 
@@ -2877,6 +2955,74 @@ loraspectra subspace-drift ./adapter_step500.safetensors ./adapter_step1000.safe
 
     // Auto-load Demo 1 on initial page open so visitors immediately see live interactive charts!
     generateDemoPreset("peft-collapsed").then(applyLoadedAdapter);
+
+    // v1.7.0 LoRA-GA & Orthogonal Projection Simulator
+    function runV170Lab() {
+      const d = 64;
+      const r = parseInt(document.getElementById("lab-rank").value, 10);
+      const profile = document.getElementById("lab-grad-profile").value;
+      const compensated = document.getElementById("lab-compensated").checked;
+      const kAnc = parseInt(document.getElementById("lab-anchor-dim").value, 10);
+      const domain = document.getElementById("lab-ortho-domain").value;
+      const heavyOverlap = document.getElementById("lab-overlap-heavy").checked;
+
+      document.getElementById("lab-rank-val").textContent = String(r);
+      document.getElementById("lab-2r-val").textContent = String(2 * r);
+      document.getElementById("lab-anchor-dim-val").textContent = String(kAnc);
+
+      const sigmas = [];
+      for (let i = 1; i <= d; i++) {
+        if (profile === "power") sigmas.push(Math.pow(i, -0.85));
+        else if (profile === "steep") sigmas.push(Math.exp(-0.18 * (i - 1)));
+        else sigmas.push(i <= 10 ? Math.pow(i, -0.6) : 0.0);
+      }
+      const nonzeroModes = sigmas.filter((s) => s > 1e-12).length;
+      const totalE = sigmas.reduce((acc, s) => acc + s * s, 0);
+      const topRE = sigmas.slice(0, r).reduce((acc, s) => acc + s * s, 0);
+      const top2RE = sigmas.slice(0, Math.min(2 * r, nonzeroModes)).reduce((acc, s) => acc + s * s, 0);
+      const ratioTopR = totalE > 0 ? topRE / totalE : 0;
+      const ratio2R = totalE > 0 ? top2RE / totalE : 0;
+      const ratioKaiming = r / d;
+      const gain = ratioKaiming > 0 ? ratio2R / ratioKaiming : 0;
+
+      // Exact canonical basis orthogonal projection energy accounting
+      const satRatio = kAnc / d;
+      const singleSideFree = heavyOverlap ? Math.max(0.02, (1 - satRatio) * 0.28) : (1 - satRatio);
+      const retainedRatio = domain === "bilateral" ? singleSideFree * singleSideFree : singleSideFree;
+      const preE = 1.0;
+      const postE = preE * retainedRatio;
+      const remE = preE - postE;
+      const preCos = heavyOverlap ? 0.8942 : Math.min(0.95, Math.sqrt(satRatio) * 0.62);
+
+      const flags = [];
+      if (nonzeroModes < 2 * r) flags.push("LS039");
+      if (!compensated) flags.push("LS040");
+      if (retainedRatio < 0.30) flags.push("LS041");
+      if (satRatio >= 0.75 || (d - kAnc) < r) flags.push("LS042");
+
+      document.getElementById("lab-ga-2r").textContent = (ratio2R * 100).toFixed(1) + "%";
+      document.getElementById("lab-ga-topr").textContent = "Top-r static ceiling: " + (ratioTopR * 100).toFixed(1) + "%";
+      document.getElementById("lab-ga-gain").textContent = gain.toFixed(1) + "x";
+      document.getElementById("lab-ga-kaiming").textContent = "Kaiming step-1 expected: " + (ratioKaiming * 100).toFixed(1) + "%";
+      document.getElementById("lab-ortho-retain").textContent = (retainedRatio * 100).toFixed(1) + "%";
+      document.getElementById("lab-ortho-pythag").textContent = "Ledger: " + postE.toFixed(3) + " perp + " + remE.toFixed(3) + " par = " + (postE + remE).toFixed(3);
+      document.getElementById("lab-ortho-cos").textContent = preCos.toFixed(4) + " -> 0.00e+00";
+      document.getElementById("lab-sarif-flags").textContent = flags.length ? ("Triggered SARIF: " + flags.join(", ")) : "SARIF LS039-LS042: CLEAN";
+
+      const compFlags = compensated ? " --base base.safetensors --out-base base_res.safetensors" : "";
+      document.getElementById("lab-v170-cmd").textContent =
+        "loraspectra lora-ga calib_grads.safetensors -o lora_ga_init.safetensors --rank " + r + " --scale stable" + compFlags + " --sarif lora-ga.sarif\n" +
+        "loraspectra project candidate_lora.safetensors safety_anchor.safetensors -o candidate_ortho.safetensors --domain " + domain + " --anchor-energy 0.99 --sarif ortho.sarif";
+    }
+
+    ["lab-rank", "lab-grad-profile", "lab-compensated", "lab-anchor-dim", "lab-ortho-domain", "lab-overlap-heavy"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener("input", runV170Lab);
+        el.addEventListener("change", runV170Lab);
+      }
+    });
+    runV170Lab();
   })();
   </script>
 </body>

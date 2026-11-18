@@ -1,5 +1,7 @@
 use crate::audit::{AdapterAuditSummary, AdapterIntegrityReport, IssueSeverity, LayerHealth};
+use crate::lora_ga::LoraGaSummary;
 use crate::merge_check::MultiMergeCheckSummary;
+use crate::ortho_proj::OrthoProjectSummary;
 use crate::ties_dare::TiesDareComposeSummary;
 
 pub struct SarifRuleDefinition {
@@ -275,6 +277,34 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         name: "ExcessiveTrimEnergyLoss",
         short_description: "Aggressive TIES magnitude trimming pruned over half of adapter Frobenius energy",
         full_description: "Top-k% TIES magnitude trimming retained <50% of pre-trim Frobenius energy on a dense weight distribution, discarding substantial fine-tuned signal.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS039",
+        name: "LoraGaInsufficientGradientRank",
+        short_description: "Calibration gradient rank is below 2*r required for full LoRA-GA disjoint alignment",
+        full_description: "The calibration gradient or warm-up checkpoint has fewer than 2*r non-zero singular modes (or is zero/NaN), placing part of the disjoint A_0 subspace in the gradient nullspace.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS040",
+        name: "LoraGaUncompensatedBaseDrift",
+        short_description: "LoRA-GA non-zero B_0*A_0 initialization lacks base-weight residual compensation",
+        full_description: "LoRA-GA initializes both B_0 and A_0 to non-zero singular subspaces; loading onto an unmodified W_0 without --emit-init or --out-base shifts t=0 forward logits.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS041",
+        name: "OrthogonalProjectionSignalAnnihilation",
+        short_description: "Orthogonal projection against anchor checkpoints removed >=70% of candidate Frobenius energy",
+        full_description: "Projecting the candidate LoRA onto the orthogonal complement of protected anchor subspaces retained <30% of Frobenius energy, indicating severe feature overlap with protected tasks.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS042",
+        name: "AnchorSubspaceSaturation",
+        short_description: "Protected anchor subspaces saturate >=75% of ambient layer dimensions",
+        full_description: "The union of protected anchor subspaces consumes >=75% of the ambient dimension or leaves fewer orthogonal dimensions than the candidate LoRA rank.",
         default_level: "warning",
     },
 ];
@@ -807,4 +837,175 @@ pub fn build_ties_dare_sarif(
         rules_rendered.join(",\n            "),
         results_json.join(",\n        ")
     )
+}
+
+fn render_sarif_envelope(tool_version: &str, results_json: &[String]) -> String {
+    let rules_rendered: Vec<String> = LORASPECTRA_SARIF_RULES
+        .iter()
+        .map(|r| {
+            format!(
+                r#"{{
+            "id": "{}",
+            "name": "{}",
+            "shortDescription": {{ "text": "{}" }},
+            "fullDescription": {{ "text": "{}" }},
+            "defaultConfiguration": {{ "level": "{}" }},
+            "helpUri": "https://github.com/SalyyS1/loraspectra#sarif-diagnostics"
+          }}"#,
+                r.id,
+                r.name,
+                escape_json(r.short_description),
+                escape_json(r.full_description),
+                r.default_level
+            )
+        })
+        .collect();
+
+    format!(
+        r#"{{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {{
+      "tool": {{
+        "driver": {{
+          "name": "loraspectra",
+          "version": "{}",
+          "informationUri": "https://github.com/SalyyS1/loraspectra",
+          "rules": [
+            {}
+          ]
+        }}
+      }},
+      "results": [
+        {}
+      ]
+    }}
+  ]
+}}
+"#,
+        escape_json(tool_version),
+        rules_rendered.join(",\n            "),
+        results_json.join(",\n        ")
+    )
+}
+
+pub fn build_lora_ga_sarif(summary: &LoraGaSummary, tool_version: &str) -> String {
+    let mut results_json = Vec::new();
+    for diag in &summary.diagnostics {
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "{}",
+        "level": "{}",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ],
+        "properties": {{
+          "scaleMode": "{}",
+          "nonzeroGradModes": {},
+          "required2rModes": {},
+          "initialPerturbationNorm": {:.8}
+        }}
+      }}"#,
+            diag.rule_id,
+            diag.severity.as_str(),
+            escape_json(&diag.message),
+            escape_json(&diag.artifact_uri),
+            escape_json(&diag.layer_name),
+            summary.scale_mode.as_str(),
+            diag.nonzero_grad_modes,
+            diag.required_2r_modes,
+            diag.initial_perturbation_norm
+        ));
+    }
+    render_sarif_envelope(tool_version, &results_json)
+}
+
+pub fn build_ortho_proj_sarif(summary: &OrthoProjectSummary, tool_version: &str) -> String {
+    let mut results_json = Vec::new();
+
+    for inc in &summary.incompatible_shapes {
+        let msg = format!(
+            "Layer '{}' has incompatible shapes: {} ({}x{}) vs {} ({}x{})",
+            inc.base_name,
+            inc.adapter_a,
+            inc.shape_a.0,
+            inc.shape_a.1,
+            inc.adapter_b,
+            inc.shape_b.0,
+            inc.shape_b.1
+        );
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "LS018",
+        "level": "error",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ]
+      }}"#,
+            escape_json(&msg),
+            escape_json(&inc.adapter_a),
+            escape_json(&inc.base_name)
+        ));
+    }
+
+    for diag in &summary.diagnostics {
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "{}",
+        "level": "{}",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ],
+        "properties": {{
+          "domain": "{}",
+          "retainedRatio": {:.6},
+          "ambientSaturationRatio": {:.6}
+        }}
+      }}"#,
+            diag.rule_id,
+            diag.severity.as_str(),
+            escape_json(&diag.message),
+            escape_json(&diag.artifact_uri),
+            escape_json(&diag.layer_name),
+            summary.domain.as_str(),
+            diag.retained_ratio,
+            diag.ambient_saturation_ratio
+        ));
+    }
+
+    render_sarif_envelope(tool_version, &results_json)
 }

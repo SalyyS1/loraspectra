@@ -21,6 +21,14 @@ use loraspectra::merge_check::{
     AdapterMergeInput,
 };
 use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
+use loraspectra::lora_ga::{
+    apply_lora_ga_base_compensation, optimize_lora_ga_init, render_lora_ga_json,
+    render_lora_ga_table, GradientSource, LoraGaConfig, LoraGaScaleMode, LoraGaSeverity,
+};
+use loraspectra::ortho_proj::{
+    project_adapter_orthogonal, render_ortho_project_json, render_ortho_project_table,
+    OrthoDomain, OrthoProjectConfig, OrthoSeverity,
+};
 use loraspectra::quant::{analyze_adapter_quantization, QuantScheme};
 use loraspectra::quant_fp8::{validate_fp8_scale_factors, render_fp8_scale_json, render_fp8_scale_table, Fp8Format};
 use loraspectra::remote::{resolve_companion_config_path, resolve_source_path};
@@ -33,7 +41,10 @@ use loraspectra::safetensors::{
     strip_peft_base_prefix, write_peft_adapter_config, write_safetensors, DType, LoraLayer,
     PeftAdapterConfig, Tensor2D,
 };
-use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif, build_ties_dare_sarif};
+use loraspectra::sarif::{
+    build_audit_sarif, build_lora_ga_sarif, build_merge_check_sarif, build_ortho_proj_sarif,
+    build_ties_dare_sarif,
+};
 use loraspectra::ties_dare::{
     compose_adapters_ties_dare, render_ties_dare_json, render_ties_dare_table, DisjointAggregation,
     TiesDareConfig, TiesDareMode,
@@ -42,7 +53,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.6.0 - Spectral SVD Auditor, TIES/DARE Sign-Conflict Merger, VeRA Fingerprinter, Subspace Drift, Cross-Layer Alignment & FP8 Validator (.safetensors)
+        "loraspectra v1.7.0 - Spectral SVD Auditor, LoRA-GA Initializer, Cross-Checkpoint Orthogonal Projector, TIES/DARE Merger & FP8 Validator (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -59,6 +70,8 @@ USAGE:
   loraspectra merge-check <in_1> <in_2> [in_3 ...] [--weights W1:W2[:W3...]] [--json] [--sarif <output.sarif>] [--fail-on-conflict]
   loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties|dare-ties|dare-linear] [--rank K] [--density 0.5] [--drop-rate 0.5] [--seed 42] [--aggregation disjoint-mean|weighted-mean|sum] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>]
   loraspectra ties-dare <in_1> <in_2> [in_3 ...] [-o <output.safetensors>] [--mode ties|dare-ties|dare-linear] [--density 0.5] [--drop-rate 0.5] [--seed 42] [--rank K] [--weights W1:W2[:W3...]] [--aggregation disjoint-mean|weighted-mean|sum] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-conflict] [--json]
+  loraspectra lora-ga <grad_or_warmup_uri> [-o <init_lora.safetensors>] [--rank R] [--scale stable|direction|gd|svd] [--gamma 16.0] [--alpha A] [--rslora] [--emit-init] [--base <base.safetensors> --out-base <res_base.safetensors>] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--json]
+  loraspectra project <candidate_uri> <anchor_1_uri> [anchor_2_uri ...] [-o <projected_lora.safetensors>] [--domain right|left|bilateral] [--anchor-energy 0.99] [--strength 1.0] [--rank K] [--preserve-norm] [--bake-alpha] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-annihilation] [--json]
   loraspectra vera <adapter_or_hf_uri> [--json]
   loraspectra subspace-drift <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]
   loraspectra align <adapter_or_hf_uri> [--config <adapter_config.json>] [--json]
@@ -2059,6 +2072,368 @@ fn main() {
                 print!("{}", render_fp8_scale_table(&report));
             }
             if report.has_blocking_issues() {
+                process::exit(2);
+            }
+        }
+        "lora-ga" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra lora-ga <grad_or_warmup_uri> [-o <init_lora.safetensors>] [--rank R] [--scale stable|direction|gd|svd] [--gamma 16.0] [--alpha A] [--rslora] [--emit-init] [--base <base.safetensors> --out-base <res_base.safetensors>] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--json]");
+                process::exit(1);
+            }
+            let src_uri = &args[2];
+            let mut out_path: Option<String> = None;
+            let mut base_path: Option<String> = None;
+            let mut out_base_path: Option<String> = None;
+            let mut sarif_path: Option<String> = None;
+            let mut explicit_cfg: Option<String> = None;
+            let mut use_json = false;
+            let mut cfg = LoraGaConfig::default();
+
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-o" | "--out" | "--output" => {
+                        i += 1;
+                        out_path = args.get(i).cloned();
+                    }
+                    "--rank" | "-r" => {
+                        i += 1;
+                        cfg.target_rank = args
+                            .get(i)
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --rank value");
+                                process::exit(1);
+                            });
+                    }
+                    "--scale" => {
+                        i += 1;
+                        let name = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                        cfg.scale_mode = LoraGaScaleMode::from_name(name).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        });
+                    }
+                    "--gamma" => {
+                        i += 1;
+                        cfg.stable_gamma = args
+                            .get(i)
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --gamma value");
+                                process::exit(1);
+                            });
+                    }
+                    "--alpha" => {
+                        i += 1;
+                        cfg.lora_alpha = args
+                            .get(i)
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --alpha value");
+                                process::exit(1);
+                            });
+                    }
+                    "--rslora" => cfg.use_rslora = true,
+                    "--emit-init" => cfg.emit_init_reference = true,
+                    "--base" => {
+                        i += 1;
+                        base_path = args.get(i).cloned();
+                    }
+                    "--out-base" => {
+                        i += 1;
+                        out_base_path = args.get(i).cloned();
+                    }
+                    "--format" => {
+                        i += 1;
+                        cfg.key_format = args.get(i).cloned().unwrap_or_else(|| "peft".to_string());
+                    }
+                    "--dtype" => {
+                        i += 1;
+                        let dt_name = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                        cfg.output_dtype = Some(DType::from_name(dt_name).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }));
+                    }
+                    "--config" => {
+                        i += 1;
+                        explicit_cfg = args.get(i).cloned();
+                    }
+                    "--sarif" => {
+                        i += 1;
+                        sarif_path = args.get(i).cloned();
+                    }
+                    "--seed" => {
+                        i += 1;
+                        cfg.seed = args
+                            .get(i)
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(42);
+                    }
+                    "--json" => use_json = true,
+                    other => {
+                        eprintln!("Unknown lora-ga argument: {}", other);
+                        process::exit(1);
+                    }
+                }
+                i += 1;
+            }
+
+            if base_path.is_some() != out_base_path.is_some() {
+                eprintln!("Both --base <in.safetensors> and --out-base <out.safetensors> must be specified together.");
+                process::exit(1);
+            }
+            if out_base_path.is_some() {
+                cfg.base_compensated = true;
+            }
+
+            let resolved_src = resolve_input_or_exit(src_uri);
+            let tensors = read_safetensors(&resolved_src).unwrap_or_else(|e| {
+                eprintln!("Error reading {}: {}", src_uri, e);
+                process::exit(1);
+            });
+
+            let summary = match extract_lora_layers(&tensors) {
+                Ok(layers) if !layers.is_empty() => {
+                    let alphas = extract_lora_alphas(&tensors);
+                    let peft_cfg = explicit_cfg
+                        .as_deref()
+                        .and_then(|p| read_peft_adapter_config(Path::new(p)).ok())
+                        .or_else(|| {
+                            resolve_companion_config_path(src_uri, &resolved_src)
+                                .and_then(|p| read_peft_adapter_config(&p).ok())
+                        });
+                    optimize_lora_ga_init(
+                        src_uri,
+                        GradientSource::LowRank {
+                            layers: &layers,
+                            alphas: &alphas,
+                            peft_config: peft_cfg.as_ref(),
+                        },
+                        &cfg,
+                    )
+                }
+                _ => optimize_lora_ga_init(src_uri, GradientSource::Dense { tensors: &tensors }, &cfg),
+            }
+            .unwrap_or_else(|e| {
+                eprintln!("Error optimizing LoRA-GA initialization: {}", e);
+                process::exit(1);
+            });
+
+            if let Some(ref out_file) = out_path {
+                let mut out_map = layers_to_tensor_map(&summary.layers);
+                if !summary.init_reference_layers.is_empty() {
+                    for (k, v) in layers_to_tensor_map(&summary.init_reference_layers) {
+                        out_map.insert(k, v);
+                    }
+                }
+                if let Err(e) = write_safetensors(Path::new(out_file), &out_map) {
+                    eprintln!("Error writing {}: {}", out_file, e);
+                    process::exit(1);
+                }
+            }
+
+            if let (Some(ref b_in), Some(ref b_out)) = (base_path, out_base_path) {
+                let resolved_base = resolve_input_or_exit(b_in);
+                let base_tensors = read_safetensors(&resolved_base).unwrap_or_else(|e| {
+                    eprintln!("Error reading base weights {}: {}", b_in, e);
+                    process::exit(1);
+                });
+                let (comp_tensors, updated_cnt) = apply_lora_ga_base_compensation(
+                    &base_tensors,
+                    &summary.layers,
+                    summary.effective_forward_scale,
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("Error compensating base weights: {}", e);
+                    process::exit(1);
+                });
+                if updated_cnt == 0 {
+                    eprintln!("Warning: zero base tensors matched LoRA-GA layer names.");
+                }
+                if let Err(e) = write_safetensors(Path::new(b_out), &comp_tensors) {
+                    eprintln!("Error writing compensated base {}: {}", b_out, e);
+                    process::exit(1);
+                }
+            }
+
+            if let Some(ref sp) = sarif_path {
+                let sarif_str = build_lora_ga_sarif(&summary, env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::write(sp, sarif_str) {
+                    eprintln!("Error writing SARIF report {}: {}", sp, e);
+                    process::exit(1);
+                }
+            }
+
+            if use_json {
+                print!("{}", render_lora_ga_json(&summary));
+            } else {
+                print!("{}", render_lora_ga_table(&summary));
+            }
+
+            if summary
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == LoraGaSeverity::Error)
+            {
+                process::exit(2);
+            }
+        }
+        "project" | "ortho-project" => {
+            if args.len() < 4 {
+                eprintln!("Usage: loraspectra project <candidate_uri> <anchor_1_uri> [anchor_2_uri ...] [-o <projected_lora.safetensors>] [--domain right|left|bilateral] [--anchor-energy 0.99] [--strength 1.0] [--rank K] [--preserve-norm] [--bake-alpha] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-annihilation] [--json]");
+                process::exit(1);
+            }
+            let mut positional: Vec<String> = Vec::new();
+            let mut out_path: Option<String> = None;
+            let mut sarif_path: Option<String> = None;
+            let mut fail_on_annihilation = false;
+            let mut use_json = false;
+            let mut cfg = OrthoProjectConfig::default();
+
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-o" | "--out" | "--output" => {
+                        i += 1;
+                        out_path = args.get(i).cloned();
+                    }
+                    "--domain" => {
+                        i += 1;
+                        let d_str = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                        cfg.domain = OrthoDomain::from_name(d_str).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        });
+                    }
+                    "--anchor-energy" => {
+                        i += 1;
+                        cfg.anchor_energy_threshold = args
+                            .get(i)
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --anchor-energy value");
+                                process::exit(1);
+                            });
+                    }
+                    "--strength" => {
+                        i += 1;
+                        cfg.strength = args
+                            .get(i)
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --strength value");
+                                process::exit(1);
+                            });
+                    }
+                    "--rank" | "-r" => {
+                        i += 1;
+                        let r_val = args
+                            .get(i)
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --rank value");
+                                process::exit(1);
+                            });
+                        cfg.target_rank = Some(r_val);
+                    }
+                    "--preserve-norm" => cfg.preserve_norm = true,
+                    "--bake-alpha" => cfg.bake_alpha = true,
+                    "--format" => {
+                        i += 1;
+                        cfg.key_format = args.get(i).cloned().unwrap_or_else(|| "peft".to_string());
+                    }
+                    "--dtype" => {
+                        i += 1;
+                        let dt_name = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                        cfg.output_dtype = Some(DType::from_name(dt_name).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }));
+                    }
+                    "--sarif" => {
+                        i += 1;
+                        sarif_path = args.get(i).cloned();
+                    }
+                    "--fail-on-annihilation" => fail_on_annihilation = true,
+                    "--json" => use_json = true,
+                    other if other.starts_with('-') => {
+                        eprintln!("Unknown project argument: {}", other);
+                        process::exit(1);
+                    }
+                    pos => positional.push(pos.to_string()),
+                }
+                i += 1;
+            }
+
+            if positional.len() < 2 {
+                eprintln!("Error: expected <candidate_uri> followed by at least one <anchor_uri>.");
+                process::exit(1);
+            }
+
+            let (_, cand_layers, cand_alphas, cand_dora, cand_cfg) =
+                load_full_adapter_bundle_or_exit(&positional[0], None);
+            let cand_input = AdapterMergeInput {
+                name: positional[0].clone(),
+                layers: cand_layers,
+                alphas: cand_alphas,
+                peft_config: cand_cfg,
+                weight: 1.0,
+            };
+
+            let mut anchor_inputs = Vec::with_capacity(positional.len() - 1);
+            for anc_uri in &positional[1..] {
+                let (_, anc_layers, anc_alphas, _, anc_cfg) =
+                    load_full_adapter_bundle_or_exit(anc_uri, None);
+                anchor_inputs.push(AdapterMergeInput {
+                    name: anc_uri.clone(),
+                    layers: anc_layers,
+                    alphas: anc_alphas,
+                    peft_config: anc_cfg,
+                    weight: 1.0,
+                });
+            }
+
+            let summary = project_adapter_orthogonal(&cand_input, &anchor_inputs, &cfg)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error running orthogonal projection: {}", e);
+                    process::exit(1);
+                });
+
+            if let Some(ref out_file) = out_path {
+                let mut out_map = layers_to_tensor_map(&summary.projected_layers);
+                if !cand_dora.is_empty() {
+                    let kept_dora = filter_dora_scales_for_layers(&cand_dora, &summary.projected_layers);
+                    insert_dora_scales(&mut out_map, &kept_dora, Some(&cfg.key_format), cfg.output_dtype);
+                }
+                if let Err(e) = write_safetensors(Path::new(out_file), &out_map) {
+                    eprintln!("Error writing {}: {}", out_file, e);
+                    process::exit(1);
+                }
+            }
+
+            if let Some(ref sp) = sarif_path {
+                let sarif_str = build_ortho_proj_sarif(&summary, env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::write(sp, sarif_str) {
+                    eprintln!("Error writing SARIF report {}: {}", sp, e);
+                    process::exit(1);
+                }
+            }
+
+            if use_json {
+                print!("{}", render_ortho_project_json(&summary));
+            } else {
+                print!("{}", render_ortho_project_table(&summary));
+            }
+
+            if !summary.incompatible_shapes.is_empty()
+                || (fail_on_annihilation
+                    && summary
+                        .diagnostics
+                        .iter()
+                        .any(|d| d.rule_id == "LS041" || d.severity == OrthoSeverity::Error))
+            {
                 process::exit(2);
             }
         }
