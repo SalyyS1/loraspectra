@@ -4,7 +4,11 @@ use crate::linalg::{
     axpy_slice, dot_slice, jacobi_svd, matmul, qr_core_singular_values, qr_core_svd_truncated,
     scale_slice, svd_to_lora_factors, transpose,
 };
+use crate::merge_check::AdapterMergeInput;
 use crate::safetensors::{LoraLayer, Tensor2D};
+use crate::ties_dare::{
+    compose_adapters_ties_dare, DisjointAggregation, TiesDareConfig, TiesDareMode,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub enum MergeStrategy {
@@ -17,6 +21,21 @@ pub enum MergeStrategy {
         w1: f64,
         w2: f64,
         density: f64,
+        target_rank: usize,
+    },
+    DareLinear {
+        w1: f64,
+        w2: f64,
+        drop_rate: f64,
+        seed: u64,
+        target_rank: usize,
+    },
+    DareTies {
+        w1: f64,
+        w2: f64,
+        drop_rate: f64,
+        density: f64,
+        seed: u64,
         target_rank: usize,
     },
     OrthoSvd {
@@ -44,6 +63,32 @@ impl MergeStrategy {
                 density,
                 target_rank,
             },
+            MergeStrategy::DareLinear {
+                drop_rate,
+                seed,
+                target_rank,
+                ..
+            } => MergeStrategy::DareLinear {
+                w1,
+                w2,
+                drop_rate,
+                seed,
+                target_rank,
+            },
+            MergeStrategy::DareTies {
+                drop_rate,
+                density,
+                seed,
+                target_rank,
+                ..
+            } => MergeStrategy::DareTies {
+                w1,
+                w2,
+                drop_rate,
+                density,
+                seed,
+                target_rank,
+            },
             MergeStrategy::OrthoSvd { target_rank, .. } => MergeStrategy::OrthoSvd {
                 w1,
                 w2,
@@ -56,6 +101,8 @@ impl MergeStrategy {
         match self {
             MergeStrategy::Linear { w1, w2, .. }
             | MergeStrategy::Ties { w1, w2, .. }
+            | MergeStrategy::DareLinear { w1, w2, .. }
+            | MergeStrategy::DareTies { w1, w2, .. }
             | MergeStrategy::OrthoSvd { w1, w2, .. } => (w1, w2),
         }
     }
@@ -659,25 +706,6 @@ fn combine_and_compress_factors(
     }
 }
 
-fn magnitude_prune_tensor(t: &Tensor2D, density: f64) -> Tensor2D {
-    let d = density.clamp(0.05, 1.0);
-    if d >= 0.999 {
-        return t.clone();
-    }
-    let mut mags: Vec<f64> = t.data.iter().map(|x| x.abs()).collect();
-    mags.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    let keep_idx = ((mags.len() as f64) * d).floor() as usize;
-    let threshold = mags.get(keep_idx.min(mags.len().saturating_sub(1))).copied().unwrap_or(0.0);
-
-    let mut out = t.clone();
-    for val in &mut out.data {
-        if val.abs() < threshold {
-            *val = 0.0;
-        }
-    }
-    out
-}
-
 /// Merge two matched `LoraLayer` instances according to `strategy`.
 pub fn merge_layer(
     layer1: &LoraLayer,
@@ -707,22 +735,104 @@ pub fn merge_layer(
             density,
             target_rank,
         } => {
-            let b1_p = magnitude_prune_tensor(&layer1.b, density);
-            let a1_p = magnitude_prune_tensor(&layer1.a, density);
-            let b2_p = magnitude_prune_tensor(&layer2.b, density);
-            let a2_p = magnitude_prune_tensor(&layer2.a, density);
-            combine_and_compress_factors(
-                &layer1.base_name,
-                &layer1.a_key,
-                &layer1.b_key,
-                &b1_p,
-                &a1_p,
-                &b2_p,
-                &a2_p,
-                w1,
-                w2,
-                target_rank,
-            )
+            let mut l2_norm = layer2.clone();
+            l2_norm.base_name = layer1.base_name.clone();
+            let inputs = vec![
+                AdapterMergeInput {
+                    name: "adapter_1".to_string(),
+                    layers: vec![layer1.clone()],
+                    alphas: BTreeMap::new(),
+                    peft_config: None,
+                    weight: w1,
+                },
+                AdapterMergeInput {
+                    name: "adapter_2".to_string(),
+                    layers: vec![l2_norm],
+                    alphas: BTreeMap::new(),
+                    peft_config: None,
+                    weight: w2,
+                },
+            ];
+            let mut cfg = TiesDareConfig::new(TiesDareMode::Ties, target_rank);
+            cfg.density = density.clamp(0.05, 1.0);
+            compose_adapters_ties_dare(&inputs, &cfg)
+                .expect("2-layer TIES composition")
+                .merged_layers
+                .into_iter()
+                .next()
+                .expect("merged layer")
+        }
+        MergeStrategy::DareLinear {
+            w1,
+            w2,
+            drop_rate,
+            seed,
+            target_rank,
+        } => {
+            let mut l2_norm = layer2.clone();
+            l2_norm.base_name = layer1.base_name.clone();
+            let inputs = vec![
+                AdapterMergeInput {
+                    name: "adapter_1".to_string(),
+                    layers: vec![layer1.clone()],
+                    alphas: BTreeMap::new(),
+                    peft_config: None,
+                    weight: w1,
+                },
+                AdapterMergeInput {
+                    name: "adapter_2".to_string(),
+                    layers: vec![l2_norm],
+                    alphas: BTreeMap::new(),
+                    peft_config: None,
+                    weight: w2,
+                },
+            ];
+            let mut cfg = TiesDareConfig::new(TiesDareMode::DareLinear, target_rank);
+            cfg.drop_rate = drop_rate.clamp(0.0, 0.99);
+            cfg.seed = seed;
+            compose_adapters_ties_dare(&inputs, &cfg)
+                .expect("2-layer DARE-Linear composition")
+                .merged_layers
+                .into_iter()
+                .next()
+                .expect("merged layer")
+        }
+        MergeStrategy::DareTies {
+            w1,
+            w2,
+            drop_rate,
+            density,
+            seed,
+            target_rank,
+        } => {
+            let mut l2_norm = layer2.clone();
+            l2_norm.base_name = layer1.base_name.clone();
+            let inputs = vec![
+                AdapterMergeInput {
+                    name: "adapter_1".to_string(),
+                    layers: vec![layer1.clone()],
+                    alphas: BTreeMap::new(),
+                    peft_config: None,
+                    weight: w1,
+                },
+                AdapterMergeInput {
+                    name: "adapter_2".to_string(),
+                    layers: vec![l2_norm],
+                    alphas: BTreeMap::new(),
+                    peft_config: None,
+                    weight: w2,
+                },
+            ];
+            let mut cfg = TiesDareConfig::new(TiesDareMode::DareTies, target_rank);
+            cfg.drop_rate = drop_rate.clamp(0.0, 0.99);
+            cfg.density = density.clamp(0.05, 1.0);
+            cfg.seed = seed;
+            compose_adapters_ties_dare(&inputs, &cfg)
+                .expect("2-layer DARE-TIES composition")
+                .merged_layers
+                .into_iter()
+                .next()
+                .expect("merged layer")
         }
         MergeStrategy::OrthoSvd {
             w1,
@@ -997,6 +1107,37 @@ pub fn merge_multiple_adapters(
         }
     }
 
+    if rules.is_empty() {
+        if let Ok(td_mode) = TiesDareMode::from_name(mode) {
+            let inputs: Vec<AdapterMergeInput> = adapters
+                .iter()
+                .zip(weights.iter())
+                .enumerate()
+                .map(|(i, (layers, &w))| AdapterMergeInput {
+                    name: format!("adapter_{}", i),
+                    layers: layers.clone(),
+                    alphas: BTreeMap::new(),
+                    peft_config: None,
+                    weight: w,
+                })
+                .collect();
+            let mut cfg = TiesDareConfig::new(td_mode, target_rank);
+            if td_mode == TiesDareMode::Ties {
+                cfg.density = 0.6;
+                cfg.aggregation = DisjointAggregation::DisjointMean;
+            }
+            cfg.preserve_spectral_norm = preserve_spectral_norm;
+            let summary = compose_adapters_ties_dare(&inputs, &cfg)?;
+            if let Some(inc) = summary.incompatible_shapes.first() {
+                return Err(format!(
+                    "Incompatible layer pair: {} ({}, {}) vs ({}, {})",
+                    inc.base_name, inc.shape_a.0, inc.shape_a.1, inc.shape_b.0, inc.shape_b.1
+                ));
+            }
+            return Ok(summary.merged_layers);
+        }
+    }
+
     let make_strategy = |w1: f64, w2: f64, rank: usize| -> MergeStrategy {
         match mode {
             "linear" => MergeStrategy::Linear {
@@ -1008,6 +1149,21 @@ pub fn merge_multiple_adapters(
                 w1,
                 w2,
                 density: 0.6,
+                target_rank: rank,
+            },
+            "dare-linear" | "dare" => MergeStrategy::DareLinear {
+                w1,
+                w2,
+                drop_rate: 0.5,
+                seed: 42,
+                target_rank: rank,
+            },
+            "dare-ties" => MergeStrategy::DareTies {
+                w1,
+                w2,
+                drop_rate: 0.5,
+                density: 1.0,
+                seed: 42,
                 target_rank: rank,
             },
             _ => MergeStrategy::OrthoSvd {

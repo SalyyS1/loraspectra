@@ -33,12 +33,16 @@ use loraspectra::safetensors::{
     strip_peft_base_prefix, write_peft_adapter_config, write_safetensors, DType, LoraLayer,
     PeftAdapterConfig, Tensor2D,
 };
-use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif};
+use loraspectra::sarif::{build_audit_sarif, build_merge_check_sarif, build_ties_dare_sarif};
+use loraspectra::ties_dare::{
+    compose_adapters_ties_dare, render_ties_dare_json, render_ties_dare_table, DisjointAggregation,
+    TiesDareConfig, TiesDareMode,
+};
 use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table};
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.5.0 - Spectral SVD Auditor, VeRA Fingerprinter, Subspace Drift Detector, Cross-Layer Alignment, FP8 Scale Validator, Compressor & Merger (.safetensors)
+        "loraspectra v1.6.0 - Spectral SVD Auditor, TIES/DARE Sign-Conflict Merger, VeRA Fingerprinter, Subspace Drift, Cross-Layer Alignment & FP8 Validator (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -53,7 +57,8 @@ USAGE:
   loraspectra extract <base_or_hf_uri> <tuned_or_hf_uri> <output_lora.safetensors> [--energy 0.99 | --rank K | --mp-denoise | --target-rank AVG_R | --budget-ratio 0.05 | --max-bytes 16M | --max-frobenius-error TOL | --max-spectral-error TOL] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--peft-config <adapter_config.json>]
   loraspectra interference <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--json]
   loraspectra merge-check <in_1> <in_2> [in_3 ...] [--weights W1:W2[:W3...]] [--json] [--sarif <output.sarif>] [--fail-on-conflict]
-  loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties] [--rank K] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32]
+  loraspectra merge <in_1> <in_2> [in_3 ...] <output.safetensors> [--mode ortho-svd|linear|ties|dare-ties|dare-linear] [--rank K] [--density 0.5] [--drop-rate 0.5] [--seed 42] [--aggregation disjoint-mean|weighted-mean|sum] [--weights W1:W2[:W3...]] [--layer-weights \"attn=1.0:0.2,mlp=0.2:1.0\"] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>]
+  loraspectra ties-dare <in_1> <in_2> [in_3 ...] [-o <output.safetensors>] [--mode ties|dare-ties|dare-linear] [--density 0.5] [--drop-rate 0.5] [--seed 42] [--rank K] [--weights W1:W2[:W3...]] [--aggregation disjoint-mean|weighted-mean|sum] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-conflict] [--json]
   loraspectra vera <adapter_or_hf_uri> [--json]
   loraspectra subspace-drift <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]
   loraspectra align <adapter_or_hf_uri> [--config <adapter_config.json>] [--json]
@@ -203,7 +208,7 @@ fn main() {
 
     match args[1].as_str() {
         "-V" | "--version" | "version" => {
-            println!("loraspectra 1.3.0");
+            println!("loraspectra {}", env!("CARGO_PKG_VERSION"));
         }
         "info" => {
             let json_mode = args[2..].iter().any(|a| a == "--json");
@@ -372,7 +377,12 @@ fn main() {
             }
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_audit_sarif(Some(&summary), Some(&integrity), source, "1.3.0");
+                let sarif_str = build_audit_sarif(
+                    Some(&summary),
+                    Some(&integrity),
+                    source,
+                    env!("CARGO_PKG_VERSION"),
+                );
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                 } else {
@@ -1368,7 +1378,7 @@ fn main() {
             };
 
             if let Some(ref s_path) = sarif_opt {
-                let sarif_str = build_merge_check_sarif(&summary, "1.3.0");
+                let sarif_str = build_merge_check_sarif(&summary, env!("CARGO_PKG_VERSION"));
                 if let Err(e) = std::fs::write(s_path, &sarif_str) {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                     process::exit(1);
@@ -1400,6 +1410,11 @@ fn main() {
             let mut positional: Vec<String> = Vec::new();
             let mut mode = "ortho-svd".to_string();
             let mut rank_opt: Option<usize> = None;
+            let mut density_opt: Option<f64> = None;
+            let mut drop_rate_opt: Option<f64> = None;
+            let mut seed_opt: Option<u64> = None;
+            let mut agg_opt: Option<DisjointAggregation> = None;
+            let mut sarif_opt: Option<String> = None;
             let mut custom_weights: Option<Vec<f64>> = None;
             let mut block_rules: Vec<BlockWeightRule> = Vec::new();
             let mut preserve_norm = false;
@@ -1418,6 +1433,30 @@ fn main() {
                     }
                     "--rank" if i + 1 < args.len() => {
                         rank_opt = Some(args[i + 1].parse().expect("Invalid --rank"));
+                        i += 2;
+                    }
+                    "--density" if i + 1 < args.len() => {
+                        density_opt = Some(args[i + 1].parse().expect("Invalid --density float"));
+                        i += 2;
+                    }
+                    "--drop-rate" if i + 1 < args.len() => {
+                        drop_rate_opt =
+                            Some(args[i + 1].parse().expect("Invalid --drop-rate float"));
+                        i += 2;
+                    }
+                    "--seed" if i + 1 < args.len() => {
+                        seed_opt = Some(args[i + 1].parse().expect("Invalid --seed integer"));
+                        i += 2;
+                    }
+                    "--aggregation" if i + 1 < args.len() => {
+                        agg_opt = Some(
+                            DisjointAggregation::from_name(&args[i + 1])
+                                .expect("Invalid --aggregation"),
+                        );
+                        i += 2;
+                    }
+                    "--sarif" if i + 1 < args.len() => {
+                        sarif_opt = Some(args[i + 1].clone());
                         i += 2;
                     }
                     "--weights" if i + 1 < args.len() => {
@@ -1456,8 +1495,10 @@ fn main() {
                         i += 2;
                     }
                     "--dtype" if i + 1 < args.len() => {
-                        target_dtype =
-                            Some(DType::from_name(&args[i + 1]).expect("Invalid --dtype (use f16, bf16, or f32)"));
+                        target_dtype = Some(
+                            DType::from_name(&args[i + 1])
+                                .expect("Invalid --dtype (use f16, bf16, or f32)"),
+                        );
                         i += 2;
                     }
                     arg if !arg.starts_with("--") => {
@@ -1495,7 +1536,7 @@ fn main() {
             let rank = rank_opt.unwrap_or(default_rank);
             let n_adapters = adapters.len();
             let weights = custom_weights.unwrap_or_else(|| {
-                if mode == "linear" || mode == "ties" {
+                if mode == "linear" || mode == "dare-linear" || mode == "dare" {
                     vec![1.0 / (n_adapters as f64); n_adapters]
                 } else {
                     vec![1.0; n_adapters]
@@ -1503,15 +1544,67 @@ fn main() {
             });
             let combined_dora = merge_dora_scales(&adapter_doras, &weights);
 
-            let mut merged = merge_multiple_adapters(
-                &adapters,
-                &weights,
-                &mode,
-                rank,
-                &block_rules,
-                preserve_norm,
-            )
-            .expect("Merge failed");
+            let mut merged = if block_rules.is_empty()
+                && TiesDareMode::from_name(&mode).is_ok()
+            {
+                let td_mode = TiesDareMode::from_name(&mode).unwrap();
+                let mut cfg = TiesDareConfig::new(td_mode, rank);
+                if let Some(d) = density_opt {
+                    cfg.density = d;
+                }
+                if let Some(dr) = drop_rate_opt {
+                    cfg.drop_rate = dr;
+                }
+                if let Some(s) = seed_opt {
+                    cfg.seed = s;
+                }
+                if let Some(agg) = agg_opt {
+                    cfg.aggregation = agg;
+                }
+                cfg.preserve_spectral_norm = preserve_norm;
+                let inputs: Vec<AdapterMergeInput> = input_paths
+                    .iter()
+                    .zip(adapters.into_iter())
+                    .zip(weights.iter())
+                    .map(|((src, layers), &w)| AdapterMergeInput {
+                        name: src.clone(),
+                        layers,
+                        alphas: BTreeMap::new(),
+                        peft_config: None,
+                        weight: w,
+                    })
+                    .collect();
+                let summary = compose_adapters_ties_dare(&inputs, &cfg).unwrap_or_else(|e| {
+                    eprintln!("Merge failed: {}", e);
+                    process::exit(1);
+                });
+                if !summary.incompatible_shapes.is_empty() {
+                    let inc = &summary.incompatible_shapes[0];
+                    eprintln!(
+                        "Incompatible layer shapes on {}: ({}x{}) vs ({}x{})",
+                        inc.base_name, inc.shape_a.0, inc.shape_a.1, inc.shape_b.0, inc.shape_b.1
+                    );
+                    process::exit(1);
+                }
+                if let Some(ref s_path) = sarif_opt {
+                    let sarif_str = build_ties_dare_sarif(&summary, env!("CARGO_PKG_VERSION"));
+                    if let Err(e) = std::fs::write(s_path, &sarif_str) {
+                        eprintln!("Error writing SARIF report to {}: {}", s_path, e);
+                        process::exit(1);
+                    }
+                }
+                summary.merged_layers
+            } else {
+                merge_multiple_adapters(
+                    &adapters,
+                    &weights,
+                    &mode,
+                    rank,
+                    &block_rules,
+                    preserve_norm,
+                )
+                .expect("Merge failed")
+            };
 
             if let Some(ref fmt) = target_format {
                 convert_layers_key_format(&mut merged, fmt).expect("Invalid --format");
@@ -1538,6 +1631,279 @@ fn main() {
                 output_path,
                 bytes
             );
+        }
+        "ties-dare" | "compose" => {
+            let mut positional: Vec<String> = Vec::new();
+            let mut out_opt: Option<String> = None;
+            let mut mode_str = "ties".to_string();
+            let mut rank_opt: Option<usize> = None;
+            let mut density_opt: Option<f64> = None;
+            let mut drop_rate_opt: Option<f64> = None;
+            let mut seed_opt: Option<u64> = None;
+            let mut agg_opt: Option<DisjointAggregation> = None;
+            let mut custom_weights: Option<Vec<f64>> = None;
+            let mut preserve_norm = false;
+            let mut bake_alpha = false;
+            let mut rslora = false;
+            let mut default_alpha: Option<f64> = None;
+            let mut target_format: Option<String> = None;
+            let mut target_dtype: Option<DType> = None;
+            let mut sarif_opt: Option<String> = None;
+            let mut fail_on_conflict = false;
+            let mut json_mode = false;
+
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-o" | "--output" if i + 1 < args.len() => {
+                        out_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--mode" if i + 1 < args.len() => {
+                        mode_str = args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--rank" if i + 1 < args.len() => {
+                        rank_opt = Some(args[i + 1].parse().expect("Invalid --rank"));
+                        i += 2;
+                    }
+                    "--density" if i + 1 < args.len() => {
+                        density_opt = Some(args[i + 1].parse().expect("Invalid --density float"));
+                        i += 2;
+                    }
+                    "--drop-rate" if i + 1 < args.len() => {
+                        drop_rate_opt =
+                            Some(args[i + 1].parse().expect("Invalid --drop-rate float"));
+                        i += 2;
+                    }
+                    "--seed" if i + 1 < args.len() => {
+                        seed_opt = Some(args[i + 1].parse().expect("Invalid --seed integer"));
+                        i += 2;
+                    }
+                    "--aggregation" if i + 1 < args.len() => {
+                        agg_opt = Some(
+                            DisjointAggregation::from_name(&args[i + 1])
+                                .unwrap_or_else(|e| {
+                                    eprintln!("Error: {}", e);
+                                    process::exit(1);
+                                }),
+                        );
+                        i += 2;
+                    }
+                    "--weights" if i + 1 < args.len() => {
+                        let parsed: Vec<f64> = args[i + 1]
+                            .split(':')
+                            .map(|s| s.parse::<f64>().expect("Invalid float in --weights"))
+                            .collect();
+                        custom_weights = Some(parsed);
+                        i += 2;
+                    }
+                    "--preserve-norm" => {
+                        preserve_norm = true;
+                        i += 1;
+                    }
+                    "--bake-alpha" => {
+                        bake_alpha = true;
+                        i += 1;
+                    }
+                    "--rslora" => {
+                        rslora = true;
+                        bake_alpha = true;
+                        i += 1;
+                    }
+                    "--alpha" if i + 1 < args.len() => {
+                        default_alpha = Some(args[i + 1].parse().expect("Invalid --alpha float"));
+                        bake_alpha = true;
+                        i += 2;
+                    }
+                    "--format" if i + 1 < args.len() => {
+                        target_format = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--dtype" if i + 1 < args.len() => {
+                        target_dtype = Some(
+                            DType::from_name(&args[i + 1])
+                                .expect("Invalid --dtype (use f16, bf16, or f32)"),
+                        );
+                        i += 2;
+                    }
+                    "--sarif" if i + 1 < args.len() => {
+                        sarif_opt = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--fail-on-conflict" => {
+                        fail_on_conflict = true;
+                        i += 1;
+                    }
+                    "--json" => {
+                        json_mode = true;
+                        i += 1;
+                    }
+                    arg if !arg.starts_with('-') => {
+                        positional.push(arg.to_string());
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+
+            if positional.len() < 2 {
+                print_usage();
+                process::exit(1);
+            }
+
+            let td_mode = match TiesDareMode::from_name(&mode_str) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            let n_inputs = positional.len();
+            let weights = match custom_weights {
+                Some(w) => {
+                    if w.len() != n_inputs {
+                        eprintln!(
+                            "Error: --weights count ({}) must match adapter count ({})",
+                            w.len(),
+                            n_inputs
+                        );
+                        process::exit(1);
+                    }
+                    w
+                }
+                None => {
+                    if td_mode == TiesDareMode::DareLinear {
+                        vec![1.0 / (n_inputs as f64); n_inputs]
+                    } else {
+                        vec![1.0; n_inputs]
+                    }
+                }
+            };
+
+            let mut inputs = Vec::with_capacity(n_inputs);
+            let mut adapter_doras = Vec::with_capacity(n_inputs);
+            let mut any_alphas = false;
+            for (src, &w) in positional.iter().zip(weights.iter()) {
+                let (_, mut layers, alphas, dora, peft_config) =
+                    load_full_adapter_bundle_or_exit(src, None);
+                if !alphas.is_empty() {
+                    any_alphas = true;
+                }
+                adapter_doras.push(dora);
+                if bake_alpha {
+                    bake_adapter_scaling(&mut layers, &alphas, default_alpha, rslora);
+                    inputs.push(AdapterMergeInput {
+                        name: src.clone(),
+                        layers,
+                        alphas: BTreeMap::new(),
+                        peft_config: None,
+                        weight: w,
+                    });
+                } else {
+                    inputs.push(AdapterMergeInput {
+                        name: src.clone(),
+                        layers,
+                        alphas,
+                        peft_config,
+                        weight: w,
+                    });
+                }
+            }
+
+            let default_rank = inputs[0]
+                .layers
+                .iter()
+                .map(|l| l.rank())
+                .max()
+                .unwrap_or(16);
+            let mut cfg = TiesDareConfig::new(td_mode, rank_opt.unwrap_or(default_rank));
+            if let Some(d) = density_opt {
+                cfg.density = d;
+            }
+            if let Some(dr) = drop_rate_opt {
+                cfg.drop_rate = dr;
+            }
+            if let Some(s) = seed_opt {
+                cfg.seed = s;
+            }
+            if let Some(agg) = agg_opt {
+                cfg.aggregation = agg;
+            }
+            cfg.preserve_spectral_norm = preserve_norm;
+            cfg.output_dtype = target_dtype;
+
+            let mut summary = match compose_adapters_ties_dare(&inputs, &cfg) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("ties-dare failed: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            if let Some(ref s_path) = sarif_opt {
+                let sarif_str = build_ties_dare_sarif(&summary, env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::write(s_path, &sarif_str) {
+                    eprintln!("Error writing SARIF report to {}: {}", s_path, e);
+                    process::exit(1);
+                }
+            }
+
+            if let Some(ref out_path) = out_opt {
+                if !summary.incompatible_shapes.is_empty() {
+                    eprintln!(
+                        "Error: cannot write {} because {} layer shape mismatch(es) were detected",
+                        out_path,
+                        summary.incompatible_shapes.len()
+                    );
+                    process::exit(1);
+                }
+                if let Some(ref fmt) = target_format {
+                    convert_layers_key_format(&mut summary.merged_layers, fmt)
+                        .expect("Invalid --format");
+                }
+                if let Some(dt) = target_dtype {
+                    cast_layers_dtype(&mut summary.merged_layers, dt);
+                }
+                let mut out_map = layers_to_tensor_map(&summary.merged_layers);
+                if any_alphas {
+                    insert_unit_alpha_tensors(&mut out_map, &summary.merged_layers);
+                }
+                let combined_dora = merge_dora_scales(&adapter_doras, &weights);
+                if !combined_dora.is_empty() {
+                    insert_dora_scales(
+                        &mut out_map,
+                        &combined_dora,
+                        target_format.as_deref(),
+                        target_dtype,
+                    );
+                }
+                if let Err(e) = write_safetensors(Path::new(out_path), &out_map) {
+                    eprintln!("Error writing {}: {}", out_path, e);
+                    process::exit(1);
+                }
+            }
+
+            if json_mode {
+                println!("{}", render_ties_dare_json(&summary));
+            } else {
+                print!("{}", render_ties_dare_table(&summary));
+                if let Some(ref out_path) = out_opt {
+                    println!(
+                        "Saved composed adapter ({} layers) to {}",
+                        summary.merged_layers.len(),
+                        out_path
+                    );
+                }
+                if let Some(ref s_path) = sarif_opt {
+                    println!("Saved OASIS SARIF v2.1.0 report to {}", s_path);
+                }
+            }
+
+            if fail_on_conflict && summary.has_conflicts() {
+                process::exit(2);
+            }
         }
         "vera" => {
             // VeRA scaling vector fingerprinting

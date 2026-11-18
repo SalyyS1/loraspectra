@@ -1,8 +1,8 @@
 [package]
 name = "loraspectra"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
-description = "Spectral SVD auditor, Eckart-Young dynamic rank compressor, cross-layer Grassmannian alignment, FP8 scale validator, and orthogonal subspace merger for .safetensors LoRA adapters"
+description = "Spectral SVD auditor, Eckart-Young dynamic rank compressor, TIES/DARE sign-conflict merger, Grassmannian alignment, and FP8 validator for .safetensors LoRA adapters"
 license = "MIT"
 repository = "https://github.com/SalyyS1/loraspectra"
 keywords = ["lora", "safetensors", "svd", "llm", "model-merging"]

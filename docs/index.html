@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.4.0 - Interactive .safetensors Header, Spectral SVD, NF4 Quantization, VeRA &amp; Merge Inspector</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, NF4/FP4/INT8 quantization &amp; Eckart-Young truncation bound analyzer, VeRA fingerprinter, subspace drift detector, and multi-adapter merge-check + zero-dependency Rust CLI (v1.4.0).">
-  <meta property="og:title" content="loraspectra v1.4.0 - Interactive .safetensors Header, Spectral SVD, NF4 Quantization, VeRA &amp; Merge Inspector">
+  <title>loraspectra v1.6.0 - Interactive .safetensors Header, Spectral SVD, TIES/DARE, NF4/FP8 &amp; Merge Inspector</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, TIES-Merging &amp; DARE sign-conflict resolver, NF4/FP4/INT8/FP8 quantization validator, VeRA fingerprinter, Grassmannian alignment, and multi-adapter merge-check + zero-dependency Rust CLI (v1.6.0).">
+  <meta property="og:title" content="loraspectra v1.6.0 - Interactive .safetensors Header, Spectral SVD, TIES/DARE, NF4/FP8 &amp; Merge Inspector">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -419,7 +419,7 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.4.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.6.0</span></h1>
         <p class="lead">
           Spectral SVD Auditor, NF4/FP4/INT8 Quantization Reconstruction &amp; Eckart-Young Truncation Bound Analyzer, rsLoRA &amp; PiSSA Residual Validator, DoRA Analyzer, Zero-Copy <code>.safetensors</code> Header Inspector, Dynamic Rank Compressor, and Multi-Adapter Merge Conflict Analyzer
           - powered by exact QR-Core SVD
@@ -726,8 +726,13 @@ loraspectra compress ./checkpoint/adapter_model.safetensors --out-dir ./adapter_
 # Analyze N-adapter subspace collision and norm inflation prior to TIES/DARE/linear merging
 loraspectra merge-check hf://org/code-lora hf://org/math-lora hf://org/sql-lora --sarif merge.sarif
 
-# VeRA adapter fingerprinting: audit lambda_b/lambda_d scaling vectors (LS025/LS026)
+# Compose N adapters with TIES-Merging or DARE-TIES sign-conflict election, Frobenius energy ledger &amp; SARIF (LS035-LS038)
+loraspectra ties-dare hf://org/code-lora hf://org/math-lora hf://org/sql-lora -o merged_ties.safetensors --mode dare-ties --drop-rate 0.5 --rank 32 --sarif ties-dare.sarif
+
+# VeRA adapter fingerprinting, cross-layer Grassmannian alignment, and OFP8 E4M3/E5M2 scale validation
 loraspectra vera ./vera_checkpoint/adapter_model.safetensors --json
+loraspectra align ./checkpoint/adapter_model.safetensors --json
+loraspectra fp8-validate ./fp8_checkpoint/model.safetensors --format e4m3 --json
 
 # Subspace drift analysis: principal-angle rotation between two training checkpoints (LS027/LS028)
 loraspectra subspace-drift ./adapter_step500.safetensors ./adapter_step1000.safetensors --json</pre>

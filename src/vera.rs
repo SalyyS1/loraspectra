@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::linalg::{dot_slice, qr_core_singular_values};
-use crate::safetensors::{DType, Tensor2D};
+use crate::linalg::dot_slice;
+use crate::safetensors::Tensor2D;
 
 /// Health classification for a single VeRA scaling vector pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,7 +370,6 @@ pub fn render_vera_table(report: &VeraAdapterReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Rng64;
     use crate::safetensors::DType;
 
     fn make_tensor1d(data: Vec<f64>, dtype: DType) -> Tensor2D {

@@ -11,6 +11,7 @@ pub mod quant_fp8;
 pub mod remote;
 pub mod safetensors;
 pub mod sarif;
+pub mod ties_dare;
 pub mod vera;
 
 /// Deterministic SplitMix64 pseudo-random generator for reproducible synthetic LoRA benchmarks and tests.
@@ -3344,7 +3345,7 @@ mod tests {
 
     #[test]
     fn test_subspace_drift_healthy_detection() {
-        use crate::diff::{compute_layer_subspace_drift, SubspaceDriftClass};
+        use crate::diff::compute_layer_subspace_drift;
 
         let mut rng_a = Rng64::new(5002);
         let mut rng_b = Rng64::new(5003);
@@ -3453,7 +3454,7 @@ mod tests {
 
     #[test]
     fn test_subspace_drift_summary_aggregation() {
-        use crate::diff::{analyze_subspace_drift, SubspaceDriftClass};
+        use crate::diff::analyze_subspace_drift;
         use std::collections::BTreeMap;
 
         let mut rng1 = Rng64::new(5006);

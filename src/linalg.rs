@@ -93,6 +93,8 @@ pub fn thin_qr_columns(m: &Tensor2D) -> (Vec<Vec<f64>>, Tensor2D) {
     let mut r_mat = Tensor2D::zeros(cols, cols, DType::F32);
 
     for j in 0..cols {
+        let col_orig_norm = dot_slice(&q_cols[j], &q_cols[j]).sqrt();
+
         // First Modified Gram-Schmidt pass
         for i in 0..j {
             let proj = dot_slice(&q_cols[i], &q_cols[j]);
@@ -111,9 +113,24 @@ pub fn thin_qr_columns(m: &Tensor2D) -> (Vec<Vec<f64>>, Tensor2D) {
         }
 
         let norm = dot_slice(&q_cols[j], &q_cols[j]).sqrt();
-        if norm > 1e-14 {
+        let rank_tol = (col_orig_norm * 1e-12).max(1e-14);
+        if norm > rank_tol {
             r_mat.set(j, j, norm);
             scale_slice(&mut q_cols[j], 1.0 / norm);
+            // Post-normalization polish when severe cancellation reduced column norm
+            if norm < col_orig_norm * 1e-4 {
+                for i in 0..j {
+                    let corr = dot_slice(&q_cols[i], &q_cols[j]);
+                    if corr.abs() > 1e-16 {
+                        let qi = q_cols[i].clone();
+                        axpy_slice(&mut q_cols[j], -corr, &qi);
+                    }
+                }
+                let renorm = dot_slice(&q_cols[j], &q_cols[j]).sqrt();
+                if renorm > 1e-7 {
+                    scale_slice(&mut q_cols[j], 1.0 / renorm);
+                }
+            }
         } else {
             r_mat.set(j, j, 0.0);
             q_cols[j].fill(0.0);
@@ -127,8 +144,15 @@ pub fn thin_qr_columns(m: &Tensor2D) -> (Vec<Vec<f64>>, Tensor2D) {
                     let qi = q_cols[i].clone();
                     axpy_slice(&mut q_cols[j], -proj, &qi);
                 }
+                for i in 0..j {
+                    let corr = dot_slice(&q_cols[i], &q_cols[j]);
+                    if corr.abs() > 1e-16 {
+                        let qi = q_cols[i].clone();
+                        axpy_slice(&mut q_cols[j], -corr, &qi);
+                    }
+                }
                 let bnorm = dot_slice(&q_cols[j], &q_cols[j]).sqrt();
-                if bnorm > 1e-7 {
+                if bnorm > 1e-3 {
                     scale_slice(&mut q_cols[j], 1.0 / bnorm);
                     found = true;
                     break;

@@ -1,5 +1,6 @@
 use crate::audit::{AdapterAuditSummary, AdapterIntegrityReport, IssueSeverity, LayerHealth};
 use crate::merge_check::MultiMergeCheckSummary;
+use crate::ties_dare::TiesDareComposeSummary;
 
 pub struct SarifRuleDefinition {
     pub id: &'static str,
@@ -205,6 +206,76 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         short_description: "LoRA singular subspace has rotated catastrophically between checkpoints",
         full_description: "The mean principal angle between right/left singular vector subspaces across two checkpoints exceeds 60 degrees, indicating the adapter's learned low-rank subspace has been completely overwritten, risking catastrophic forgetting of earlier fine-tuning signal.",
         default_level: "error",
+    },
+    SarifRuleDefinition {
+        id: "LS029",
+        name: "RedundantCrossLayerAlignment",
+        short_description: "Adjacent LoRA layers exhibit near-identical input subspaces",
+        full_description: "Grassmannian distance between consecutive adapted layers is below pi/12 (mean angle < 15 degrees), indicating redundant subspace capacity across adjacent blocks.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS030",
+        name: "MaximallyDisjointCrossLayer",
+        short_description: "Adjacent LoRA layers are nearly maximally disjoint on the Grassmann manifold",
+        full_description: "Grassmannian distance between consecutive adapted layers exceeds pi/2.5, indicating abrupt subspace discontinuity across adjacent blocks.",
+        default_level: "note",
+    },
+    SarifRuleDefinition {
+        id: "LS031",
+        name: "Fp8ScaleNanOrInf",
+        short_description: "FP8 quantization scale factor is NaN or infinite",
+        full_description: "An FP8 E4M3 or E5M2 scale tensor contains NaN or Inf entries, corrupting dequantized linear layer activations.",
+        default_level: "error",
+    },
+    SarifRuleDefinition {
+        id: "LS032",
+        name: "Fp8ScaleNonPositive",
+        short_description: "FP8 quantization scale factor is zero or negative",
+        full_description: "An FP8 scale tensor contains zero or negative entries, zeroing out or sign-inverting quantized weights.",
+        default_level: "error",
+    },
+    SarifRuleDefinition {
+        id: "LS033",
+        name: "Fp8ScaleOverflow",
+        short_description: "FP8 scale factor causes weight codes to exceed format max finite bound",
+        full_description: "Dividing layer weights by the FP8 scale factor exceeds the representable maximum finite code (448 for E4M3, 57344 for E5M2), causing saturation or NaN.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS034",
+        name: "Fp8ScaleSubnormal",
+        short_description: "FP8 scale factor falls in the subnormal denormalized range",
+        full_description: "An FP8 scale factor lies below the format minimum normal value, risking mantissa precision loss during dequantization.",
+        default_level: "note",
+    },
+    SarifRuleDefinition {
+        id: "LS035",
+        name: "TiesSignElectionConflict",
+        short_description: "Severe cross-adapter sign conflict during TIES or DARE composition",
+        full_description: "Shared active parameter coordinates across adapters exhibit high opposing-sign collision (>=35% overlap conflict or >=25% vetoed Frobenius energy), causing sign-election vetoes or linear cancellation.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS036",
+        name: "DareDropSignalDistortion",
+        short_description: "DARE Bernoulli drop-and-rescale caused severe signal wipeout or variance spike",
+        full_description: "Stochastic DARE masking with 1/(1-p) rescaling either wiped out >=80% of concentrated sparse adapter Frobenius energy or inflated layer energy above 2.5x theoretical expectation.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS037",
+        name: "MaskRankScatteringLoss",
+        short_description: "Non-linear TIES/DARE masking scattered Frobenius energy beyond target LoRA rank",
+        full_description: "Coordinate-wise magnitude trimming or Bernoulli masking raised the algebraic rank of the composed delta matrix, losing >15% of Frobenius energy when re-projected to target_rank.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS038",
+        name: "ExcessiveTrimEnergyLoss",
+        short_description: "Aggressive TIES magnitude trimming pruned over half of adapter Frobenius energy",
+        full_description: "Top-k% TIES magnitude trimming retained <50% of pre-trim Frobenius energy on a dense weight distribution, discarding substantial fine-tuned signal.",
+        default_level: "warning",
     },
 ];
 
@@ -551,6 +622,140 @@ pub fn build_merge_check_sarif(
             l.spectral_inflation_ratio,
             l.min_pair_frobenius_cosine,
             l.union_rank_99
+        ));
+    }
+
+    let rules_rendered: Vec<String> = LORASPECTRA_SARIF_RULES
+        .iter()
+        .map(|r| {
+            format!(
+                r#"{{
+            "id": "{}",
+            "name": "{}",
+            "shortDescription": {{ "text": "{}" }},
+            "fullDescription": {{ "text": "{}" }},
+            "defaultConfiguration": {{ "level": "{}" }},
+            "helpUri": "https://github.com/SalyyS1/loraspectra#sarif-diagnostics"
+          }}"#,
+                r.id,
+                r.name,
+                escape_json(r.short_description),
+                escape_json(r.full_description),
+                r.default_level
+            )
+        })
+        .collect();
+
+    format!(
+        r#"{{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {{
+      "tool": {{
+        "driver": {{
+          "name": "loraspectra",
+          "version": "{}",
+          "informationUri": "https://github.com/SalyyS1/loraspectra",
+          "rules": [
+            {}
+          ]
+        }}
+      }},
+      "results": [
+        {}
+      ]
+    }}
+  ]
+}}
+"#,
+        escape_json(tool_version),
+        rules_rendered.join(",\n            "),
+        results_json.join(",\n        ")
+    )
+}
+
+pub fn build_ties_dare_sarif(
+    summary: &TiesDareComposeSummary,
+    tool_version: &str,
+) -> String {
+    let mut results_json = Vec::new();
+
+    for inc in &summary.incompatible_shapes {
+        let msg = format!(
+            "Layer '{}' has incompatible shapes: {} ({}x{}) vs {} ({}x{})",
+            inc.base_name,
+            inc.adapter_a,
+            inc.shape_a.0,
+            inc.shape_a.1,
+            inc.adapter_b,
+            inc.shape_b.0,
+            inc.shape_b.1
+        );
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "LS018",
+        "level": "error",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ]
+      }}"#,
+            escape_json(&msg),
+            escape_json(&inc.adapter_b),
+            escape_json(&inc.base_name)
+        ));
+    }
+
+    for diag in &summary.diagnostics {
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "{}",
+        "level": "{}",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ],
+        "properties": {{
+          "mode": "{}",
+          "signConflictRate": {:.6},
+          "discardedConflictRatio": {:.6},
+          "svdRetainedRatio": {:.6},
+          "trimRetainedRatio": {:.6},
+          "dareRescaleRatio": {:.6}
+        }}
+      }}"#,
+            diag.rule_id,
+            diag.severity.as_str(),
+            escape_json(&diag.message),
+            escape_json(&diag.artifact_uri),
+            escape_json(&diag.layer_name),
+            summary.mode.as_str(),
+            diag.sign_conflict_rate,
+            diag.discarded_conflict_ratio,
+            diag.svd_retained_ratio,
+            diag.trim_retained_ratio,
+            diag.dare_rescale_ratio
         ));
     }
 
