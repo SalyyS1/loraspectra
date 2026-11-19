@@ -21,6 +21,10 @@ use loraspectra::merge_check::{
     AdapterMergeInput,
 };
 use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
+use loraspectra::knots::{
+    compose_adapters_knots, render_knots_json, render_knots_table, KnotsConfig, KnotsMode,
+    KnotsSeverity,
+};
 use loraspectra::lora_ga::{
     apply_lora_ga_base_compensation, optimize_lora_ga_init, render_lora_ga_json,
     render_lora_ga_table, GradientSource, LoraGaConfig, LoraGaScaleMode, LoraGaSeverity,
@@ -42,8 +46,8 @@ use loraspectra::safetensors::{
     PeftAdapterConfig, Tensor2D,
 };
 use loraspectra::sarif::{
-    build_audit_sarif, build_lora_ga_sarif, build_merge_check_sarif, build_ortho_proj_sarif,
-    build_ties_dare_sarif,
+    build_audit_sarif, build_knots_sarif, build_lora_ga_sarif, build_merge_check_sarif,
+    build_ortho_proj_sarif, build_ties_dare_sarif,
 };
 use loraspectra::ties_dare::{
     compose_adapters_ties_dare, render_ties_dare_json, render_ties_dare_table, DisjointAggregation,
@@ -53,7 +57,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.7.0 - Spectral SVD Auditor, LoRA-GA Initializer, Cross-Checkpoint Orthogonal Projector, TIES/DARE Merger & FP8 Validator (.safetensors)
+        "loraspectra v1.8.0 - Spectral SVD Auditor, Knots/TSV Subspace Aligner, LoRA-GA Initializer, Orthogonal Projector & TIES/DARE Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -72,6 +76,7 @@ USAGE:
   loraspectra ties-dare <in_1> <in_2> [in_3 ...] [-o <output.safetensors>] [--mode ties|dare-ties|dare-linear] [--density 0.5] [--drop-rate 0.5] [--seed 42] [--rank K] [--weights W1:W2[:W3...]] [--aggregation disjoint-mean|weighted-mean|sum] [--preserve-norm] [--bake-alpha] [--rslora] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-conflict] [--json]
   loraspectra lora-ga <grad_or_warmup_uri> [-o <init_lora.safetensors>] [--rank R] [--scale stable|direction|gd|svd] [--gamma 16.0] [--alpha A] [--rslora] [--emit-init] [--base <base.safetensors> --out-base <res_base.safetensors>] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--json]
   loraspectra project <candidate_uri> <anchor_1_uri> [anchor_2_uri ...] [-o <projected_lora.safetensors>] [--domain right|left|bilateral] [--anchor-energy 0.99] [--strength 1.0] [--rank K] [--preserve-norm] [--bake-alpha] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-annihilation] [--json]
+  loraspectra knots <in_1> <in_2> [in_3 ...] [-o <output.safetensors>] [--mode knots-ties|iso|tsv] [--density 0.5] [--isotropy 1.0] [--rank K] [--weights W1:W2[:W3...]] [--normalize-tasks] [--preserve-norm] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-conflict] [--json]
   loraspectra vera <adapter_or_hf_uri> [--json]
   loraspectra subspace-drift <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]
   loraspectra align <adapter_or_hf_uri> [--config <adapter_config.json>] [--json]
@@ -2433,6 +2438,178 @@ fn main() {
                         .diagnostics
                         .iter()
                         .any(|d| d.rule_id == "LS041" || d.severity == OrthoSeverity::Error))
+            {
+                process::exit(2);
+            }
+        }
+        "knots" | "tsv" => {
+            if args.len() < 4 {
+                eprintln!("Usage: loraspectra knots <in_1> <in_2> [in_3 ...] [-o <output.safetensors>] [--mode knots-ties|iso|tsv] [--density 0.5] [--isotropy 1.0] [--rank K] [--weights W1:W2[:W3...]] [--normalize-tasks] [--preserve-norm] [--format peft|kohya|diffusers] [--dtype f16|bf16|f32] [--sarif <output.sarif>] [--fail-on-conflict] [--json]");
+                process::exit(1);
+            }
+            let mut positional: Vec<String> = Vec::new();
+            let mut out_path: Option<String> = None;
+            let mut sarif_path: Option<String> = None;
+            let mut weights_arg: Option<String> = None;
+            let mut fail_on_conflict = false;
+            let mut use_json = false;
+            let mut cfg = KnotsConfig::default();
+            if args[1] == "tsv" {
+                cfg.mode = KnotsMode::TaskSingularVectors;
+            }
+
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-o" | "--out" | "--output" => {
+                        i += 1;
+                        out_path = args.get(i).cloned();
+                    }
+                    "--mode" => {
+                        i += 1;
+                        let m_str = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                        cfg.mode = KnotsMode::from_name(m_str).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        });
+                    }
+                    "--density" => {
+                        i += 1;
+                        cfg.density = args
+                            .get(i)
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --density value");
+                                process::exit(1);
+                            });
+                    }
+                    "--isotropy" => {
+                        i += 1;
+                        cfg.isotropy = args
+                            .get(i)
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --isotropy value");
+                                process::exit(1);
+                            });
+                    }
+                    "--rank" | "-r" => {
+                        i += 1;
+                        let r_val = args
+                            .get(i)
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or_else(|| {
+                                eprintln!("Invalid --rank value");
+                                process::exit(1);
+                            });
+                        cfg.target_rank = Some(r_val);
+                    }
+                    "--weights" | "-w" => {
+                        i += 1;
+                        weights_arg = args.get(i).cloned();
+                    }
+                    "--normalize-tasks" => cfg.normalize_tasks = true,
+                    "--preserve-norm" => cfg.preserve_norm = true,
+                    "--format" => {
+                        i += 1;
+                        cfg.key_format = args.get(i).cloned().unwrap_or_else(|| "peft".to_string());
+                    }
+                    "--dtype" => {
+                        i += 1;
+                        let dt_name = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                        cfg.output_dtype = Some(DType::from_name(dt_name).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }));
+                    }
+                    "--sarif" => {
+                        i += 1;
+                        sarif_path = args.get(i).cloned();
+                    }
+                    "--fail-on-conflict" => fail_on_conflict = true,
+                    "--json" => use_json = true,
+                    other if other.starts_with('-') => {
+                        eprintln!("Unknown knots argument: {}", other);
+                        process::exit(1);
+                    }
+                    pos => positional.push(pos.to_string()),
+                }
+                i += 1;
+            }
+
+            if positional.len() < 2 {
+                eprintln!("Error: expected at least 2 input adapters for knots.");
+                process::exit(1);
+            }
+
+            let parsed_weights: Vec<f64> = if let Some(ref w_str) = weights_arg {
+                let parts: Vec<f64> = w_str
+                    .split(':')
+                    .map(|p| {
+                        p.trim().parse::<f64>().unwrap_or_else(|_| {
+                            eprintln!("Invalid weight '{}' in --weights {}", p, w_str);
+                            process::exit(1);
+                        })
+                    })
+                    .collect();
+                if parts.len() != positional.len() {
+                    eprintln!(
+                        "Error: --weights has {} entries but {} adapters were provided",
+                        parts.len(),
+                        positional.len()
+                    );
+                    process::exit(1);
+                }
+                parts
+            } else {
+                vec![1.0; positional.len()]
+            };
+
+            let mut merge_inputs = Vec::with_capacity(positional.len());
+            for (idx, uri) in positional.iter().enumerate() {
+                let (_, layers, alphas, _, peft_cfg) = load_full_adapter_bundle_or_exit(uri, None);
+                merge_inputs.push(AdapterMergeInput {
+                    name: uri.clone(),
+                    layers,
+                    alphas,
+                    peft_config: peft_cfg,
+                    weight: parsed_weights[idx],
+                });
+            }
+
+            let summary = compose_adapters_knots(&merge_inputs, &cfg).unwrap_or_else(|e| {
+                eprintln!("Error running knots composition: {}", e);
+                process::exit(1);
+            });
+
+            if let Some(ref out_file) = out_path {
+                let out_map = layers_to_tensor_map(&summary.merged_layers);
+                if let Err(e) = write_safetensors(Path::new(out_file), &out_map) {
+                    eprintln!("Error writing {}: {}", out_file, e);
+                    process::exit(1);
+                }
+            }
+
+            if let Some(ref sp) = sarif_path {
+                let sarif_str = build_knots_sarif(&summary, env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::write(sp, sarif_str) {
+                    eprintln!("Error writing SARIF report {}: {}", sp, e);
+                    process::exit(1);
+                }
+            }
+
+            if use_json {
+                print!("{}", render_knots_json(&summary));
+            } else {
+                print!("{}", render_knots_table(&summary));
+            }
+
+            if !summary.incompatible_shapes.is_empty()
+                || (fail_on_conflict
+                    && summary
+                        .diagnostics
+                        .iter()
+                        .any(|d| d.rule_id == "LS043" || d.severity == KnotsSeverity::Error))
             {
                 process::exit(2);
             }

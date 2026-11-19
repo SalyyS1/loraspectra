@@ -1,8 +1,8 @@
 [package]
 name = "loraspectra"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
-description = "Spectral SVD auditor, LoRA-GA spectral initializer, cross-checkpoint orthogonal projector, Eckart-Young compressor, and TIES/DARE merger for .safetensors LoRA adapters"
+description = "Spectral SVD auditor, Knots joint-SVD & TSV multi-adapter subspace aligner, LoRA-GA initializer, orthogonal projector, compressor, and TIES/DARE merger for .safetensors LoRA adapters"
 license = "MIT"
 repository = "https://github.com/SalyyS1/loraspectra"
 keywords = ["lora", "safetensors", "svd", "llm", "model-merging"]

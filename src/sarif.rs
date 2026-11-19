@@ -1,4 +1,5 @@
 use crate::audit::{AdapterAuditSummary, AdapterIntegrityReport, IssueSeverity, LayerHealth};
+use crate::knots::KnotsSummary;
 use crate::lora_ga::LoraGaSummary;
 use crate::merge_check::MultiMergeCheckSummary;
 use crate::ortho_proj::OrthoProjectSummary;
@@ -305,6 +306,34 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         name: "AnchorSubspaceSaturation",
         short_description: "Protected anchor subspaces saturate >=75% of ambient layer dimensions",
         full_description: "The union of protected anchor subspaces consumes >=75% of the ambient dimension or leaves fewer orthogonal dimensions than the candidate LoRA rank.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS043",
+        name: "KnotsAlignedDestructiveCancellation",
+        short_description: "Destructive task-vector cancellation in shared Knots singular frame",
+        full_description: "Adapters projected into the shared Knots left-singular coordinate frame cancel >50% of combined Frobenius energy or exhibit pairwise Frobenius cosine below -0.25.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS044",
+        name: "JointRankTruncationOverflow",
+        short_description: "Joint multi-adapter subspace rank truncation discarded >20% of Frobenius energy",
+        full_description: "Compressing the synthesized joint subspace down to target_rank retained <80% of post-alignment Frobenius energy; increase --rank to preserve multi-task capacity.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS045",
+        name: "AdapterTaskNormDominance",
+        short_description: "Single adapter dominates >=80% of pre-merge Frobenius energy on shared layer",
+        full_description: "One participating adapter contributes >=80% of total pre-merge Frobenius energy on a shared layer, risking collapse of secondary task vectors without --normalize-tasks.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS046",
+        name: "SingularSpectrumAnisotropySpike",
+        short_description: "Merged singular spectrum exhibits severe rank-1 anisotropy spike (stable rank < 1.35)",
+        full_description: "The combined task delta on a nominal rank >= 4 layer concentrates nearly all energy into its top singular value (stable rank < 1.35); consider --mode iso spectral flattening.",
         default_level: "warning",
     },
 ];
@@ -1004,6 +1033,88 @@ pub fn build_ortho_proj_sarif(summary: &OrthoProjectSummary, tool_version: &str)
             summary.domain.as_str(),
             diag.retained_ratio,
             diag.ambient_saturation_ratio
+        ));
+    }
+
+    render_sarif_envelope(tool_version, &results_json)
+}
+
+pub fn build_knots_sarif(summary: &KnotsSummary, tool_version: &str) -> String {
+    let mut results_json = Vec::new();
+
+    for inc in &summary.incompatible_shapes {
+        let msg = format!(
+            "Layer '{}' has incompatible shapes: {} ({}x{}) vs {} ({}x{})",
+            inc.base_name,
+            inc.adapter_a,
+            inc.shape_a.0,
+            inc.shape_a.1,
+            inc.adapter_b,
+            inc.shape_b.0,
+            inc.shape_b.1
+        );
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "LS018",
+        "level": "error",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ]
+      }}"#,
+            escape_json(&msg),
+            escape_json(&inc.adapter_b),
+            escape_json(&inc.base_name)
+        ));
+    }
+
+    for diag in &summary.diagnostics {
+        results_json.push(format!(
+            r#"{{
+        "ruleId": "{}",
+        "level": "{}",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{
+              "artifactLocation": {{ "uri": "{}" }}
+            }},
+            "logicalLocations": [
+              {{
+                "name": "{}",
+                "kind": "module"
+              }}
+            ]
+          }}
+        ],
+        "properties": {{
+          "mode": "{}",
+          "coherenceRatio": {:.6},
+          "svdRetainedRatio": {:.6},
+          "maxTaskEnergyShare": {:.6},
+          "preStableRank": {:.6}
+        }}
+      }}"#,
+            diag.rule_id,
+            diag.severity.as_str(),
+            escape_json(&diag.message),
+            escape_json(&diag.artifact_uri),
+            escape_json(&diag.layer_name),
+            summary.mode.as_str(),
+            diag.coherence_ratio,
+            diag.svd_retained_ratio,
+            diag.max_task_energy_share,
+            diag.pre_stable_rank
         ));
     }
 

@@ -3,6 +3,7 @@ pub mod audit;
 pub mod card;
 pub mod compress;
 pub mod diff;
+pub mod knots;
 pub mod linalg;
 pub mod lora_ga;
 pub mod merge;
@@ -3527,11 +3528,15 @@ mod tests {
         use crate::ortho_proj::{project_adapter_orthogonal, OrthoDomain, OrthoProjectConfig};
         use crate::sarif::{build_lora_ga_sarif, build_ortho_proj_sarif, LORASPECTRA_SARIF_RULES};
 
-        assert_eq!(LORASPECTRA_SARIF_RULES.len(), 42);
+        assert_eq!(LORASPECTRA_SARIF_RULES.len(), 46);
         assert_eq!(LORASPECTRA_SARIF_RULES[38].id, "LS039");
         assert_eq!(LORASPECTRA_SARIF_RULES[39].id, "LS040");
         assert_eq!(LORASPECTRA_SARIF_RULES[40].id, "LS041");
         assert_eq!(LORASPECTRA_SARIF_RULES[41].id, "LS042");
+        assert_eq!(LORASPECTRA_SARIF_RULES[42].id, "LS043");
+        assert_eq!(LORASPECTRA_SARIF_RULES[43].id, "LS044");
+        assert_eq!(LORASPECTRA_SARIF_RULES[44].id, "LS045");
+        assert_eq!(LORASPECTRA_SARIF_RULES[45].id, "LS046");
 
         let mut rng = Rng64::new(7001);
         let warm_layer = LoraLayer {
@@ -3624,5 +3629,63 @@ mod tests {
         let proj_sarif = build_ortho_proj_sarif(&proj_sum, "1.7.0");
         assert!(proj_sarif.contains("\"ruleId\": \"LS041\""));
         assert!(proj_sarif.contains("\"ruleId\": \"LS042\""));
+    }
+
+    #[test]
+    fn test_v180_knots_sarif_and_safetensors_roundtrip() {
+        use crate::knots::{compose_adapters_knots, render_knots_json, KnotsConfig, KnotsMode};
+        use crate::merge_check::AdapterMergeInput;
+        use crate::sarif::build_knots_sarif;
+
+        let mut rng = Rng64::new(8001);
+        let l1 = LoraLayer {
+            base_name: "model.layers.0.q_proj".to_string(),
+            a_key: "model.layers.0.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.q_proj.lora_B.weight".to_string(),
+            a: random_matrix(4, 24, &mut rng, DType::F32),
+            b: random_matrix(24, 4, &mut rng, DType::F32),
+        };
+        let mut l2 = l1.clone();
+        for v in &mut l2.b.data {
+            *v *= -0.92;
+        }
+        let inputs = vec![
+            AdapterMergeInput {
+                name: "a1.safetensors".to_string(),
+                layers: vec![l1],
+                alphas: BTreeMap::new(),
+                peft_config: None,
+                weight: 1.0,
+            },
+            AdapterMergeInput {
+                name: "a2.safetensors".to_string(),
+                layers: vec![l2],
+                alphas: BTreeMap::new(),
+                peft_config: None,
+                weight: 1.0,
+            },
+        ];
+        let summary = compose_adapters_knots(
+            &inputs,
+            &KnotsConfig {
+                mode: KnotsMode::KnotsTies,
+                density: 0.5,
+                target_rank: Some(4),
+                ..KnotsConfig::default()
+            },
+        )
+        .expect("knots compose");
+        let sarif = build_knots_sarif(&summary, "1.8.0");
+        assert!(sarif.contains("\"ruleId\": \"LS043\""));
+        let json = render_knots_json(&summary);
+        assert!(json.contains("\"mode\":\"knots-ties\""));
+
+        let out_map = layers_to_tensor_map(&summary.merged_layers);
+        let tmp = std::env::temp_dir().join("test_v180_knots.safetensors");
+        write_safetensors(&tmp, &out_map).expect("write knots safetensors");
+        let reloaded = extract_lora_layers(&read_safetensors(&tmp).unwrap()).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].rank(), 4);
+        let _ = std::fs::remove_file(&tmp);
     }
 }

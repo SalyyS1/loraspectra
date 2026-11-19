@@ -5,7 +5,7 @@
 > **[Launch the Interactive Browser `.safetensors` Spectral SVD Inspector -> `https://salyys1.github.io/loraspectra/`](https://salyys1.github.io/loraspectra/)**
 > *Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers `.safetensors` LoRA directly into your browser - 100% client-side QR-Core SVD, zero file uploads, interactive Target Energy slider (`90%` to `99.9%`), Gavish-Donoho Marchenko-Pastur noise floor visualization, and 1-click synthetic demos.*
 
-`loraspectra` (`v1.7.0`) is a zero-dependency Rust engine, CLI, and client-side Web Inspector for auditing, initializing, projecting, comparing, compressing, and merging Low-Rank Adaptation (LoRA / LoRA-GA / O-LoRA / rsLoRA / PiSSA / DoRA / VeRA / QLoRA / FP8) weights stored in HuggingFace `.safetensors` format (`F32`, `F16`, `BF16`, `I8`, and packed `U8` `NF4`/`FP4`) without loading a multi-gigabyte PyTorch or GPU runtime.
+`loraspectra` (`v1.8.0`) is a zero-dependency Rust engine, CLI, and client-side Web Inspector for auditing, initializing, projecting, aligning, comparing, compressing, and merging Low-Rank Adaptation (LoRA / Knots / TSV / LoRA-GA / O-LoRA / rsLoRA / PiSSA / DoRA / VeRA / QLoRA / FP8) weights stored in HuggingFace `.safetensors` format (`F32`, `F16`, `BF16`, `I8`, and packed `U8` `NF4`/`FP4`) without loading a multi-gigabyte PyTorch or GPU runtime.
 
 Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ and running cubic $O(d^3)$ Singular Value Decomposition, `loraspectra` factors $B = Q_B R_B$ and $A^T = Q_A R_A$ via Modified Gram-Schmidt with Daniel-Gragg-Kaufman-Stewart (DGKS) re-orthogonalization and solves the exact SVD on the tiny $r \times r$ core matrix $M = R_B R_A^T$. This reduces per-layer spectral complexity from $O(d^3)$ to $O(r^2(d_{\text{out}} + d_{\text{in}}) + r^3)$ - delivering a **1,050x to 2,680x speedup** over full dense SVD while matching singular values to within **$1.08 \times 10^{-13}$** (IEEE 754 `f64` machine precision).
 
@@ -47,9 +47,9 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
    - Implements **N-Adapter ($N \ge 2$) Orthogonal Subspace Projection Merge (`--mode ortho-svd`)**, **Layer-Block Weighting (`--layer-weights`)**, **Spectral Norm Bounding (`--preserve-norm`)**, **DoRA 1D Tensor Preservation**, **Cross-Ecosystem Key Format Conversion (`--format peft|kohya|diffusers`)**, and **`.alpha` / `rsLoRA` Scale Baking (`--bake-alpha`, `--rslora`)** - folding $\alpha/r$ or $\alpha/\sqrt{r}$ directly into $(B, A)$ so heterogeneous `rank_pattern` and `rsLoRA` adapters serve accurately on `vLLM`, `llama.cpp`, `ComfyUI`, and `InvokeAI`.
    - Includes **`loraspectra info <adapter_or_hf_uri>`** to reverse-engineer the naming convention and base model family without requiring `adapter_config.json`, plus **`loraspectra extract`** to extract an optimal low-rank LoRA adapter directly from two dense `.safetensors` checkpoints ($\Delta W = W_{\text{tuned}} - W_{\text{base}}$).
 
-8. **OASIS SARIF v2.1.0 Code Scanning & CI Gate (`audit` / `merge-check` / `ties-dare` / `lora-ga` / `project --sarif <file>` / `action.yml`)**
-   - Exports spectral health, adapter integrity, rsLoRA scaling, PiSSA residual hazards, DoRA magnitude-vs-direction anomalies, NF4/FP4/INT8 quantization distortion, SVD truncation error bound violations, VeRA scaling anomalies, checkpoint subspace drift, cross-layer Grassmannian alignment, FP8 E4M3/E5M2 scale validation, TIES/DARE sign-conflict findings, LoRA-GA gradient alignment hazards, and cross-checkpoint orthogonal projection diagnostics into standard OASIS SARIF v2.1.0 format (`$schema: sarif-2.1.0.json`), mapping rules `LS001` through `LS042`.
-   - Integrates directly with GitHub Code Scanning (`github/codeql-action/upload-sarif`) and provides the composite GitHub Action `SalyyS1/loraspectra@v1.7.0` (`action.yml`) to fail CI on critical fine-tuning or adapter-merge bugs.
+8. **OASIS SARIF v2.1.0 Code Scanning & CI Gate (`audit` / `merge-check` / `ties-dare` / `lora-ga` / `project` / `knots --sarif <file>` / `action.yml`)**
+   - Exports spectral health, adapter integrity, rsLoRA scaling, PiSSA residual hazards, DoRA magnitude-vs-direction anomalies, NF4/FP4/INT8 quantization distortion, SVD truncation error bound violations, VeRA scaling anomalies, checkpoint subspace drift, cross-layer Grassmannian alignment, FP8 E4M3/E5M2 scale validation, TIES/DARE sign-conflict findings, LoRA-GA gradient alignment hazards, cross-checkpoint orthogonal projection diagnostics, and Knots/TSV task-vector alignment diagnostics into standard OASIS SARIF v2.1.0 format (`$schema: sarif-2.1.0.json`), mapping rules `LS001` through `LS046`.
+   - Integrates directly with GitHub Code Scanning (`github/codeql-action/upload-sarif`) and provides the composite GitHub Action `SalyyS1/loraspectra@v1.8.0` (`action.yml`) to fail CI on critical fine-tuning or adapter-merge bugs.
 
 11. **TIES-Merging & DARE Trim-and-Elect Sign-Conflict Resolver (`loraspectra ties-dare` / `merge --mode ties|dare-ties|dare-linear`)**
     - Resolves multi-adapter sign interference across $N \ge 2$ adapters simultaneously in gauge-invariant delta space ($\tau_t = s_t B_t A_t$), implementing **TIES-Merging** (Yadav et al., NeurIPS 2023: top-$d$ magnitude trim, consensus sign election $\gamma_{ij} = \text{sgn}(\sum_t w_t \hat{\tau}_{t,ij})$, and disjoint mean over agreeing adapters), **DARE-Linear**, and **DARE-TIES** (Yu et al., ICML 2024: stateless SplitMix64 Bernoulli drop with unbiased $1/(1-p)$ rescaling and quadratic $(1-p)^2$ collision reduction).
@@ -65,6 +65,10 @@ Instead of materializing dense update matrices $\Delta W = B A \in \mathbb{R}^{d
 14. **Cross-Checkpoint Orthogonal Subspace Projector (`loraspectra project` / `ortho-project`)**
     - Projects a candidate LoRA adapter $\Delta W_c = s_c B_c A_c$ onto the orthogonal complement of $M \ge 1$ protected anchor checkpoints (safety alignment, core reasoning, or prior continual-learning tasks per O-LoRA, Wang et al., EMNLP 2023; InfLoRA, Liang & Li, CVPR 2024) in pure low-rank time $O((M r_a + r_c)^2 (d_{\text{in}} + d_{\text{out}}))$ with zero dense matrix allocations.
     - Supports `--domain right|left|bilateral`, active anchor energy thresholding (`--anchor-energy 0.99`), soft/hard deflation (`--strength 0..1`), Pythagorean energy conservation accounting ($\|\Delta W_c\|_F^2 = \|\Delta W_{\perp}\|_F^2 + \|\Delta W_{\parallel}\|_F^2$), and SARIF rules `LS041` (`OrthogonalProjectionSignalAnnihilation`) and `LS042` (`AnchorSubspaceSaturation`).
+
+15. **Knots Joint-SVD Alignment, Isotropic Flattening & Task Singular Vectors (`loraspectra knots` / `tsv`)**
+    - Computes a gauge-invariant shared left-singular coordinate frame $U_{\text{joint}}$ across $M \ge 2$ adapters $[\Delta W_1 \;|\; \dots \;|\; \Delta W_M]$ via tall-skinny QR-Core SVD in $O(R^2 (d_{\text{out}} + d_{\text{in}}) + R^3)$ time ($R = \sum_m r_m$), verifying exact joint Frobenius energy conservation ($\sum_m \|\Delta W_m\|_F^2 = \sum_j \sigma_{\text{joint}, j}^2$) without dense concatenation.
+    - Supports three synthesis modes: `knots-ties` (Stoica et al., ICLR 2025: magnitude trimming and sign election in aligned right-singular coordinates $G_m = U_{\text{joint}}^T \Delta W_m$), `iso` (Marczak et al., ICML 2025: Frobenius-preserving power-law singular-value equalization $\sigma_i^{1-\beta}\bar{\sigma}^\beta$), and `tsv` (Gargiulo et al., CVPR 2025: symmetric polar Procrustes orthogonalization of concatenated task singular vectors), with SARIF rules `LS043` through `LS046`.
 
 9. **LoRA, rsLoRA, PiSSA & DoRA Checkpoint Differential Drift (`loraspectra diff <a_uri> <b_uri> [--json]`)**
    - Compares two fine-tuning checkpoints (e.g. across training steps, `rsLoRA` vs standard `LoRA` configs, or unconverted `PiSSA + pissa_init` vs PEFT-converted rank-$2r$ `LoRA`) in $O((r_A + r_B)^2(d_{\text{in}} + d_{\text{out}}))$ time without dense matrix allocations.
@@ -295,6 +299,10 @@ loraspectra lora-ga calib_grads.safetensors -o lora_ga_init.safetensors \
 loraspectra project candidate_lora.safetensors safety_anchor.safetensors math_anchor.safetensors \
   -o candidate_ortho.safetensors --domain right --anchor-energy 0.99 --sarif ortho-proj.sarif --fail-on-annihilation
 
+# Align and merge multiple LoRA adapters via Knots joint-SVD, Isotropic flattening, or TSV polar Procrustes (LS043-LS046)
+loraspectra knots code_lora.safetensors math_lora.safetensors chat_lora.safetensors \
+  -o merged_knots.safetensors --mode knots-ties --density 0.5 --rank 16 --normalize-tasks --sarif knots.sarif
+
 # Extract a low-rank LoRA adapter directly from two dense .safetensors checkpoints (W_tuned - W_base)
 loraspectra extract base_model.safetensors fine_tuned.safetensors extracted_lora.safetensors \
   --mp-denoise --dtype bf16 --format peft --peft-config adapter_config.json
@@ -304,7 +312,7 @@ loraspectra extract base_model.safetensors fine_tuned.safetensors extracted_lora
 
 ```yaml
 - name: Audit LoRA Checkpoint
-  uses: SalyyS1/loraspectra@v1.7.0
+  uses: SalyyS1/loraspectra@v1.8.0
   with:
     checkpoint: './checkpoints/adapter_model.safetensors'
     sarif: 'loraspectra-audit.sarif'

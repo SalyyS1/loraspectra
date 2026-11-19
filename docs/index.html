@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.7.0 - Interactive .safetensors Header, Spectral SVD, LoRA-GA, Orthogonal Projector &amp; TIES/DARE Inspector</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, LoRA-GA spectral initializer, O-LoRA cross-checkpoint orthogonal projector, TIES-Merging &amp; DARE sign-conflict resolver, NF4/FP4/INT8/FP8 quantization validator, and multi-adapter merge-check + zero-dependency Rust CLI (v1.7.0).">
-  <meta property="og:title" content="loraspectra v1.7.0 - Interactive .safetensors Header, Spectral SVD, LoRA-GA, Orthogonal Projector &amp; TIES/DARE Inspector">
+  <title>loraspectra v1.8.0 - Interactive .safetensors Header, Spectral SVD, Knots/TSV Aligner, LoRA-GA &amp; TIES/DARE Inspector</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, LoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, Knots joint-SVD &amp; TSV polar Procrustes aligner, LoRA-GA spectral initializer, O-LoRA orthogonal projector, TIES/DARE resolver, and zero-dependency Rust CLI (v1.8.0).">
+  <meta property="og:title" content="loraspectra v1.8.0 - Interactive .safetensors Header, Spectral SVD, Knots/TSV Aligner, LoRA-GA &amp; TIES/DARE Inspector">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -419,7 +419,7 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.7.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.8.0</span></h1>
         <p class="lead">
           Spectral SVD Auditor, LoRA-GA Gradient-Aligned Initializer, Cross-Checkpoint Orthogonal Subspace Projector (O-LoRA / InfLoRA), TIES/DARE Sign-Conflict Merger, NF4/FP8 Quantization Validator, and Zero-Copy <code>.safetensors</code> Header Inspector
           - powered by exact QR-Core SVD
@@ -741,7 +741,76 @@ loraspectra subspace-drift ./adapter_step500.safetensors ./adapter_step1000.safe
 loraspectra lora-ga ./calib_grads.safetensors -o lora_ga_init.safetensors --rank 8 --scale stable --base base.safetensors --out-base base_res.safetensors --sarif lora-ga.sarif
 
 # Project candidate LoRA onto orthogonal complement of protected anchor checkpoints (O-LoRA / InfLoRA, LS041/LS042)
-loraspectra project ./candidate_lora.safetensors ./safety_anchor.safetensors ./math_anchor.safetensors -o candidate_ortho.safetensors --domain right --anchor-energy 0.99 --sarif ortho.sarif</pre>
+loraspectra project ./candidate_lora.safetensors ./safety_anchor.safetensors ./math_anchor.safetensors -o candidate_ortho.safetensors --domain right --anchor-energy 0.99 --sarif ortho.sarif
+
+# Gauge-invariant Knots joint-SVD alignment, isotropic spectral flattening, or TSV polar Procrustes merge (LS043-LS046)
+loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knots.safetensors --mode knots-ties --density 0.5 --rank 16 --normalize-tasks --sarif knots.sarif</pre>
+      </div>
+    </div>
+
+    <!-- Interactive Knots Joint-SVD, Isotropic Flattening & TSV Lab (v1.8.0) -->
+    <div class="card" id="v180-lab-card">
+      <div class="card-header">
+        <h2 class="card-title">Interactive Knots Joint-SVD, Isotropic Flattening &amp; TSV Procrustes Lab (<code>v1.8.0</code>)</h2>
+        <span class="privacy-tag">SARIF Rules LS043-LS046</span>
+      </div>
+      <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 16px;">
+        Simulate multi-adapter subspace alignment in the shared <code>U<sub>joint</sub></code> coordinate frame (<code>Knots</code>), Frobenius-preserving singular-value equalization (<code>Iso-C</code>), and polar Procrustes orthogonalization (<code>TSV</code>).
+      </p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px;">
+        <div class="kpi-card">
+          <label class="kpi-label" for="knots-mode">Synthesis Mode</label>
+          <select id="knots-mode" class="search-input" style="width: 100%; margin-top: 6px; padding: 5px 8px;">
+            <option value="knots-ties">knots-ties (Shared U_joint + Aligned TIES)</option>
+            <option value="iso">iso (Isotropic Singular Flattening)</option>
+            <option value="tsv">tsv (Polar Procrustes Task Singular Vectors)</option>
+          </select>
+          <div class="kpi-sub"><label style="cursor:pointer;"><input type="checkbox" id="knots-norm-tasks"> --normalize-tasks (RMS equalize)</label></div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="knots-out-rank">Target Output Rank (k)</label>
+          <input type="range" id="knots-out-rank" min="1" max="16" step="1" value="8" style="width: 100%; margin-top: 6px;">
+          <div class="kpi-sub">Target rank k = <strong id="knots-out-rank-val">8</strong> (Joint rank = 12)</div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="knots-coherence">Inter-Adapter Cosine / Coherence</label>
+          <input type="range" id="knots-coherence" min="-0.8" max="0.8" step="0.1" value="0.1" style="width: 100%; margin-top: 6px;">
+          <div class="kpi-sub">Pairwise cosine = <strong id="knots-coherence-val">0.10</strong></div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="knots-imbalance">Primary Adapter Energy Share</label>
+          <input type="range" id="knots-imbalance" min="0.50" max="0.95" step="0.05" value="0.55" style="width: 100%; margin-top: 6px;">
+          <div class="kpi-sub">Max share = <strong id="knots-imbalance-val">55%</strong></div>
+        </div>
+      </div>
+      <div class="kpi-grid" style="margin-bottom: 14px;">
+        <div class="kpi-card">
+          <div class="kpi-label">Joint Frobenius Drift</div>
+          <div class="kpi-value green" id="knots-drift">0.00e+00</div>
+          <div class="kpi-sub">Exact sum ||DeltaW_m||_F^2 == ||Sigma_joint||_F^2</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Rank-k Retained Energy</div>
+          <div class="kpi-value accent" id="knots-retained">-</div>
+          <div class="kpi-sub" id="knots-coherence-kpi">-</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Stable Rank (Pre -&gt; Post)</div>
+          <div class="kpi-value purple" id="knots-sr">-</div>
+          <div class="kpi-sub">Gauge-invariant under (B*Q, Q^T*A)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">SARIF LS043-LS046 Gate</div>
+          <div class="kpi-value text-sm" id="knots-sarif">-</div>
+          <div class="kpi-sub" id="knots-sarif-sub">-</div>
+        </div>
+      </div>
+      <div class="cli-block">
+        <div class="cli-block-head">
+          <span>Generated v1.8.0 Knots CLI Command</span>
+          <button type="button" class="btn btn-sm" data-copy="lab-v180-cmd">Copy</button>
+        </div>
+        <pre class="cli-code" id="lab-v180-cmd"></pre>
       </div>
     </div>
 
@@ -3023,6 +3092,60 @@ loraspectra project ./candidate_lora.safetensors ./safety_anchor.safetensors ./m
       }
     });
     runV170Lab();
+
+    function runV180KnotsLab() {
+      const mode = document.getElementById("knots-mode").value;
+      const normTasks = document.getElementById("knots-norm-tasks").checked;
+      const k = parseInt(document.getElementById("knots-out-rank").value, 10);
+      const cos = parseFloat(document.getElementById("knots-coherence").value);
+      const share = parseFloat(document.getElementById("knots-imbalance").value);
+
+      document.getElementById("knots-out-rank-val").textContent = String(k);
+      document.getElementById("knots-coherence-val").textContent = cos.toFixed(2);
+      document.getElementById("knots-imbalance-val").textContent = Math.round(share * 100) + "%";
+
+      const jointRank = 12;
+      const e1 = normTasks ? 0.5 : share;
+      const e2 = 1.0 - e1;
+      const linCoherence = Math.max(0.02, e1 + e2 + 2 * Math.sqrt(e1 * e2) * cos);
+
+      const jointSigSq = [];
+      for (let i = 1; i <= jointRank; i++) {
+        const decay = share >= 0.85 && !normTasks ? Math.pow(i, -2.6) : Math.pow(i, -1.15);
+        jointSigSq.push(decay);
+      }
+      const totSq = jointSigSq.reduce((a, b) => a + b, 0);
+      const keptSq = jointSigSq.slice(0, Math.min(k, jointRank)).reduce((a, b) => a + b, 0);
+      const retained = totSq > 0 ? keptSq / totSq : 1.0;
+      const preSr = totSq / jointSigSq[0];
+      const postSr = mode === "iso" ? Math.min(k, jointRank) : (mode === "tsv" ? Math.min(k, preSr * 1.45) : Math.min(k, preSr * 1.18));
+
+      const flags = [];
+      if (linCoherence < 0.50 || cos < -0.25) flags.push("LS043");
+      if (retained < 0.80) flags.push("LS044");
+      if (!normTasks && share >= 0.80) flags.push("LS045");
+      if (mode !== "iso" && preSr < 1.35) flags.push("LS046");
+
+      document.getElementById("knots-retained").textContent = (retained * 100).toFixed(1) + "%";
+      document.getElementById("knots-coherence-kpi").textContent = "Linear coherence: " + linCoherence.toFixed(3);
+      document.getElementById("knots-sr").textContent = preSr.toFixed(2) + " -> " + postSr.toFixed(2);
+      document.getElementById("knots-sarif").textContent = flags.length ? flags.join(", ") : "CLEAN";
+      document.getElementById("knots-sarif-sub").textContent = flags.length ? "Warnings detected" : "All LS043-LS046 checks pass";
+
+      const normFlag = normTasks ? " --normalize-tasks" : "";
+      const modeArg = mode === "iso" ? " --mode iso --isotropy 1.0" : (" --mode " + mode);
+      document.getElementById("lab-v180-cmd").textContent =
+        "loraspectra knots code_lora.safetensors math_lora.safetensors -o merged_knots.safetensors" + modeArg + " --rank " + k + normFlag + " --sarif knots.sarif";
+    }
+
+    ["knots-mode", "knots-norm-tasks", "knots-out-rank", "knots-coherence", "knots-imbalance"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener("input", runV180KnotsLab);
+        el.addEventListener("change", runV180KnotsLab);
+      }
+    });
+    runV180KnotsLab();
   })();
   </script>
 </body>
