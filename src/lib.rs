@@ -1,6 +1,7 @@
 pub mod adalora;
 pub mod align;
 pub mod audit;
+pub mod batch;
 pub mod card;
 pub mod compress;
 pub mod diff;

@@ -7,6 +7,10 @@ use loraspectra::audit::{
     audit_adapter, audit_adapter_integrity_with_pissa, audit_truncation_error_bounds,
     render_audit_json,
 };
+use loraspectra::batch::{
+    discover_checkpoints, render_batch_json, render_batch_markdown, render_batch_table,
+    run_batch_audit,
+};
 use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
     compress_adapter_with_options, extract_lora_from_dense_models, parse_byte_budget, BudgetTarget,
@@ -64,7 +68,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.9.0 - Spectral SVD Auditor, LoRA+ Factor Balancer, AdaLoRA Rank Scheduler, Knots/TSV Aligner, LoRA-GA & TIES/DARE Merger (.safetensors)
+        "loraspectra v1.10.0 - Spectral SVD Auditor, Batch Leaderboard, LoRA+ Factor Balancer, AdaLoRA Rank Scheduler, Knots/TSV Aligner, LoRA-GA & TIES/DARE Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -89,7 +93,8 @@ USAGE:
   loraspectra align <adapter_or_hf_uri> [--config <adapter_config.json>] [--json]
   loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]
   loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <output.sarif>] [--json]
-  loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]"
+  loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]
+  loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]"
     );
 }
 
@@ -2745,6 +2750,73 @@ fn main() {
                 print!("{}", render_rank_schedule_json(&summary));
             } else {
                 print!("{}", render_rank_schedule_table(&summary));
+            }
+        }
+        "batch-audit" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]");
+                process::exit(1);
+            }
+            let mut inputs: Vec<PathBuf> = Vec::new();
+            let mut max_depth: usize = 6;
+            let mut fail_below_score: Option<f64> = None;
+            let mut max_dead_layers: Option<usize> = None;
+            let mut use_json = false;
+            let mut use_markdown = false;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--max-depth" => {
+                        i += 1;
+                        if i < args.len() {
+                            max_depth = args[i].parse().unwrap_or(6);
+                        }
+                    }
+                    "--fail-below-score" => {
+                        i += 1;
+                        if i < args.len() {
+                            fail_below_score = args[i].parse().ok();
+                        }
+                    }
+                    "--max-dead-layers" => {
+                        i += 1;
+                        if i < args.len() {
+                            max_dead_layers = args[i].parse().ok();
+                        }
+                    }
+                    "--json" => use_json = true,
+                    "--markdown" => use_markdown = true,
+                    other if !other.starts_with("--") => inputs.push(PathBuf::from(other)),
+                    _ => {}
+                }
+                i += 1;
+            }
+            let checkpoints = discover_checkpoints(&inputs, max_depth);
+            if checkpoints.is_empty() {
+                eprintln!("No .safetensors checkpoints found in supplied paths.");
+                process::exit(1);
+            }
+            let report = run_batch_audit(&checkpoints);
+            if use_json {
+                println!("{}", render_batch_json(&report));
+            } else if use_markdown {
+                print!("{}", render_batch_markdown(&report));
+            } else {
+                print!("{}", render_batch_table(&report));
+            }
+            let mut gate_failed = false;
+            if let Some(min_score) = fail_below_score {
+                if report.entries.iter().any(|e| e.health_score < min_score) {
+                    gate_failed = true;
+                }
+            }
+            if let Some(max_dead) = max_dead_layers {
+                if report.entries.iter().any(|e| e.dead_layers > max_dead) {
+                    gate_failed = true;
+                }
+            }
+            if gate_failed {
+                process::exit(2);
             }
         }
         _ => {
