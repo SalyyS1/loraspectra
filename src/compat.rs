@@ -300,6 +300,52 @@ pub fn is_runtime_ready(rep: &CompatibilityReport, target: &str) -> Result<bool,
     }
 }
 
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Renders a self-contained dark-mode 5-runtime serving compatibility HTML scorecard.
+pub fn render_compat_html(rep: &CompatibilityReport) -> String {
+    let mut rows = String::new();
+    for r in &rep.runtimes {
+        let col = match r.status.as_str() {
+            "ready" => "#3fb950",
+            "needs-conversion" => "#d29922",
+            _ => "#f85149",
+        };
+        let notes = r.notes.iter().map(|n| html_esc(n)).collect::<Vec<_>>().join("<br>");
+        let fix = r.remediation.as_deref().map(|c| format!("<code>{}</code>", html_esc(c))).unwrap_or_else(|| "—".into());
+        rows.push_str(&format!(
+            "<tr><td><b>{}</b></td><td style=\"color:{}\"><b>{}</b></td><td>{}</td><td>{}</td></tr>\n",
+            html_esc(&r.runtime), col, html_esc(&r.status), notes, fix
+        ));
+    }
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>LoRASpectra Serving Compatibility Scorecard</title>
+<style>
+body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,sans-serif}}
+.wrap{{max-width:1000px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px 10px;border-bottom:1px solid #21262d;text-align:left;vertical-align:top}}
+th{{color:#8b949e}}code{{font-family:ui-monospace,monospace;font-size:12px;color:#58a6ff}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>LoRASpectra 5-Runtime Serving Compatibility Scorecard</h1>
+<p>Adapter: <b>{}</b> &middot; Format: <b>{}</b> &middot; Arch: <b>{}</b> &middot; DType: <b>{}</b> &middot; Ready: <b>{}/{}</b></p></div>
+<div class="card"><table><thead><tr><th>Serving Runtime</th><th>Status</th><th>Notes</th><th>Remediation</th></tr></thead>
+<tbody>{}</tbody></table></div></div></body></html>"##,
+        html_esc(&rep.source),
+        html_esc(&rep.naming_format),
+        html_esc(&rep.inferred_architecture),
+        html_esc(&rep.primary_dtype),
+        rep.ready_count,
+        rep.runtimes.len(),
+        rows
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +370,8 @@ mod tests {
         assert_eq!(is_runtime_ready(&rep, "vllm").unwrap(), true);
         assert_eq!(is_runtime_ready(&rep, "comfyui").unwrap(), false);
         assert!(is_runtime_ready(&rep, "unknown_engine").is_err());
+        let html = render_compat_html(&rep);
+        assert!(html.contains("<!doctype html>"));
+        assert!(html.contains("vLLM"));
     }
 }

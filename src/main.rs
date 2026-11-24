@@ -3090,16 +3090,22 @@ fn main() {
         }
         "compat" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra compat <adapter_or_hf_uri> [--json] [--fail-incompatible <vllm|sglang|peft|llama.cpp|comfyui>]");
+                eprintln!("Usage: loraspectra compat <adapter_or_hf_uri> [--json] [--html <compat.html>] [--fail-incompatible <vllm|sglang|peft|llama.cpp|comfyui>]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut use_json = false;
+            let mut html_out: Option<String> = None;
             let mut required_runtime: Option<String> = None;
             let mut i = 3;
             while i < args.len() {
                 if args[i] == "--json" {
                     use_json = true;
+                } else if args[i] == "--html" {
+                    i += 1;
+                    if i < args.len() {
+                        html_out = Some(args[i].clone());
+                    }
                 } else if args[i] == "--fail-incompatible" {
                     i += 1;
                     if i < args.len() {
@@ -3111,6 +3117,13 @@ fn main() {
             let (tensors, _, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
             match loraspectra::compat::check_serving_compatibility(input_uri, &tensors) {
                 Ok(rep) => {
+                    if let Some(ref hpath) = html_out {
+                        let html = loraspectra::compat::render_compat_html(&rep);
+                        if let Err(e) = std::fs::write(hpath, html) {
+                            eprintln!("Failed to write compat HTML to {}: {}", hpath, e);
+                            process::exit(1);
+                        }
+                    }
                     if use_json {
                         println!("{}", loraspectra::compat::render_compat_json(&rep));
                     } else {
