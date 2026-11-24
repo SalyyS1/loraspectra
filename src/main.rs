@@ -73,7 +73,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.15.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML), 9-Tool Stdio MCP Server, Sensitivity/Forgetting SARIF Auditor, Batch Leaderboard, LoRA+ Balancer & AdaLoRA Scheduler (.safetensors)
+        "loraspectra v1.16.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML), 10-Tool Stdio MCP Server, Sensitivity/Forgetting SARIF Auditor, Batch Leaderboard, LoRA+ Balancer & AdaLoRA Scheduler (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -102,7 +102,7 @@ USAGE:
   loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]
   loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--sarif <output.sarif>] [--json]
   loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--json]
-  loraspectra mcp                                          # run built-in zero-dependency 9-tool JSON-RPC 2.0 stdio MCP server"
+  loraspectra mcp                                          # run built-in zero-dependency 10-tool JSON-RPC 2.0 stdio MCP server"
     );
 }
 

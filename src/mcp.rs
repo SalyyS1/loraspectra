@@ -16,6 +16,7 @@ use crate::batch::{discover_checkpoints, render_batch_json, run_batch_audit};
 use crate::diff::{diff_adapters_with_dora, render_diff_json};
 use crate::doctor::{render_doctor_json, run_doctor};
 use crate::loraplus::{analyze_loraplus, render_loraplus_json};
+use crate::merge_check::{analyze_multi_adapter_merge, render_merge_check_json, AdapterMergeInput};
 use crate::remote::resolve_source_path;
 use crate::safetensors::{
     extract_dora_scales, extract_lora_alphas, extract_lora_layers, inspect_adapter_architecture,
@@ -322,6 +323,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_sensitivity","description":"Audit layer-wise spectral sensitivity across Attention vs MLP and Early/Mid/Deep transformer blocks for brittle rank-1 dominance (LS051) and energy spikes (LS052).","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_doctor","description":"Run an all-in-one executive adapter health diagnosis combining SVD utilization, integrity, LoRA+ imbalance, sensitivity/forgetting risk, and AdaLoRA budget into an A-F grade.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_diff","description":"Compute exact O(r^2*(d_in+d_out)) Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
+{"name":"loraspectra_merge_check","description":"Evaluate N >= 2 LoRA adapters jointly prior to TIES/DARE/linear/ortho-svd merging for subspace collision, spectral norm inflation, and incompatible shapes.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -513,6 +515,32 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 })
             })
         }
+        "loraspectra_merge_check" => {
+            let raw_sources = args
+                .get("sources")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'sources' array (>= 2 adapter paths/URIs)".to_string());
+            raw_sources.and_then(|arr| {
+                let mut inputs = Vec::new();
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        let p = resolve_source_path(s)?;
+                        let t = read_safetensors(&p)?;
+                        let layers = extract_lora_layers(&t)?;
+                        let alphas = extract_lora_alphas(&t);
+                        inputs.push(AdapterMergeInput {
+                            name: s.to_string(),
+                            layers,
+                            alphas,
+                            peft_config: None,
+                            weight: 1.0,
+                        });
+                    }
+                }
+                let summary = analyze_multi_adapter_merge(&inputs)?;
+                Ok(render_merge_check_json(&summary))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -589,6 +617,7 @@ mod tests {
         assert!(tools.contains("loraspectra_batch_audit"));
         assert!(tools.contains("loraspectra_doctor"));
         assert!(tools.contains("loraspectra_diff"));
+        assert!(tools.contains("loraspectra_merge_check"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
