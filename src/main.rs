@@ -17,7 +17,9 @@ use loraspectra::compress::{
     CompressionPolicy,
 };
 use loraspectra::diff::{diff_adapters_full, render_diff_json, render_diff_table, analyze_subspace_drift, render_subspace_drift_json, render_subspace_drift_table};
-use loraspectra::doctor::{render_doctor_html, render_doctor_json, render_doctor_markdown, run_doctor};
+use loraspectra::doctor::{
+    render_doctor_html, render_doctor_json, render_doctor_markdown, render_doctor_sarif, run_doctor,
+};
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
@@ -73,7 +75,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.23.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML), 15-Tool Stdio MCP Server, Runtime Compat Matrix, Quantization Planner, Trajectory Analyzer & Batch HTML Leaderboard (.safetensors)
+        "loraspectra v1.24.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML + SARIF), 15-Tool Stdio MCP Server, Runtime Compat Matrix, Quantization Planner, Trajectory Analyzer & Batch HTML Leaderboard (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -101,7 +103,7 @@ USAGE:
   loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]
   loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--html <board.html>] [--markdown] [--json]
   loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--sarif <output.sarif>] [--json]
-  loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--json]
+  loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--sarif <doctor.sarif>] [--json]
   loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json]
   loraspectra quant-plan <adapter_or_hf_uri> [--quant nf4|int8|fp8|bf16] [--energy 0.99] [--json]
   loraspectra compat <adapter_or_hf_uri> [--json]
@@ -2897,12 +2899,13 @@ fn main() {
         }
         "doctor" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--json]");
+                eprintln!("Usage: loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--sarif <doctor.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut use_json = false;
             let mut html_out: Option<String> = None;
+            let mut sarif_out: Option<String> = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
@@ -2911,6 +2914,12 @@ fn main() {
                         i += 1;
                         if i < args.len() {
                             html_out = Some(args[i].clone());
+                        }
+                    }
+                    "--sarif" => {
+                        i += 1;
+                        if i < args.len() {
+                            sarif_out = Some(args[i].clone());
                         }
                     }
                     _ => {}
@@ -2922,6 +2931,12 @@ fn main() {
             if let Some(ref hpath) = html_out {
                 if let Err(e) = std::fs::write(hpath, render_doctor_html(&rep)) {
                     eprintln!("Failed to write HTML doctor report {}: {}", hpath, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(ref spath) = sarif_out {
+                if let Err(e) = std::fs::write(spath, render_doctor_sarif(&rep)) {
+                    eprintln!("Failed to write SARIF doctor report {}: {}", spath, e);
                     process::exit(1);
                 }
             }

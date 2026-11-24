@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.23.0 - Interactive .safetensors SVD, 15-Tool MCP Server, Runtime Compat Matrix, Quantization Planner &amp; Batch HTML Leaderboard</title>
+  <title>loraspectra v1.24.0 - Interactive .safetensors SVD, 15-Tool MCP Server, Executive Doctor SARIF, Runtime Compat &amp; Trajectory Lab</title>
   <meta name="description" content="100% client-side in-browser .safetensors header inspector, 15-tool stdio MCP server (loraspectra mcp), 5-runtime serving compatibility matrix (vLLM/SGLang/PEFT/llama.cpp/ComfyUI), Executive Adapter Doctor (A-F scorecard), Spectral Sensitivity &amp; Catastrophic Forgetting SARIF auditor (LS051-LS052), Quantization Planner, Training Trajectory analyzer, and Batch HTML Leaderboard (v1.23.0, SARIF LS001-LS052).">
   <meta property="og:title" content="loraspectra v1.23.0 - Interactive .safetensors SVD, 15-Tool MCP Server &amp; 5-Runtime Compatibility Matrix">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
@@ -911,6 +911,26 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       </div>
       <div id="cm-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:12px;"></div>
       <pre class="cli-code" id="cm-cmd" style="padding:8px 10px;font-size:12px;"></pre>
+    </div>
+
+    <!-- Interactive Checkpoint Training Trajectory & Early-Stopping SVG Lab (v1.24.0) -->
+    <div class="card" id="traj-lab-card">
+      <div class="card-header">
+        <h2 class="card-title">Interactive Checkpoint Trajectory &amp; Early-Stopping Convergence Lab (<code>v1.24.0</code> · <code>loraspectra trajectory</code>)</h2>
+        <span class="privacy-tag">Subspace Overlap &amp; Plateau Detector</span>
+      </div>
+      <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 14px;">
+        Visualize how Grassmannian subspace cosine similarity and Frobenius weight drift evolve across fine-tuning checkpoints to detect early-stopping plateaus before overfitting.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <button type="button" class="btn btn-sm" id="traj-preset-converged">Converged Plateau (Stop at ckpt-300)</button>
+        <button type="button" class="btn btn-sm" id="traj-preset-learning">Still Learning (Continue Training)</button>
+        <button type="button" class="btn btn-sm" id="traj-preset-overfit">Late Rank Collapse / Overfit</button>
+      </div>
+      <div id="traj-svg-wrap" style="background:#0d1420;border:1px solid #2b3a4d;border-radius:8px;padding:12px;margin-bottom:10px;"></div>
+      <div class="kpi-sub" id="traj-verdict" style="font-family:var(--mono);font-size:12.5px;margin-bottom:8px;"></div>
+      <pre class="cli-code" style="padding:8px 10px;font-size:12px;">loraspectra trajectory ./ckpt-100.safetensors ./ckpt-200.safetensors ./ckpt-300.safetensors ./ckpt-400.safetensors --json
+loraspectra doctor ./ckpt-300.safetensors --html doctor.html --sarif doctor.sarif</pre>
     </div>
 
     <!-- Interactive Knots Joint-SVD, Isotropic Flattening & TSV Lab (v1.8.0) -->
@@ -3436,6 +3456,58 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       if (el) { el.addEventListener("input", updateCompatMatrix); el.addEventListener("change", updateCompatMatrix); }
     });
     updateCompatMatrix();
+
+    function renderTrajectoryPreset(kind) {
+      const wrap = document.getElementById("traj-svg-wrap");
+      const verdict = document.getElementById("traj-verdict");
+      if (!wrap || !verdict) return;
+      const presets = {
+        converged: {
+          steps: ["ckpt-100", "ckpt-200", "ckpt-300", "ckpt-400"],
+          sim: [0.62, 0.89, 0.985, 0.992],
+          msg: "CONVERGED PLATEAU: Subspace cosine >= 0.985 after ckpt-300 -> Safe to early-stop and save GPU hours!"
+        },
+        learning: {
+          steps: ["ckpt-100", "ckpt-200", "ckpt-300", "ckpt-400"],
+          sim: [0.41, 0.58, 0.72, 0.83],
+          msg: "ACTIVE LEARNING: Subspace still rotating meaningfully (+0.11 cosine/step) -> Continue training."
+        },
+        overfit: {
+          steps: ["ckpt-100", "ckpt-200", "ckpt-300", "ckpt-400"],
+          sim: [0.70, 0.93, 0.97, 0.81],
+          msg: "RANK DRIFT / OVERFIT WARNING: Subspace similarity regressed at ckpt-400 -> Roll back to ckpt-300!"
+        }
+      };
+      const p = presets[kind] || presets.converged;
+      const W = 560, H = 140, padL = 42, padR = 20, padT = 18, padB = 26;
+      const pts = p.sim.map((v, idx) => {
+        const x = padL + (idx / (p.sim.length - 1)) * (W - padL - padR);
+        const y = padT + (1.0 - v) * (H - padT - padB);
+        return { x, y, v, label: p.steps[idx] };
+      });
+      const poly = pts.map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
+      const col = kind === "overfit" ? "#f85149" : kind === "learning" ? "#58a6ff" : "#3fb950";
+      const circles = pts.map((pt) =>
+        `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="4.5" fill="${col}" />` +
+        `<text x="${pt.x.toFixed(1)}" y="${(pt.y - 8).toFixed(1)}" fill="#e6edf3" font-size="11" text-anchor="middle">${pt.v.toFixed(3)}</text>` +
+        `<text x="${pt.x.toFixed(1)}" y="${H - 6}" fill="#8b949e" font-size="11" text-anchor="middle">${pt.label}</text>`
+      ).join("");
+      wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:640px;height:auto;display:block;">` +
+        `<line x1="${padL}" y1="${padT}" x2="${W - padR}" y2="${padT}" stroke="#21262d" stroke-dasharray="3,3" />` +
+        `<line x1="${padL}" y1="${H - padB}" x2="${W - padR}" y2="${H - padB}" stroke="#30363d" />` +
+        `<text x="6" y="${padT + 4}" fill="#8b949e" font-size="10">1.00</text>` +
+        `<text x="6" y="${H - padB}" fill="#8b949e" font-size="10">0.00</text>` +
+        `<polyline fill="none" stroke="${col}" stroke-width="2.5" points="${poly}" />${circles}</svg>`;
+      verdict.textContent = p.msg;
+      verdict.style.color = col;
+    }
+    const tp1 = document.getElementById("traj-preset-converged");
+    const tp2 = document.getElementById("traj-preset-learning");
+    const tp3 = document.getElementById("traj-preset-overfit");
+    if (tp1) tp1.onclick = () => renderTrajectoryPreset("converged");
+    if (tp2) tp2.onclick = () => renderTrajectoryPreset("learning");
+    if (tp3) tp3.onclick = () => renderTrajectoryPreset("overfit");
+    renderTrajectoryPreset("converged");
   })();
   </script>
 </body>

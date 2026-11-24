@@ -321,6 +321,67 @@ pub fn render_doctor_json(r: &DoctorReport) -> String {
     )
 }
 
+/// Render an OASIS SARIF v2.1.0 report summarizing executive doctor findings (`LS001`, `LS047`, `LS051`, `LS052`).
+pub fn render_doctor_sarif(r: &DoctorReport) -> String {
+    let mut results = Vec::new();
+    let uri = json_esc(&r.source_uri);
+    if r.dead_layers > 0 {
+        results.push(format!(
+            r#"        {{ "ruleId": "LS001", "level": "error", "message": {{ "text": "{} dead LoRA layer(s) detected in {} (Grade {}, score {:.1}/100)." }}, "locations": [{{ "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }} }}] }}"#,
+            r.dead_layers, uri, r.grade, r.score, uri
+        ));
+    }
+    if r.loraplus_imbalanced_layers > 0 {
+        results.push(format!(
+            r#"        {{ "ruleId": "LS047", "level": "warning", "message": {{ "text": "{} layer(s) exhibit LoRA+ gauge imbalance (mean {:.2}x) in {}." }}, "locations": [{{ "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }} }}] }}"#,
+            r.loraplus_imbalanced_layers, r.loraplus_mean_imbalance, uri, uri
+        ));
+    }
+    if r.brittle_rank1_layers > 0 {
+        results.push(format!(
+            r#"        {{ "ruleId": "LS051", "level": "warning", "message": {{ "text": "{} brittle rank-1 layer(s) detected (forgetting risk: {})." }}, "locations": [{{ "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }} }}] }}"#,
+            r.brittle_rank1_layers, r.forgetting_risk_level, uri
+        ));
+    }
+    if r.energy_spike_layers > 0 {
+        results.push(format!(
+            r#"        {{ "ruleId": "LS052", "level": "warning", "message": {{ "text": "{} depth energy spike layer(s) detected (forgetting risk: {})." }}, "locations": [{{ "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }} }}] }}"#,
+            r.energy_spike_layers, r.forgetting_risk_level, uri
+        ));
+    }
+    format!(
+        r#"{{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {{
+      "tool": {{
+        "driver": {{
+          "name": "loraspectra-doctor",
+          "semanticVersion": "{}",
+          "informationUri": "https://github.com/SalyyS1/loraspectra"
+        }}
+      }},
+      "properties": {{
+        "grade": "{}",
+        "score": {:.2},
+        "forgettingRisk": "{}"
+      }},
+      "results": [
+{}
+      ]
+    }}
+  ]
+}}
+"#,
+        env!("CARGO_PKG_VERSION"),
+        r.grade,
+        r.score,
+        r.forgetting_risk_level,
+        results.join(",\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +413,8 @@ mod tests {
         let html = render_doctor_html(&g_rep);
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("LoRASpectra Executive Doctor Report"));
+        let sarif = render_doctor_sarif(&d_rep);
+        assert!(sarif.contains("\"version\": \"2.1.0\""));
+        assert!(sarif.contains("LS001"));
     }
 }
