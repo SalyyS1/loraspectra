@@ -422,6 +422,48 @@ th,td{{padding:10px 12px;border-bottom:1px solid #21262d;text-align:left;font-si
     )
 }
 
+/// Render an OASIS SARIF v2.1.0 report covering all failing/degraded checkpoints in a batch audit.
+pub fn render_batch_sarif(report: &BatchAuditReport, min_score: f64) -> String {
+    let mut results = Vec::new();
+    for e in &report.entries {
+        let uri = json_esc(&e.path);
+        if e.dead_layers > 0 {
+            results.push(format!(
+                r#"        {{ "ruleId": "LS001", "level": "error", "message": {{ "text": "{} dead LoRA layer(s) in checkpoint {} (score {:.1}/100)." }}, "locations": [{{ "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }} }}] }}"#,
+                e.dead_layers, uri, e.health_score, uri
+            ));
+        } else if e.health_score < min_score {
+            results.push(format!(
+                r#"        {{ "ruleId": "LS047", "level": "warning", "message": {{ "text": "Checkpoint {} spectral health score {:.1}/100 is below threshold {:.1} (status: {}, collapsed: {})." }}, "locations": [{{ "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }} }}] }}"#,
+                uri, e.health_score, min_score, json_esc(&e.status), e.collapsed_layers, uri
+            ));
+        }
+    }
+    format!(
+        r#"{{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {{
+      "tool": {{
+        "driver": {{
+          "name": "loraspectra-batch-audit",
+          "semanticVersion": "{}",
+          "informationUri": "https://github.com/SalyyS1/loraspectra"
+        }}
+      }},
+      "results": [
+{}
+      ]
+    }}
+  ]
+}}
+"#,
+        env!("CARGO_PKG_VERSION"),
+        results.join(",\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,6 +520,9 @@ mod tests {
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("healthy.safetensors"));
         assert!(html.contains("dead.safetensors"));
+        let sarif = render_batch_sarif(&report, 80.0);
+        assert!(sarif.contains("\"version\": \"2.1.0\""));
+        assert!(sarif.contains("LS001"));
 
         let _ = fs::remove_dir_all(&dir);
     }

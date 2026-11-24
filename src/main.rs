@@ -9,7 +9,7 @@ use loraspectra::audit::{
 };
 use loraspectra::batch::{
     discover_checkpoints, render_batch_html, render_batch_json, render_batch_markdown,
-    render_batch_table, run_batch_audit,
+    render_batch_sarif, render_batch_table, run_batch_audit,
 };
 use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
@@ -2777,6 +2777,7 @@ fn main() {
             let mut fail_below_score: Option<f64> = None;
             let mut max_dead_layers: Option<usize> = None;
             let mut html_out: Option<String> = None;
+            let mut sarif_out: Option<String> = None;
             let mut use_json = false;
             let mut use_markdown = false;
             let mut i = 2;
@@ -2806,6 +2807,12 @@ fn main() {
                             html_out = Some(args[i].clone());
                         }
                     }
+                    "--sarif" => {
+                        i += 1;
+                        if i < args.len() {
+                            sarif_out = Some(args[i].clone());
+                        }
+                    }
                     "--json" => use_json = true,
                     "--markdown" => use_markdown = true,
                     other if !other.starts_with("--") => inputs.push(PathBuf::from(other)),
@@ -2823,6 +2830,13 @@ fn main() {
                 let html = render_batch_html(&report);
                 if let Err(e) = std::fs::write(&hp, html) {
                     eprintln!("Error writing HTML leaderboard {}: {}", hp, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(sp) = sarif_out {
+                let sarif = render_batch_sarif(&report, fail_below_score.unwrap_or(60.0));
+                if let Err(e) = std::fs::write(&sp, sarif) {
+                    eprintln!("Error writing SARIF batch report {}: {}", sp, e);
                     process::exit(1);
                 }
             }
@@ -2917,6 +2931,12 @@ fn main() {
                         i += 1;
                         if i < args.len() {
                             html_out = Some(args[i].clone());
+                        }
+                    }
+                    "--sarif" => {
+                        i += 1;
+                        if i < args.len() {
+                            sarif_out = Some(args[i].clone());
                         }
                     }
                     "--sarif" => {
