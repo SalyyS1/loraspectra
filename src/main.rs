@@ -33,7 +33,8 @@ use loraspectra::adalora::{
 };
 use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
 use loraspectra::loraplus::{
-    analyze_loraplus, rebalance_adapter_factors, render_loraplus_json, render_loraplus_table,
+    analyze_loraplus, rebalance_adapter_factors, render_loraplus_html, render_loraplus_json,
+    render_loraplus_table,
 };
 use loraspectra::mcp;
 use loraspectra::knots::{
@@ -2645,11 +2646,12 @@ fn main() {
         }
         "loraplus" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <out.sarif>] [--json]");
+                eprintln!("Usage: loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--html <loraplus.html>] [--sarif <out.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut rebalance_out: Option<String> = None;
+            let mut html_path: Option<String> = None;
             let mut sarif_path: Option<String> = None;
             let mut imbalance_warn: f64 = 1.5;
             let mut cond_warn: f64 = 50.0;
@@ -2661,6 +2663,12 @@ fn main() {
                         i += 1;
                         if i < args.len() {
                             rebalance_out = Some(args[i].clone());
+                        }
+                    }
+                    "--html" => {
+                        i += 1;
+                        if i < args.len() {
+                            html_path = Some(args[i].clone());
                         }
                     }
                     "--sarif" => {
@@ -2693,6 +2701,13 @@ fn main() {
                 let out_map = layers_to_tensor_map(&rebalanced);
                 if let Err(e) = write_safetensors(Path::new(out_file), &out_map) {
                     eprintln!("Error writing rebalanced adapter {}: {}", out_file, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(ref hp) = html_path {
+                let html_str = render_loraplus_html(&summary);
+                if let Err(e) = std::fs::write(hp, html_str) {
+                    eprintln!("Error writing HTML report {}: {}", hp, e);
                     process::exit(1);
                 }
             }

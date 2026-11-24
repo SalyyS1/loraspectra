@@ -358,3 +358,122 @@ pub fn render_loraplus_json(summary: &LoraPlusSummary) -> String {
         layers_json.join(",\n")
     )
 }
+
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML LoRA+ B/A Factor Imbalance & Lambda* Report.
+pub fn render_loraplus_html(summary: &LoraPlusSummary) -> String {
+    let mut rows = String::new();
+    for r in &summary.layers {
+        let cls = if r.imbalance_index >= 1.5 {
+            "bad"
+        } else if r.imbalance_index >= 1.2 {
+            "warn"
+        } else {
+            "ok"
+        };
+        let label = if r.imbalance_index >= 1.5 {
+            "IMBALANCED"
+        } else if r.imbalance_index >= 1.2 {
+            "DRIFT"
+        } else {
+            "BALANCED"
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{:.3}</td><td><span class=\"pill {}\">{:.3} ({})</span></td><td>{:.1}</td><td>{:.1}</td><td><b>{:.1}x</b></td></tr>\n",
+            html_esc(&r.base_name),
+            html_esc(r.block_type),
+            r.rank,
+            r.norm_ratio_b_over_a,
+            cls,
+            r.imbalance_index,
+            label,
+            r.cond_b,
+            r.cond_a,
+            r.recommended_lambda,
+        ));
+    }
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>loraspectra LoRA+ B/A Factor Balance Report</title>
+<style>
+:root{{--bg:#0d1117;--card:#161b22;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;--ac:#58a6ff;--ok:#3fb950;--wa:#d29922;--ba:#f85149}}
+body{{margin:0;padding:24px;background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}}
+.wrap{{max-width:1160px;margin:0 auto}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;margin:16px 0 20px}}
+.card{{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}}
+.k{{font-size:12px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em}}
+.v{{font-size:22px;font-weight:700;margin-top:4px}}
+table{{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--bd);border-radius:10px;overflow:hidden;font-size:13px}}
+th,td{{padding:9px 10px;border-bottom:1px solid #21262d;text-align:left}}
+th{{color:var(--mu);font-weight:600;background:#11161d}}
+.pill{{padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}}
+.pill.ok{{background:rgba(63,185,80,.15);color:var(--ok)}}
+.pill.warn{{background:rgba(210,153,34,.15);color:var(--wa)}}
+.pill.bad{{background:rgba(248,81,73,.15);color:var(--ba)}}
+code{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 style="margin:0;font-size:22px">loraspectra LoRA+ B/A Factor Imbalance &amp; &lambda;* Report</h1>
+  <div style="color:var(--mu);font-size:13px;margin-top:4px">Source: <code>{source}</code> &middot; Layers: {layers}</div>
+  <div class="grid">
+    <div class="card"><div class="k">Mean Imbalance I</div><div class="v">{mean_i:.3}</div></div>
+    <div class="card"><div class="k">Max Imbalance I</div><div class="v">{max_i:.3}</div></div>
+    <div class="card"><div class="k">Imbalanced (LS047)</div><div class="v">{imbal}</div></div>
+    <div class="card"><div class="k">Ill-Conditioned (LS048)</div><div class="v">{ill}</div></div>
+    <div class="card"><div class="k">Rec. Attn &lambda;*</div><div class="v">{attn_l:.1}x</div></div>
+    <div class="card"><div class="k">Rec. MLP &lambda;*</div><div class="v">{mlp_l:.1}x</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Layer</th><th>Block</th><th>Rank</th><th>||B||/||A||</th><th>Imbalance I</th><th>&kappa;(B)</th><th>&kappa;(A)</th><th>Rec. &lambda;*</th></tr></thead>
+    <tbody>
+{rows}    </tbody>
+  </table>
+</div>
+</body>
+</html>
+"##,
+        source = html_esc(&summary.source_uri),
+        layers = summary.layer_count,
+        mean_i = summary.mean_imbalance_index,
+        max_i = summary.max_imbalance_index,
+        imbal = summary.imbalanced_layers,
+        ill = summary.ill_conditioned_layers,
+        attn_l = summary.recommended_attn_lambda,
+        mlp_l = summary.recommended_mlp_lambda,
+        rows = rows,
+    )
+}
+
+#[cfg(test)]
+mod html_tests {
+    use super::*;
+    use crate::safetensors::{DType, Tensor2D};
+
+    #[test]
+    fn loraplus_html_renders_imbalance_and_lambda_summary() {
+        let layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a: Tensor2D { rows: 2, cols: 4, dtype: DType::F32, data: vec![0.1, 0.0, 0.0, 0.1, 0.0, 0.1, 0.1, 0.0] },
+            b: Tensor2D { rows: 4, cols: 2, dtype: DType::F32, data: vec![2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0] },
+        };
+        let summary = analyze_loraplus(&[layer], "demo.safetensors", 1.5, 50.0);
+        let html = render_loraplus_html(&summary);
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("model.layers.0.self_attn.q_proj"));
+        assert!(html.contains("Rec. Attn"));
+    }
+}
