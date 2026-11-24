@@ -341,6 +341,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_loraplus_html","description":"Audit LoRA+ B/A factor imbalance (LS047-LS048) and render a self-contained dark-mode HTML Balance & Lambda* Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"imbalance_warn":{"type":"number"},"cond_warn":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_rank_schedule_html","description":"Compute AdaLoRA water-filling heterogeneous rank allocation (LS049-LS050) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_avg_rank":{"type":"number"},"min_rank":{"type":"integer"},"max_rank":{"type":"integer"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_quant_plan_html","description":"Generate a quantization-aware mixed-precision LoRA rank compression plan (nf4/fp4/int8/fp8/bf16/fp16) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_diff_html","description":"Compute Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -768,6 +769,34 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_diff_html" => {
+            let sa = args.get("source_a").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_a' string".to_string());
+            let sb = args.get("source_b").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_b' string".to_string());
+            sa.and_then(|a| {
+                sb.and_then(|b| {
+                    let pa = resolve_source_path(a)?;
+                    let pb = resolve_source_path(b)?;
+                    let ta = read_safetensors(&pa)?;
+                    let tb = read_safetensors(&pb)?;
+                    let la = extract_lora_layers(&ta)?;
+                    let lb = extract_lora_layers(&tb)?;
+                    let aa = extract_lora_alphas(&ta);
+                    let ab = extract_lora_alphas(&tb);
+                    let da = extract_dora_scales(&ta);
+                    let db = extract_dora_scales(&tb);
+                    let summary = diff_adapters_with_dora(&la, &aa, &da, &lb, &ab, &db);
+                    let html = crate::diff::render_diff_html(&summary);
+                    Ok(format!(
+                        r#"{{"shared_layers":{},"mean_relative_drift":{:.4},"mean_subspace_similarity":{:.4},"html_bytes":{},"html":"{}"}}"#,
+                        summary.shared_layers.len(),
+                        summary.mean_relative_drift,
+                        summary.mean_subspace_similarity,
+                        html.len(),
+                        json_escape(&html)
+                    ))
+                })
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -858,6 +887,7 @@ mod tests {
         assert!(tools.contains("loraspectra_loraplus_html"));
         assert!(tools.contains("loraspectra_rank_schedule_html"));
         assert!(tools.contains("loraspectra_quant_plan_html"));
+        assert!(tools.contains("loraspectra_diff_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

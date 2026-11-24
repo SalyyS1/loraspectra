@@ -520,6 +520,7 @@ fn main() {
         }
         "diff" => {
             let mut json_mode = false;
+            let mut html_out: Option<String> = None;
             let mut config_a_opt: Option<String> = None;
             let mut config_b_opt: Option<String> = None;
             let mut pos: Vec<String> = Vec::new();
@@ -529,6 +530,10 @@ fn main() {
                     "--json" => {
                         json_mode = true;
                         i += 1;
+                    }
+                    "--html" if i + 1 < args.len() => {
+                        html_out = Some(args[i + 1].clone());
+                        i += 2;
                     }
                     "--config-a" if i + 1 < args.len() => {
                         config_a_opt = Some(args[i + 1].clone());
@@ -570,6 +575,14 @@ fn main() {
                 if pissa_b.is_empty() { None } else { Some(&pissa_b) },
             );
 
+            if let Some(ref hp) = html_out {
+                let html = loraspectra::diff::render_diff_html(&summary);
+                if let Err(e) = std::fs::write(hp, &html) {
+                    eprintln!("Error writing diff HTML report to '{}': {}", hp, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote checkpoint differential drift HTML report to {}", hp);
+            }
             if json_mode {
                 println!("{}", render_diff_json(&summary));
             } else {

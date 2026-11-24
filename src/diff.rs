@@ -716,6 +716,77 @@ pub fn render_diff_table(summary: &AdapterDiffSummary) -> String {
     out
 }
 
+fn html_esc_diff(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML Checkpoint Differential Drift Report for `loraspectra diff --html`.
+pub fn render_diff_html(summary: &AdapterDiffSummary) -> String {
+    let mut rows = String::new();
+    for r in &summary.shared_layers {
+        let drift_col = if r.relative_drift >= 0.5 {
+            "#f85149"
+        } else if r.relative_drift >= 0.2 {
+            "#d29922"
+        } else {
+            "#3fb950"
+        };
+        let sim_col = if r.subspace_similarity >= 0.85 {
+            "#3fb950"
+        } else if r.subspace_similarity >= 0.6 {
+            "#d29922"
+        } else {
+            "#f85149"
+        };
+        let dora_cell = r
+            .dora_relative_drift
+            .map(|v| format!("{:.4}", v))
+            .unwrap_or_else(|| "—".to_string());
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{} &rarr; {}</td><td>{:.4} &rarr; {:.4}</td><td style=\"color:{}\"><b>{:.4}</b></td><td style=\"color:{}\"><b>{:.4}</b></td><td>{}</td></tr>\n",
+            html_esc_diff(&r.base_name),
+            r.rank_a,
+            r.rank_b,
+            r.frobenius_norm_a,
+            r.frobenius_norm_b,
+            drift_col,
+            r.relative_drift,
+            sim_col,
+            r.subspace_similarity,
+            dora_cell
+        ));
+    }
+    let max_layer = summary
+        .max_drift_layer
+        .as_deref()
+        .unwrap_or("none");
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>loraspectra Checkpoint Differential Drift Report</title>
+<style>
+body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,sans-serif}}
+.wrap{{max-width:1060px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;font-size:12.5px}}th,td{{padding:8px 9px;border-bottom:1px solid #21262d;text-align:left}}
+th{{color:#8b949e}}code{{font-family:ui-monospace,monospace;color:#58a6ff}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>loraspectra Checkpoint Differential Drift Report</h1>
+<p>Shared Layers: <b>{}</b> (Added: <b>{}</b>, Removed: <b>{}</b>) &middot; Mean Rel Drift: <b>{:.4}</b> &middot; Mean Subspace Sim: <b>{:.4}</b> &middot; Peak Drift Layer: <code>{}</code> ({:.4})</p></div>
+<div class="card"><table><thead><tr><th>Layer</th><th>Rank (A &rarr; B)</th><th>Frobenius ||W||_F</th><th>Relative Drift</th><th>Subspace Sim</th><th>DoRA Drift</th></tr></thead>
+<tbody>{}</tbody></table></div></div></body></html>"##,
+        summary.shared_layers.len(),
+        summary.added_layers.len(),
+        summary.removed_layers.len(),
+        summary.mean_relative_drift,
+        summary.mean_subspace_similarity,
+        html_esc_diff(max_layer),
+        summary.max_relative_drift,
+        rows
+    )
+}
+
 // ---- Subspace Drift Analysis ----------------------------------------------------------------
 
 /// Classification of subspace rotation magnitude between two LoRA checkpoints.
