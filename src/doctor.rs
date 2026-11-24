@@ -395,6 +395,22 @@ pub fn render_doctor_sarif(r: &DoctorReport) -> String {
     )
 }
 
+/// Render a shields.io Endpoint Badge JSON payload (`{"schemaVersion":1,"label":...,"message":...,"color":...}`)
+/// so CI workflows can auto-publish live LoRA spectral health badges to Model Cards & GitHub READMEs.
+pub fn render_doctor_badge_json(r: &DoctorReport) -> String {
+    let color = match r.grade {
+        "A" => "brightgreen",
+        "B" => "green",
+        "C" => "yellow",
+        "D" => "orange",
+        _ => "red",
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"LoRA Health","message":"Grade {} ({:.0}/100)","color":"{}"}}"#,
+        r.grade, r.score, color
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +448,8 @@ mod tests {
         assert!(grade_meets_threshold("A", "B"));
         assert!(grade_meets_threshold("B", "B"));
         assert!(!grade_meets_threshold("C", "B"));
+        let badge = render_doctor_badge_json(&g_rep);
+        assert!(badge.contains("\"schemaVersion\":1"));
+        assert!(badge.contains("LoRA Health"));
     }
 }

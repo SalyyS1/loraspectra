@@ -2922,6 +2922,7 @@ fn main() {
             let mut use_json = false;
             let mut html_out: Option<String> = None;
             let mut sarif_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut min_grade: Option<String> = None;
             let mut i = 3;
             while i < args.len() {
@@ -2939,6 +2940,12 @@ fn main() {
                             sarif_out = Some(args[i].clone());
                         }
                     }
+                    "--badge-json" => {
+                        i += 1;
+                        if i < args.len() {
+                            badge_out = Some(args[i].clone());
+                        }
+                    }
                     "--fail-below-grade" => {
                         i += 1;
                         if i < args.len() {
@@ -2951,6 +2958,13 @@ fn main() {
             }
             let (tensors, layers, _, _, peft_cfg) = load_full_adapter_bundle_or_exit(input_uri, None);
             let rep = run_doctor(input_uri, &layers, &tensors, peft_cfg.as_ref());
+            if let Some(ref bpath) = badge_out {
+                let badge = loraspectra::doctor::render_doctor_badge_json(&rep);
+                if let Err(e) = std::fs::write(bpath, badge) {
+                    eprintln!("Failed to write doctor badge JSON to {}: {}", bpath, e);
+                    process::exit(1);
+                }
+            }
             if let Some(ref hpath) = html_out {
                 if let Err(e) = std::fs::write(hpath, render_doctor_html(&rep)) {
                     eprintln!("Failed to write HTML doctor report {}: {}", hpath, e);
