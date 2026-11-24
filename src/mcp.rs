@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use crate::adalora::{optimize_rank_schedule, render_rank_schedule_json};
 use crate::audit::{audit_adapter, audit_adapter_integrity, render_audit_json};
 use crate::batch::{discover_checkpoints, render_batch_json, run_batch_audit};
+use crate::card::generate_model_card;
 use crate::diff::{diff_adapters_with_dora, render_diff_json};
 use crate::doctor::{render_doctor_json, run_doctor};
 use crate::loraplus::{analyze_loraplus, render_loraplus_json};
@@ -324,6 +325,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_doctor","description":"Run an all-in-one executive adapter health diagnosis combining SVD utilization, integrity, LoRA+ imbalance, sensitivity/forgetting risk, and AdaLoRA budget into an A-F grade.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_diff","description":"Compute exact O(r^2*(d_in+d_out)) Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_merge_check","description":"Evaluate N >= 2 LoRA adapters jointly prior to TIES/DARE/linear/ortho-svd merging for subspace collision, spectral norm inflation, and incompatible shapes.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
+{"name":"loraspectra_model_card","description":"Generate a ready-to-paste HuggingFace README.md Spectral Audit Model Card with shields.io badges and bottleneck tables from a local .safetensors or hf://org/repo URI.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -541,6 +543,25 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 Ok(render_merge_check_json(&summary))
             })
         }
+        "loraspectra_model_card" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let alphas = extract_lora_alphas(&tensors);
+                let dora = extract_dora_scales(&tensors);
+                let arch = inspect_adapter_architecture(&layers, &alphas);
+                let summary = audit_adapter(&layers);
+                let integrity = audit_adapter_integrity(&layers, &tensors, &alphas, &dora, None);
+                let md = generate_model_card(s, &arch, &summary, &integrity);
+                Ok(format!(
+                    r#"{{"source":"{}","markdown":"{}"}}"#,
+                    json_escape(s),
+                    json_escape(&md)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -618,6 +639,7 @@ mod tests {
         assert!(tools.contains("loraspectra_doctor"));
         assert!(tools.contains("loraspectra_diff"));
         assert!(tools.contains("loraspectra_merge_check"));
+        assert!(tools.contains("loraspectra_model_card"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
