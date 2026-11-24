@@ -2981,6 +2981,28 @@ fn main() {
                 print!("{}", loraspectra::quant_plan::render_quant_plan_table(&rep));
             }
         }
+        "compat" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra compat <adapter_or_hf_uri> [--json]");
+                process::exit(1);
+            }
+            let input_uri = &args[2];
+            let use_json = args[3..].iter().any(|a| a == "--json");
+            let (tensors, _, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
+            match loraspectra::compat::check_serving_compatibility(input_uri, &tensors) {
+                Ok(rep) => {
+                    if use_json {
+                        println!("{}", loraspectra::compat::render_compat_json(&rep));
+                    } else {
+                        print!("{}", loraspectra::compat::render_compat_table(&rep));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Compatibility check error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
         "mcp" => {
             if let Err(e) = mcp::serve_stdio() {
                 eprintln!("loraspectra mcp server error: {}", e);

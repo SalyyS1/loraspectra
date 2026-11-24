@@ -332,6 +332,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_trajectory","description":"Analyze an ordered sequence of >=2 training checkpoints for Frobenius velocity, effective-rank evolution, Grassmannian subspace convergence, rank collapse, and early-stopping recommendation.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_quant_plan","description":"Generate a quantization-aware mixed-precision LoRA rank compression plan (nf4/fp4/int8/fp8/bf16/fp16) projecting byte savings and flagging brittle rank-1 outlier layers.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_check_compatibility","description":"Evaluate a .safetensors LoRA adapter's serve-readiness across vLLM, SGLang, HuggingFace PEFT, llama.cpp/Ollama, and ComfyUI/Diffusers with exact conversion commands.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_svd_compress_preview","description":"Run a read-only Eckart-Young SVD compression dry-run comparing nominal vs 90%, 95%, 99% energy, and Marchenko-Pastur optimal ranks with exact Frobenius/spectral error bounds and byte savings.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -603,6 +604,36 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 Ok(render_compat_json(&rep))
             })
         }
+        "loraspectra_svd_compress_preview" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let summary = audit_adapter(&layers);
+                let saved_bytes = summary.total_nominal_bytes.saturating_sub(summary.total_optimal_99_bytes);
+                let saved_pct = if summary.total_nominal_bytes > 0 {
+                    (saved_bytes as f64 / summary.total_nominal_bytes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                Ok(format!(
+                    r#"{{"source":"{}","layer_count":{},"total_nominal_bytes":{},"total_optimal_99_bytes":{},"saved_bytes_at_99":{},"saved_pct_at_99":{:.2},"mean_nominal_rank":{:.2},"mean_effective_rank":{:.2},"mean_rank_at_99_energy":{:.2},"mean_rank_mp":{:.2},"max_mp_relative_spectral_error":{:.6},"mean_99_relative_nuclear_error":{:.6},"dry_run":true}}"#,
+                    json_escape(s),
+                    summary.layers.len(),
+                    summary.total_nominal_bytes,
+                    summary.total_optimal_99_bytes,
+                    saved_bytes,
+                    saved_pct,
+                    summary.mean_nominal_rank,
+                    summary.mean_effective_rank,
+                    summary.mean_rank_at_99_energy,
+                    summary.mean_rank_mp,
+                    summary.max_mp_relative_spectral_error,
+                    summary.mean_99_relative_nuclear_error
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -684,6 +715,7 @@ mod tests {
         assert!(tools.contains("loraspectra_trajectory"));
         assert!(tools.contains("loraspectra_quant_plan"));
         assert!(tools.contains("loraspectra_check_compatibility"));
+        assert!(tools.contains("loraspectra_svd_compress_preview"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

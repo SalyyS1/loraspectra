@@ -215,6 +215,34 @@ pub fn check_serving_compatibility(
     })
 }
 
+pub fn render_compat_table(rep: &CompatibilityReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "=== LoRASpectra Serving Runtime Compatibility ({}) ===\n",
+        rep.source
+    ));
+    out.push_str(&format!(
+        "Format: {} | Arch: {} | DType: {} | Hetero-Rank: {} | DoRA: {} | Ready: {}/{}\n\n",
+        rep.naming_format,
+        rep.inferred_architecture,
+        rep.primary_dtype,
+        rep.heterogeneous_ranks,
+        rep.has_dora,
+        rep.ready_count,
+        rep.runtimes.len()
+    ));
+    for r in &rep.runtimes {
+        out.push_str(&format!("- {:<20} [{}]\n", r.runtime, r.status));
+        for n in &r.notes {
+            out.push_str(&format!("    note: {}\n", n));
+        }
+        if let Some(ref rem) = r.remediation {
+            out.push_str(&format!("    fix:  {}\n", rem));
+        }
+    }
+    out
+}
+
 pub fn render_compat_json(rep: &CompatibilityReport) -> String {
     let entries: Vec<String> = rep
         .runtimes
