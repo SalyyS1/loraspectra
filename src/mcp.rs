@@ -333,6 +333,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_quant_plan","description":"Generate a quantization-aware mixed-precision LoRA rank compression plan (nf4/fp4/int8/fp8/bf16/fp16) projecting byte savings and flagging brittle rank-1 outlier layers.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_check_compatibility","description":"Evaluate a .safetensors LoRA adapter's serve-readiness across vLLM, SGLang, HuggingFace PEFT, llama.cpp/Ollama, and ComfyUI/Diffusers with exact conversion commands.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_svd_compress_preview","description":"Run a read-only Eckart-Young SVD compression dry-run comparing nominal vs 90%, 95%, 99% energy, and Marchenko-Pastur optimal ranks with exact Frobenius/spectral error bounds and byte savings.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_batch_sarif","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and emit an OASIS SARIF v2.1.0 Code Scanning report flagging low-health adapters below min_score.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"},"min_score":{"type":"number"}},"required":["paths"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -634,6 +635,17 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_batch_sarif" => {
+            let raw_paths = args.get("paths").and_then(|v| v.as_arr()).ok_or_else(|| "Missing 'paths' array".to_string());
+            raw_paths.and_then(|arr| {
+                let inputs: Vec<PathBuf> = arr.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect();
+                let depth = args.get("max_depth").and_then(|v| v.as_f64()).unwrap_or(6.0).max(1.0) as usize;
+                let min_score = args.get("min_score").and_then(|v| v.as_f64()).unwrap_or(70.0);
+                let discovered = discover_checkpoints(&inputs, depth);
+                let report = run_batch_audit(&discovered);
+                Ok(crate::batch::render_batch_sarif(&report, min_score))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -716,6 +728,7 @@ mod tests {
         assert!(tools.contains("loraspectra_quant_plan"));
         assert!(tools.contains("loraspectra_check_compatibility"));
         assert!(tools.contains("loraspectra_svd_compress_preview"));
+        assert!(tools.contains("loraspectra_batch_sarif"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
