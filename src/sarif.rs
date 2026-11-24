@@ -366,6 +366,20 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         full_description: "Layer uses <=45% of its nominal rank at 99% energy; redistribute parameter budget to bottleneck modules.",
         default_level: "note",
     },
+    SarifRuleDefinition {
+        id: "LS051",
+        name: "BrittleRankOneDominance",
+        short_description: "Layer concentrates >=85% of Frobenius energy into its single top singular mode (rank-1 brittle spike)",
+        full_description: "A nominal rank >=4 LoRA module has Top-1 singular dominance sigma_1^2 / ||Delta W||_F^2 >= 85%, increasing catastrophic forgetting and overfitting risk.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS052",
+        name: "LayerEnergyConcentrationSpike",
+        short_description: "Single module absorbs an outsized multiple of mean per-layer Frobenius update energy",
+        full_description: "One transformer module (often a deep MLP down_proj) absorbs >=2.5x the average per-layer Frobenius energy, signaling unbalanced gradient scaling or memorization.",
+        default_level: "warning",
+    },
 ];
 
 fn escape_json(s: &str) -> String {

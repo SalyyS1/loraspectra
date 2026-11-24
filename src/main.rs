@@ -61,6 +61,9 @@ use loraspectra::sarif::{
     build_merge_check_sarif, build_ortho_proj_sarif, build_rank_schedule_sarif,
     build_ties_dare_sarif,
 };
+use loraspectra::sensitivity::{
+    analyze_sensitivity, render_sensitivity_json, render_sensitivity_table,
+};
 use loraspectra::ties_dare::{
     compose_adapters_ties_dare, render_ties_dare_json, render_ties_dare_table, DisjointAggregation,
     TiesDareConfig, TiesDareMode,
@@ -69,7 +72,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.11.0 - Spectral SVD Auditor, 6-Tool Stdio MCP Server, Batch Leaderboard, LoRA+ Factor Balancer, AdaLoRA Rank Scheduler, Knots/TSV Aligner, LoRA-GA & TIES/DARE Merger (.safetensors)
+        "loraspectra v1.12.0 - Spectral SVD Auditor, 7-Tool Stdio MCP Server, Sensitivity/Forgetting Auditor, Batch Leaderboard, LoRA+ Balancer, AdaLoRA Scheduler & TIES/DARE Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -96,7 +99,8 @@ USAGE:
   loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <output.sarif>] [--json]
   loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]
   loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]
-  loraspectra mcp                                          # run built-in zero-dependency JSON-RPC 2.0 stdio MCP server"
+  loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--json]
+  loraspectra mcp                                          # run built-in zero-dependency 7-tool JSON-RPC 2.0 stdio MCP server"
     );
 }
 
@@ -2819,6 +2823,43 @@ fn main() {
             }
             if gate_failed {
                 process::exit(2);
+            }
+        }
+        "sensitivity" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--json]");
+                process::exit(1);
+            }
+            let input_uri = &args[2];
+            let mut dom_warn: f64 = 85.0;
+            let mut spike_mult: f64 = 2.5;
+            let mut use_json = false;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--dominance-warn" => {
+                        i += 1;
+                        if i < args.len() {
+                            dom_warn = args[i].parse().unwrap_or(85.0);
+                        }
+                    }
+                    "--spike-mult" => {
+                        i += 1;
+                        if i < args.len() {
+                            spike_mult = args[i].parse().unwrap_or(2.5);
+                        }
+                    }
+                    "--json" => use_json = true,
+                    _ => {}
+                }
+                i += 1;
+            }
+            let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
+            let rep = analyze_sensitivity(&layers, input_uri, dom_warn, spike_mult);
+            if use_json {
+                println!("{}", render_sensitivity_json(&rep));
+            } else {
+                print!("{}", render_sensitivity_table(&rep));
             }
         }
         "mcp" => {

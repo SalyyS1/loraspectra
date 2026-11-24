@@ -18,6 +18,7 @@ pub mod quant_fp8;
 pub mod remote;
 pub mod safetensors;
 pub mod sarif;
+pub mod sensitivity;
 pub mod ties_dare;
 pub mod vera;
 
@@ -3532,7 +3533,7 @@ mod tests {
         use crate::ortho_proj::{project_adapter_orthogonal, OrthoDomain, OrthoProjectConfig};
         use crate::sarif::{build_lora_ga_sarif, build_ortho_proj_sarif, LORASPECTRA_SARIF_RULES};
 
-        assert_eq!(LORASPECTRA_SARIF_RULES.len(), 50);
+        assert_eq!(LORASPECTRA_SARIF_RULES.len(), 52);
         assert_eq!(LORASPECTRA_SARIF_RULES[38].id, "LS039");
         assert_eq!(LORASPECTRA_SARIF_RULES[39].id, "LS040");
         assert_eq!(LORASPECTRA_SARIF_RULES[40].id, "LS041");
