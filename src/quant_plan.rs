@@ -149,6 +149,33 @@ pub fn build_quant_plan(
     }
 }
 
+pub fn render_quant_plan_table(rep: &QuantPlanReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "=== LoRASpectra Quantization-Aware Compression Plan ({}) ===\n",
+        rep.source
+    ));
+    out.push_str(&format!(
+        "Target Quant: {} | Energy: {:.1}% | Savings: {:.1}% ({} B -> {} B) | High-Risk Outliers (BF16 kept): {}\n",
+        rep.target_quant,
+        rep.target_energy * 100.0,
+        rep.total_savings_pct,
+        rep.total_nominal_bytes,
+        rep.total_projected_bytes,
+        rep.high_risk_layers
+    ));
+    out.push_str(&format!("Recommended CLI: {}\n\n", rep.recommended_cli_command));
+    out.push_str("Layer | NomR -> RecR | Dtype | Risk | Savings\n");
+    out.push_str("------+--------------+-------+------+--------\n");
+    for l in &rep.layers {
+        out.push_str(&format!(
+            "{} | {:>4} -> {:<4} | {:<5} | {:<4} | {:>5.1}%\n",
+            l.base_name, l.nominal_rank, l.recommended_rank, l.recommended_dtype, l.quant_risk, l.savings_pct
+        ));
+    }
+    out
+}
+
 pub fn render_quant_plan_json(rep: &QuantPlanReport) -> String {
     let items: Vec<String> = rep
         .layers

@@ -2942,6 +2942,45 @@ fn main() {
                 }
             }
         }
+        "quant-plan" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra quant-plan <adapter_or_hf_uri> [--quant nf4|fp4|int4|int8|fp8|bf16|fp16] [--energy 0.99] [--json]");
+                process::exit(1);
+            }
+            let input_uri = &args[2];
+            let mut quant = "nf4".to_string();
+            let mut energy = 0.99_f64;
+            let mut use_json = false;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--json" => use_json = true,
+                    "--quant" => {
+                        i += 1;
+                        if i < args.len() {
+                            quant = args[i].clone();
+                        }
+                    }
+                    "--energy" => {
+                        i += 1;
+                        if i < args.len() {
+                            if let Ok(v) = args[i].parse::<f64>() {
+                                energy = v;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
+            let rep = loraspectra::quant_plan::build_quant_plan(input_uri, &layers, &quant, energy);
+            if use_json {
+                println!("{}", loraspectra::quant_plan::render_quant_plan_json(&rep));
+            } else {
+                print!("{}", loraspectra::quant_plan::render_quant_plan_table(&rep));
+            }
+        }
         "mcp" => {
             if let Err(e) = mcp::serve_stdio() {
                 eprintln!("loraspectra mcp server error: {}", e);

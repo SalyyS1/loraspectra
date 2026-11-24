@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.19.0 - Interactive .safetensors SVD, Quantization Planner, Training Trajectory Telemetry &amp; 13-Tool MCP Server</title>
+  <title>loraspectra v1.20.0 - Interactive .safetensors SVD, Quantization Planner CLI/Lab, Trajectory Telemetry &amp; 13-Tool MCP Server</title>
   <meta name="description" content="100% client-side in-browser .safetensors header inspector, 8-tool stdio MCP server (loraspectra mcp), Executive Adapter Doctor (A-F scorecard), Spectral Sensitivity &amp; Catastrophic Forgetting SARIF auditor (LS051-LS052), LoRA/LoRA+/AdaLoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, multi-checkpoint batch-audit leaderboard, and zero-dependency Rust CLI (v1.14.0, SARIF LS001-LS052).">
   <meta property="og:title" content="loraspectra v1.14.0 - Interactive .safetensors SVD, Executive Doctor (A-F), 8-Tool MCP Server &amp; Sensitivity SARIF">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
@@ -419,7 +419,7 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.19.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.20.0</span></h1>
         <p class="lead">
           Spectral SVD Auditor, <strong>6-Tool Stdio MCP Server (<code>loraspectra mcp</code>)</strong>, Multi-Checkpoint Batch Leaderboard (<code>batch-audit</code>), LoRA+ Variational Factor Balancer, AdaLoRA Water-Filling Rank Scheduler, Knots/TSV Aligner, LoRA-GA Initializer, O-LoRA Projector, and TIES/DARE Merger
           &mdash; powered by exact QR-Core SVD (<code>O(r&sup2;d + r&sup3;)</code>) with zero dependencies.
@@ -836,6 +836,42 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
           <pre class="cli-code" id="doc-cmd" style="margin-top:6px;padding:8px 10px;font-size:12px;"></pre>
         </div>
       </div>
+    </div>
+
+    <!-- Interactive Quantization-Aware Compression Planner (v1.20.0) -->
+    <div class="card" id="quant-plan-card">
+      <div class="card-header">
+        <h2 class="card-title">Interactive Quantization-Aware Compression Planner (<code>v1.20.0</code> · <code>loraspectra quant-plan</code>)</h2>
+        <span class="privacy-tag">Mixed-Precision BF16 Outlier Guard</span>
+      </div>
+      <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 14px;">
+        Estimate combined SVD rank truncation + low-bit quantization savings (<code>NF4</code>, <code>INT8</code>, <code>FP8</code>, <code>BF16</code>) while preserving brittle rank-1 outlier layers in <code>BF16</code>.
+      </p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 14px;">
+        <div class="kpi-card">
+          <div class="kpi-label">Nominal Rank r: <strong id="qp-rank-val">64</strong></div>
+          <input type="range" id="qp-rank" min="8" max="128" step="8" value="64" style="width:100%;">
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Kept Energy: <strong id="qp-energy-val">99%</strong></div>
+          <input type="range" id="qp-energy" min="90" max="99" step="1" value="99" style="width:100%;">
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Target Quant Format</div>
+          <select id="qp-quant" style="width:100%;margin-top:4px;background:#0d1420;color:#e6edf3;border:1px solid #2b3a4d;border-radius:6px;padding:5px;">
+            <option value="nf4">NF4 (4.5 bpp w/ absmax)</option>
+            <option value="int8">INT8 (8.5 bpp w/ scale)</option>
+            <option value="fp8">FP8 E4M3 (8.5 bpp)</option>
+            <option value="bf16">BF16 (16 bpp lossless)</option>
+          </select>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Projected Storage Savings</div>
+          <div class="kpi-value green" id="qp-savings">88.4%</div>
+          <div class="kpi-sub" id="qp-sub">FP32 -> NF4 + SVD rank-24</div>
+        </div>
+      </div>
+      <pre class="cli-code" id="qp-cmd" style="padding:8px 10px;font-size:12px;"></pre>
     </div>
 
     <!-- Interactive Knots Joint-SVD, Isotropic Flattening & TSV Lab (v1.8.0) -->
@@ -3288,6 +3324,28 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       if (el) el.addEventListener("input", updateDoctorSim);
     });
     updateDoctorSim();
+
+    function updateQuantPlanSim() {
+      const rEl = document.getElementById("qp-rank");
+      if (!rEl) return;
+      const nomR = parseInt(rEl.value, 10) || 64;
+      const energyPct = parseInt(document.getElementById("qp-energy").value, 10) || 99;
+      const quant = document.getElementById("qp-quant").value || "nf4";
+      document.getElementById("qp-rank-val").textContent = String(nomR);
+      document.getElementById("qp-energy-val").textContent = energyPct + "%";
+      const keepFrac = energyPct <= 92 ? 0.25 : energyPct <= 96 ? 0.35 : 0.45;
+      const recR = Math.max(4, Math.round(nomR * keepFrac));
+      const bpp = quant === "nf4" ? 4.5 : (quant === "int8" || quant === "fp8") ? 8.5 : 16.0;
+      const savings = Math.max(0, (1.0 - (recR * bpp) / (nomR * 16.0)) * 100.0);
+      document.getElementById("qp-savings").textContent = savings.toFixed(1) + "%";
+      document.getElementById("qp-sub").textContent = "BF16 r=" + nomR + " -> " + quant.toUpperCase() + " r=" + recR;
+      document.getElementById("qp-cmd").textContent = "loraspectra quant-plan ./adapter_model.safetensors --quant " + quant + " --energy " + (energyPct / 100).toFixed(2) + " --json";
+    }
+    ["qp-rank", "qp-energy", "qp-quant"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) { el.addEventListener("input", updateQuantPlanSim); el.addEventListener("change", updateQuantPlanSim); }
+    });
+    updateQuantPlanSim();
   })();
   </script>
 </body>
