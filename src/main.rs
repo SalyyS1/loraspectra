@@ -29,7 +29,8 @@ use loraspectra::merge_check::{
     AdapterMergeInput,
 };
 use loraspectra::adalora::{
-    optimize_rank_schedule, render_rank_schedule_json, render_rank_schedule_table,
+    optimize_rank_schedule, render_rank_schedule_html, render_rank_schedule_json,
+    render_rank_schedule_table,
 };
 use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
 use loraspectra::loraplus::{
@@ -2726,13 +2727,14 @@ fn main() {
         }
         "rank-schedule" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <out.sarif>] [--json]");
+                eprintln!("Usage: loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--html <adalora.html>] [--sarif <out.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut target_avg_rank: f64 = 16.0;
             let mut min_rank: usize = 4;
             let mut max_rank: usize = 64;
+            let mut html_path: Option<String> = None;
             let mut sarif_path: Option<String> = None;
             let mut use_json = false;
             let mut i = 3;
@@ -2756,6 +2758,12 @@ fn main() {
                             max_rank = args[i].parse().unwrap_or(64);
                         }
                     }
+                    "--html" => {
+                        i += 1;
+                        if i < args.len() {
+                            html_path = Some(args[i].clone());
+                        }
+                    }
                     "--sarif" => {
                         i += 1;
                         if i < args.len() {
@@ -2769,6 +2777,13 @@ fn main() {
             }
             let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
             let summary = optimize_rank_schedule(&layers, input_uri, target_avg_rank, min_rank, max_rank);
+            if let Some(ref hp) = html_path {
+                let html_str = render_rank_schedule_html(&summary);
+                if let Err(e) = std::fs::write(hp, html_str) {
+                    eprintln!("Error writing HTML report {}: {}", hp, e);
+                    process::exit(1);
+                }
+            }
             if let Some(ref sp) = sarif_path {
                 let sarif_str = build_rank_schedule_sarif(&summary, env!("CARGO_PKG_VERSION"));
                 if let Err(e) = std::fs::write(sp, sarif_str) {

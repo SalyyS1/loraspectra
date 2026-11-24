@@ -284,3 +284,118 @@ pub fn render_rank_schedule_json(summary: &RankScheduleSummary) -> String {
         pat_entries.join(",\n")
     )
 }
+
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML AdaLoRA Water-Filling Rank Schedule Report.
+pub fn render_rank_schedule_html(summary: &RankScheduleSummary) -> String {
+    let mut rows = String::new();
+    for l in &summary.layers {
+        let cls = match l.status {
+            RankScheduleStatus::Bottleneck => "bad",
+            RankScheduleStatus::OverAllocated => "warn",
+            _ => "ok",
+        };
+        let delta: isize = l.recommended_rank as isize - l.current_rank as isize;
+        let delta_str = if delta > 0 {
+            format!("+{}", delta)
+        } else {
+            format!("{}", delta)
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td><b>{}</b> ({})</td><td>{}</td><td>{:.2}</td><td>{:.1}%</td><td><span class=\"pill {}\">{}</span></td></tr>\n",
+            html_esc(&l.base_name),
+            l.current_rank,
+            l.recommended_rank,
+            delta_str,
+            l.rank_99_energy,
+            l.effective_rank,
+            l.tail_energy_share * 100.0,
+            cls,
+            html_esc(l.status.as_str()),
+        ));
+    }
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>loraspectra AdaLoRA Rank-Schedule Report</title>
+<style>
+:root{{--bg:#0d1117;--card:#161b22;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;--ac:#58a6ff;--ok:#3fb950;--wa:#d29922;--ba:#f85149}}
+body{{margin:0;padding:24px;background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}}
+.wrap{{max-width:1160px;margin:0 auto}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;margin:16px 0 20px}}
+.card{{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}}
+.k{{font-size:12px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em}}
+.v{{font-size:22px;font-weight:700;margin-top:4px}}
+table{{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--bd);border-radius:10px;overflow:hidden;font-size:13px}}
+th,td{{padding:9px 10px;border-bottom:1px solid #21262d;text-align:left}}
+th{{color:var(--mu);font-weight:600;background:#11161d}}
+.pill{{padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}}
+.pill.ok{{background:rgba(63,185,80,.15);color:var(--ok)}}
+.pill.warn{{background:rgba(210,153,34,.15);color:var(--wa)}}
+.pill.bad{{background:rgba(248,81,73,.15);color:var(--ba)}}
+code{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 style="margin:0;font-size:22px">loraspectra AdaLoRA Water-Filling Rank Schedule</h1>
+  <div style="color:var(--mu);font-size:13px;margin-top:4px">Source: <code>{source}</code> &middot; Layers: {layers} &middot; Target Avg Rank: {avg:.1}</div>
+  <div class="grid">
+    <div class="card"><div class="k">Current Total Rank</div><div class="v">{cur}</div></div>
+    <div class="card"><div class="k">Recommended Total Rank</div><div class="v">{rec}</div></div>
+    <div class="card"><div class="k">Bottlenecks (LS049)</div><div class="v">{bot}</div></div>
+    <div class="card"><div class="k">Over-Allocated (LS050)</div><div class="v">{over}</div></div>
+    <div class="card"><div class="k">Rank Bounds</div><div class="v">[{min_r}, {max_r}]</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Layer</th><th>Current R</th><th>Recommended R</th><th>K_99%</th><th>R_eff</th><th>Tail Energy</th><th>Status</th></tr></thead>
+    <tbody>
+{rows}    </tbody>
+  </table>
+</div>
+</body>
+</html>
+"##,
+        source = html_esc(&summary.source_uri),
+        layers = summary.layers.len(),
+        avg = summary.target_avg_rank,
+        cur = summary.current_total_rank,
+        rec = summary.recommended_total_rank,
+        bot = summary.bottleneck_count,
+        over = summary.over_allocated_count,
+        min_r = summary.min_rank,
+        max_r = summary.max_rank,
+        rows = rows,
+    )
+}
+
+#[cfg(test)]
+mod html_tests {
+    use super::*;
+    use crate::safetensors::{DType, Tensor2D};
+
+    #[test]
+    fn rank_schedule_html_renders_summary_and_layers() {
+        let layer = LoraLayer {
+            base_name: "model.layers.4.mlp.down_proj".to_string(),
+            a_key: "model.layers.4.mlp.down_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.4.mlp.down_proj.lora_B.weight".to_string(),
+            a: Tensor2D { rows: 4, cols: 8, dtype: DType::F32, data: vec![0.2; 32] },
+            b: Tensor2D { rows: 8, cols: 4, dtype: DType::F32, data: vec![0.2; 32] },
+        };
+        let summary = optimize_rank_schedule(&[layer], "demo.safetensors", 8.0, 4, 32);
+        let html = render_rank_schedule_html(&summary);
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("model.layers.4.mlp.down_proj"));
+        assert!(html.contains("AdaLoRA Water-Filling Rank Schedule"));
+    }
+}
