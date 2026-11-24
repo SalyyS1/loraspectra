@@ -295,6 +295,7 @@ pub fn render_doctor_json(r: &DoctorReport) -> String {
   "brittle_rank1_layers": {},
   "energy_spike_layers": {},
   "recommended_avg_rank": {:.2},
+  "shields_badge": {},
   "recommendations": [{}]
 }}"#,
         json_esc(&r.source_uri),
@@ -317,6 +318,7 @@ pub fn render_doctor_json(r: &DoctorReport) -> String {
         r.brittle_rank1_layers,
         r.energy_spike_layers,
         r.recommended_avg_rank,
+        render_doctor_badge_json(r),
         recs.join(", ")
     )
 }
@@ -438,7 +440,9 @@ mod tests {
         let d_rep = run_doctor("dead.safetensors", &[dead.clone()], &layers_to_tensor_map(&[dead]), None);
         assert!(g_rep.score > d_rep.score);
         assert!(render_doctor_markdown(&g_rep).contains("Grade **"));
-        assert!(render_doctor_json(&d_rep).contains("\"dead_layers\": 1"));
+        let d_json = render_doctor_json(&d_rep);
+        assert!(d_json.contains("\"dead_layers\": 1"));
+        assert!(d_json.contains("\"shields_badge\":"));
         let html = render_doctor_html(&g_rep);
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("LoRASpectra Executive Doctor Report"));
