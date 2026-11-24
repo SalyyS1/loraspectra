@@ -8,8 +8,8 @@ use loraspectra::audit::{
     render_audit_json,
 };
 use loraspectra::batch::{
-    discover_checkpoints, render_batch_json, render_batch_markdown, render_batch_table,
-    run_batch_audit,
+    discover_checkpoints, render_batch_html, render_batch_json, render_batch_markdown,
+    render_batch_table, run_batch_audit,
 };
 use loraspectra::card::generate_model_card;
 use loraspectra::compress::{
@@ -73,7 +73,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.17.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML), 11-Tool Stdio MCP Server, Sensitivity/Forgetting SARIF Auditor, Batch Leaderboard, LoRA+ Balancer & AdaLoRA Scheduler (.safetensors)
+        "loraspectra v1.23.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML), 15-Tool Stdio MCP Server, Runtime Compat Matrix, Quantization Planner, Trajectory Analyzer & Batch HTML Leaderboard (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -99,10 +99,13 @@ USAGE:
   loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]
   loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <output.sarif>] [--json]
   loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]
-  loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]
+  loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--html <board.html>] [--markdown] [--json]
   loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--sarif <output.sarif>] [--json]
   loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--json]
-  loraspectra mcp                                          # run built-in zero-dependency 11-tool JSON-RPC 2.0 stdio MCP server"
+  loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json]
+  loraspectra quant-plan <adapter_or_hf_uri> [--quant nf4|int8|fp8|bf16] [--energy 0.99] [--json]
+  loraspectra compat <adapter_or_hf_uri> [--json]
+  loraspectra mcp                                          # run built-in zero-dependency 15-tool JSON-RPC 2.0 stdio MCP server"
     );
 }
 
@@ -2762,13 +2765,14 @@ fn main() {
         }
         "batch-audit" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]");
+                eprintln!("Usage: loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--html <board.html>] [--markdown] [--json]");
                 process::exit(1);
             }
             let mut inputs: Vec<PathBuf> = Vec::new();
             let mut max_depth: usize = 6;
             let mut fail_below_score: Option<f64> = None;
             let mut max_dead_layers: Option<usize> = None;
+            let mut html_out: Option<String> = None;
             let mut use_json = false;
             let mut use_markdown = false;
             let mut i = 2;
@@ -2792,6 +2796,12 @@ fn main() {
                             max_dead_layers = args[i].parse().ok();
                         }
                     }
+                    "--html" => {
+                        i += 1;
+                        if i < args.len() {
+                            html_out = Some(args[i].clone());
+                        }
+                    }
                     "--json" => use_json = true,
                     "--markdown" => use_markdown = true,
                     other if !other.starts_with("--") => inputs.push(PathBuf::from(other)),
@@ -2805,6 +2815,13 @@ fn main() {
                 process::exit(1);
             }
             let report = run_batch_audit(&checkpoints);
+            if let Some(hp) = html_out {
+                let html = render_batch_html(&report);
+                if let Err(e) = std::fs::write(&hp, html) {
+                    eprintln!("Error writing HTML leaderboard {}: {}", hp, e);
+                    process::exit(1);
+                }
+            }
             if use_json {
                 println!("{}", render_batch_json(&report));
             } else if use_markdown {

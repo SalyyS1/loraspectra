@@ -370,6 +370,58 @@ pub fn render_batch_json(report: &BatchAuditReport) -> String {
     )
 }
 
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Render a zero-CDN, single-file dark-mode HTML checkpoint leaderboard for ML teams & CI artifacts.
+pub fn render_batch_html(report: &BatchAuditReport) -> String {
+    let mut rows = String::new();
+    for (idx, e) in report.entries.iter().enumerate() {
+        let color = if e.health_score >= 85.0 {
+            "#3fb950"
+        } else if e.health_score >= 65.0 {
+            "#d29922"
+        } else {
+            "#f85149"
+        };
+        let util_pct = (e.utilization_avg * 100.0).clamp(0.0, 100.0);
+        rows.push_str(&format!(
+            "<tr><td>#{}</td><td style=\"font-weight:700;color:{}\">{:.1}</td><td><code>{}</code></td><td>{}</td><td>{:.1}%</td><td>{}</td><td>{}</td><td>{:.2}x</td><td style=\"font-family:monospace;font-size:12px\">{}</td></tr>\n",
+            idx + 1,
+            color,
+            e.health_score,
+            html_esc(&e.status),
+            e.layers_audited,
+            util_pct,
+            e.dead_layers,
+            e.collapsed_layers,
+            e.loraplus_mean_imbalance,
+            html_esc(&e.path)
+        ));
+    }
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>loraspectra Batch Audit Leaderboard</title>\
+<style>body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,-apple-system,sans-serif}}\
+.wrap{{max-width:1100px;margin:0 auto}}h1{{margin:0 0 8px}}p.meta{{color:#8b949e;margin:0 0 20px}}\
+table{{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}}\
+th,td{{padding:10px 12px;border-bottom:1px solid #21262d;text-align:left;font-size:13.5px}}th{{background:#111827;color:#8b949e;text-transform:uppercase;font-size:11.5px}}\
+</style></head><body><div class=\"wrap\"><h1>loraspectra Spectral Batch Leaderboard</h1>\
+<p class=\"meta\">Discovered: {} | Audited: {} | Errors: {} | Mean Health Score: {:.2}/100</p>\
+<table><thead><tr><th>Rank</th><th>Score</th><th>Status</th><th>Layers</th><th>Util %</th><th>Dead</th><th>Collapsed</th><th>LoRA+ Imb</th><th>Checkpoint</th></tr></thead>\
+<tbody>{}</tbody></table></div></body></html>\n",
+        report.total_discovered,
+        report.audited_count,
+        report.error_count,
+        report.mean_health_score,
+        rows
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +474,10 @@ mod tests {
         assert!(md.contains("healthy.safetensors"));
         let js = render_batch_json(&report);
         assert!(js.contains("\"audited_count\": 2"));
+        let html = render_batch_html(&report);
+        assert!(html.contains("<!doctype html>"));
+        assert!(html.contains("healthy.safetensors"));
+        assert!(html.contains("dead.safetensors"));
 
         let _ = fs::remove_dir_all(&dir);
     }

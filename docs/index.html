@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.22.0 - Interactive .safetensors SVD, 15-Tool MCP Server, Runtime Compat CLI &amp; Quantization Planner</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, 8-tool stdio MCP server (loraspectra mcp), Executive Adapter Doctor (A-F scorecard), Spectral Sensitivity &amp; Catastrophic Forgetting SARIF auditor (LS051-LS052), LoRA/LoRA+/AdaLoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, multi-checkpoint batch-audit leaderboard, and zero-dependency Rust CLI (v1.14.0, SARIF LS001-LS052).">
-  <meta property="og:title" content="loraspectra v1.14.0 - Interactive .safetensors SVD, Executive Doctor (A-F), 8-Tool MCP Server &amp; Sensitivity SARIF">
+  <title>loraspectra v1.23.0 - Interactive .safetensors SVD, 15-Tool MCP Server, Runtime Compat Matrix, Quantization Planner &amp; Batch HTML Leaderboard</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, 15-tool stdio MCP server (loraspectra mcp), 5-runtime serving compatibility matrix (vLLM/SGLang/PEFT/llama.cpp/ComfyUI), Executive Adapter Doctor (A-F scorecard), Spectral Sensitivity &amp; Catastrophic Forgetting SARIF auditor (LS051-LS052), Quantization Planner, Training Trajectory analyzer, and Batch HTML Leaderboard (v1.23.0, SARIF LS001-LS052).">
+  <meta property="og:title" content="loraspectra v1.23.0 - Interactive .safetensors SVD, 15-Tool MCP Server &amp; 5-Runtime Compatibility Matrix">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -872,6 +872,45 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
         </div>
       </div>
       <pre class="cli-code" id="qp-cmd" style="padding:8px 10px;font-size:12px;"></pre>
+    </div>
+
+    <!-- Interactive 5-Runtime Serving Compatibility Matrix (v1.23.0) -->
+    <div class="card" id="compat-matrix-card">
+      <div class="card-header">
+        <h2 class="card-title">Interactive 5-Runtime Serving Compatibility Checker (<code>v1.23.0</code> · <code>loraspectra compat</code>)</h2>
+        <span class="privacy-tag">vLLM · SGLang · PEFT · llama.cpp · ComfyUI</span>
+      </div>
+      <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 14px;">
+        Simulate adapter deployment readiness across major inference runtimes based on naming convention, rank ceiling, DoRA magnitude vectors, and tensor dtype.
+      </p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px;">
+        <div class="kpi-card">
+          <div class="kpi-label">Key Naming Convention</div>
+          <select id="cm-format" style="width:100%;margin-top:4px;background:#0d1420;color:#e6edf3;border:1px solid #2b3a4d;border-radius:6px;padding:5px;">
+            <option value="peft">PEFT (base_model.model...lora_A/B)</option>
+            <option value="kohya">Kohya / ComfyUI (lora_unet...lora_down/up)</option>
+            <option value="diffusers">Diffusers (to_q.lora.down/up)</option>
+          </select>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Max Layer Rank: <strong id="cm-rank-val">64</strong></div>
+          <input type="range" id="cm-rank" min="4" max="256" step="4" value="64" style="width:100%;">
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Tensor DType</div>
+          <select id="cm-dtype" style="width:100%;margin-top:4px;background:#0d1420;color:#e6edf3;border:1px solid #2b3a4d;border-radius:6px;padding:5px;">
+            <option value="bf16">BF16</option>
+            <option value="f16">FP16</option>
+            <option value="f32">FP32</option>
+          </select>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Adapter Variant</div>
+          <label style="display:block;margin-top:6px;font-size:13px;cursor:pointer;"><input type="checkbox" id="cm-dora"> Contains DoRA magnitude vectors</label>
+        </div>
+      </div>
+      <div id="cm-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:12px;"></div>
+      <pre class="cli-code" id="cm-cmd" style="padding:8px 10px;font-size:12px;"></pre>
     </div>
 
     <!-- Interactive Knots Joint-SVD, Isotropic Flattening & TSV Lab (v1.8.0) -->
@@ -3346,6 +3385,57 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       if (el) { el.addEventListener("input", updateQuantPlanSim); el.addEventListener("change", updateQuantPlanSim); }
     });
     updateQuantPlanSim();
+
+    function updateCompatMatrix() {
+      const fmtEl = document.getElementById("cm-format");
+      const grid = document.getElementById("cm-grid");
+      if (!fmtEl || !grid) return;
+      const fmt = fmtEl.value;
+      const rank = parseInt(document.getElementById("cm-rank").value, 10) || 64;
+      const dtype = document.getElementById("cm-dtype").value;
+      const dora = document.getElementById("cm-dora").checked;
+      document.getElementById("cm-rank-val").textContent = String(rank);
+      const runtimes = [
+        {
+          name: "vLLM",
+          status: fmt !== "peft" ? "INCOMPATIBLE" : dora ? "INCOMPATIBLE" : rank > 64 ? "WARN" : "READY",
+          note: fmt !== "peft" ? "Requires PEFT key format" : dora ? "DoRA not supported in vLLM LoRA kernel" : rank > 64 ? "Pass --max-lora-rank " + rank : "Native multi-LoRA serving ready"
+        },
+        {
+          name: "SGLang",
+          status: fmt !== "peft" ? "INCOMPATIBLE" : dora ? "INCOMPATIBLE" : "READY",
+          note: fmt !== "peft" ? "Requires PEFT key format" : dora ? "DoRA unsupported in SGLang LoRA" : "RadixAttention LoRA ready"
+        },
+        {
+          name: "HuggingFace PEFT",
+          status: fmt === "peft" ? "READY" : "WARN",
+          note: fmt === "peft" ? "Native load_adapter() compatible" : "Convert keys via --format peft first"
+        },
+        {
+          name: "llama.cpp",
+          status: fmt !== "peft" ? "WARN" : dora ? "INCOMPATIBLE" : "READY",
+          note: dora ? "convert_lora_to_gguf.py lacks DoRA" : fmt !== "peft" ? "Convert to PEFT before GGUF export" : "Ready for GGUF LoRA conversion (" + dtype.toUpperCase() + ")"
+        },
+        {
+          name: "ComfyUI / Diffusers",
+          status: fmt === "kohya" || fmt === "diffusers" ? "READY" : "WARN",
+          note: fmt === "kohya" || fmt === "diffusers" ? "Native diffusion LoRA loader ready" : "Export with --format kohya for ComfyUI"
+        }
+      ];
+      grid.innerHTML = runtimes.map((rt) => {
+        const col = rt.status === "READY" ? "#3fb950" : rt.status === "WARN" ? "#d29922" : "#f85149";
+        return `<div class="kpi-card"><div class="kpi-label">${rt.name}</div><div class="kpi-value" style="font-size:18px;color:${col}">${rt.status}</div><div class="kpi-sub">${rt.note}</div></div>`;
+      }).join("");
+      const cmd = fmt === "peft"
+        ? "loraspectra compat ./adapter_model.safetensors --json\nloraspectra batch-audit ./checkpoints --html leaderboard.html"
+        : "loraspectra compress ./adapter_model.safetensors ./peft_ready.safetensors --format peft --energy 0.99\nloraspectra compat ./peft_ready.safetensors --json";
+      document.getElementById("cm-cmd").textContent = cmd;
+    }
+    ["cm-format", "cm-rank", "cm-dtype", "cm-dora"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) { el.addEventListener("input", updateCompatMatrix); el.addEventListener("change", updateCompatMatrix); }
+    });
+    updateCompatMatrix();
   })();
   </script>
 </body>
