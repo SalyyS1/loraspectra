@@ -2939,12 +2939,6 @@ fn main() {
                             sarif_out = Some(args[i].clone());
                         }
                     }
-                    "--sarif" => {
-                        i += 1;
-                        if i < args.len() {
-                            sarif_out = Some(args[i].clone());
-                        }
-                    }
                     "--fail-below-grade" => {
                         i += 1;
                         if i < args.len() {
@@ -3154,6 +3148,30 @@ fn main() {
                     summary.mean_nominal_rank, summary.mean_effective_rank, summary.mean_rank_at_99_energy, summary.mean_rank_mp);
                 println!("  Error Bounds       : max MP rel. spectral={:.6} | mean 99% rel. nuclear={:.6}",
                     summary.max_mp_relative_spectral_error, summary.mean_99_relative_nuclear_error);
+            }
+        }
+        "rules" => {
+            let use_json = args[2..].iter().any(|a| a == "--json");
+            let rules = loraspectra::sarif::LORASPECTRA_SARIF_RULES;
+            if use_json {
+                let items: Vec<String> = rules
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            r#"{{"id":"{}","name":"{}","level":"{}","shortDescription":"{}"}}"#,
+                            json_escape(r.id),
+                            json_escape(r.name),
+                            json_escape(r.default_level),
+                            json_escape(r.short_description)
+                        )
+                    })
+                    .collect();
+                println!(r#"{{"rule_count":{},"rules":[{}]}}"#, rules.len(), items.join(","));
+            } else {
+                println!("LoRASpectra OASIS SARIF v2.1.0 Rules ({} total)", rules.len());
+                for r in rules {
+                    println!("  {}  [{:<7}]  {} - {}", r.id, r.default_level, r.name, r.short_description);
+                }
             }
         }
         "mcp" => {
