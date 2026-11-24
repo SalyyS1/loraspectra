@@ -1078,3 +1078,63 @@ pub fn render_merge_check_json(summary: &MultiMergeCheckSummary) -> String {
     out.push_str("}");
     out
 }
+
+fn html_esc_mc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML Multi-Adapter Pre-Merge Conflict Report (`merge-check --html`).
+pub fn render_merge_check_html(summary: &MultiMergeCheckSummary) -> String {
+    let mut rows = String::new();
+    for l in &summary.shared_layers {
+        let col = match l.status {
+            "destructive" | "conflict" => "#f85149",
+            "inflation" | "collision" => "#d29922",
+            _ => "#3fb950",
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td style=\"color:{}\"><b>{}</b></td><td>{:.4}</td><td>{:.4}</td><td>{:.4}</td><td>{}</td></tr>\n",
+            html_esc_mc(&l.base_name),
+            col,
+            html_esc_mc(l.status),
+            l.subspace_collision_ratio,
+            l.peak_inflation_ratio,
+            l.min_pair_frobenius_cosine,
+            l.union_rank_99
+        ));
+    }
+    let risk_col = match summary.advisor.risk_level {
+        "HIGH" | "CRITICAL" => "#f85149",
+        "MODERATE" | "MEDIUM" => "#d29922",
+        _ => "#3fb950",
+    };
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>loraspectra Multi-Adapter Merge-Check Report</title>
+<style>
+body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,sans-serif}}
+.wrap{{max-width:1080px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;font-size:12.5px}}th,td{{padding:8px 9px;border-bottom:1px solid #21262d;text-align:left}}
+th{{color:#8b949e}}code{{font-family:ui-monospace,monospace;color:#58a6ff}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>loraspectra Multi-Adapter Pre-Merge Conflict Report</h1>
+<p>Adapters: <b>{}</b> &middot; Risk: <b style="color:{}">{}</b> &middot; Recommended Mode: <code>{}</code> (r={}) &middot; Destructive: <b>{}</b> &middot; Inflation: <b>{}</b> &middot; Safe: <b>{}</b></p>
+<p><b>Advisor:</b> {} &middot; <code>{}</code></p></div>
+<div class="card"><table><thead><tr><th>Layer</th><th>Status</th><th>Subspace Collision</th><th>Peak Inflation</th><th>Min Cos</th><th>Union r99</th></tr></thead>
+<tbody>{}</tbody></table></div></div></body></html>"##,
+        summary.adapter_names.len(),
+        risk_col,
+        html_esc_mc(summary.advisor.risk_level),
+        html_esc_mc(summary.advisor.recommended_mode),
+        summary.advisor.recommended_rank,
+        summary.destructive_layer_count,
+        summary.inflation_layer_count,
+        summary.safe_layer_count,
+        html_esc_mc(&summary.advisor.rationale),
+        html_esc_mc(&summary.advisor.cli_command),
+        rows
+    )
+}

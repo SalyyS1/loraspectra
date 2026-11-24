@@ -1364,6 +1364,7 @@ fn main() {
             let mut positional: Vec<String> = Vec::new();
             let mut custom_weights: Option<Vec<f64>> = None;
             let mut json_mode = false;
+            let mut html_out: Option<String> = None;
             let mut sarif_opt: Option<String> = None;
             let mut fail_on_conflict = false;
 
@@ -1381,6 +1382,10 @@ fn main() {
                     "--json" => {
                         json_mode = true;
                         i += 1;
+                    }
+                    "--html" if i + 1 < args.len() => {
+                        html_out = Some(args[i + 1].clone());
+                        i += 2;
                     }
                     "--sarif" if i + 1 < args.len() => {
                         sarif_opt = Some(args[i + 1].clone());
@@ -1445,6 +1450,14 @@ fn main() {
                     eprintln!("Error writing SARIF report to {}: {}", s_path, e);
                     process::exit(1);
                 }
+            }
+            if let Some(ref h_path) = html_out {
+                let html_str = loraspectra::merge_check::render_merge_check_html(&summary);
+                if let Err(e) = std::fs::write(h_path, &html_str) {
+                    eprintln!("Error writing merge-check HTML report to {}: {}", h_path, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote multi-adapter merge-check HTML report to {}", h_path);
             }
 
             if json_mode {

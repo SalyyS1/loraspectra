@@ -342,6 +342,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_rank_schedule_html","description":"Compute AdaLoRA water-filling heterogeneous rank allocation (LS049-LS050) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_avg_rank":{"type":"number"},"min_rank":{"type":"integer"},"max_rank":{"type":"integer"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_quant_plan_html","description":"Generate a quantization-aware mixed-precision LoRA rank compression plan (nf4/fp4/int8/fp8/bf16/fp16) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_diff_html","description":"Compute Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
+{"name":"loraspectra_merge_check_html","description":"Run multi-adapter pre-merge subspace collision & norm-inflation analysis across >= 2 .safetensors LoRAs and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -797,6 +798,40 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 })
             })
         }
+        "loraspectra_merge_check_html" => {
+            let raw_sources = args
+                .get("sources")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'sources' array (>= 2 adapter paths/URIs)".to_string());
+            raw_sources.and_then(|arr| {
+                let mut inputs = Vec::new();
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        let p = resolve_source_path(s)?;
+                        let t = read_safetensors(&p)?;
+                        let layers = extract_lora_layers(&t)?;
+                        let alphas = extract_lora_alphas(&t);
+                        inputs.push(AdapterMergeInput {
+                            name: s.to_string(),
+                            layers,
+                            alphas,
+                            peft_config: None,
+                            weight: 1.0,
+                        });
+                    }
+                }
+                let summary = analyze_multi_adapter_merge(&inputs)?;
+                let html = crate::merge_check::render_merge_check_html(&summary);
+                Ok(format!(
+                    r#"{{"adapter_count":{},"risk_level":"{}","recommended_mode":"{}","html_bytes":{},"html":"{}"}}"#,
+                    summary.adapter_names.len(),
+                    json_escape(summary.advisor.risk_level),
+                    json_escape(summary.advisor.recommended_mode),
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -888,6 +923,7 @@ mod tests {
         assert!(tools.contains("loraspectra_rank_schedule_html"));
         assert!(tools.contains("loraspectra_quant_plan_html"));
         assert!(tools.contains("loraspectra_diff_html"));
+        assert!(tools.contains("loraspectra_merge_check_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
