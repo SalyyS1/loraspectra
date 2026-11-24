@@ -209,6 +209,58 @@ pub fn render_quant_plan_json(rep: &QuantPlanReport) -> String {
     )
 }
 
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Renders a self-contained dark-mode HTML quantization trade-off plan report.
+pub fn render_quant_plan_html(rep: &QuantPlanReport) -> String {
+    let mut rows = String::new();
+    for l in &rep.layers {
+        let risk_col = match l.quant_risk.as_str() {
+            "high" => "#f85149",
+            "medium" => "#d29922",
+            _ => "#3fb950",
+        };
+        rows.push_str(&format!(
+            "<tr><td>{}</td><td>{} &rarr; {}</td><td><b>{}</b></td><td style=\"color:{}\"><b>{}</b></td><td>{:.1}%</td></tr>\n",
+            html_esc(&l.base_name),
+            l.nominal_rank,
+            l.recommended_rank,
+            html_esc(&l.recommended_dtype),
+            risk_col,
+            html_esc(&l.quant_risk),
+            l.savings_pct
+        ));
+    }
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>LoRASpectra Quantization Plan</title>
+<style>
+body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,sans-serif}}
+.wrap{{max-width:980px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;font-family:ui-monospace,monospace;font-size:12.5px}}
+th,td{{padding:7px 10px;border-bottom:1px solid #21262d;text-align:left}}th{{color:#8b949e}}
+pre{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;overflow:auto;color:#58a6ff}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>LoRASpectra Mixed-Precision Quantization Plan</h1>
+<p>Source: <b>{}</b> &middot; Target: <b>{}</b> &middot; Energy: <b>{:.1}%</b> &middot; Projected Savings: <b>{:.1}%</b> &middot; High-Risk Protected Layers: <b>{}</b></p>
+<pre>{}</pre></div>
+<div class="card"><table><thead><tr><th>Layer</th><th>Rank</th><th>DType</th><th>Risk</th><th>Savings</th></tr></thead>
+<tbody>{}</tbody></table></div></div></body></html>"##,
+        html_esc(&rep.source),
+        html_esc(&rep.target_quant),
+        rep.target_energy * 100.0,
+        rep.total_savings_pct,
+        rep.high_risk_layers,
+        html_esc(&rep.recommended_cli_command),
+        rows
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +297,8 @@ mod tests {
         assert_eq!(rep.high_risk_layers, 1);
         assert_eq!(rep.layers[1].recommended_dtype, "bf16");
         assert!(render_quant_plan_json(&rep).contains("\"target_quant\":\"nf4\""));
+        let html = render_quant_plan_html(&rep);
+        assert!(html.contains("<!doctype html>"));
+        assert!(html.contains("bf16"));
     }
 }

@@ -3030,10 +3030,17 @@ fn main() {
             let mut quant = "nf4".to_string();
             let mut energy = 0.99_f64;
             let mut use_json = false;
+            let mut html_out: Option<String> = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
                     "--json" => use_json = true,
+                    "--html" => {
+                        i += 1;
+                        if i < args.len() {
+                            html_out = Some(args[i].clone());
+                        }
+                    }
                     "--quant" => {
                         i += 1;
                         if i < args.len() {
@@ -3054,6 +3061,13 @@ fn main() {
             }
             let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
             let rep = loraspectra::quant_plan::build_quant_plan(input_uri, &layers, &quant, energy);
+            if let Some(ref hpath) = html_out {
+                let html = loraspectra::quant_plan::render_quant_plan_html(&rep);
+                if let Err(e) = std::fs::write(hpath, html) {
+                    eprintln!("Failed to write quant-plan HTML to {}: {}", hpath, e);
+                    process::exit(1);
+                }
+            }
             if use_json {
                 println!("{}", loraspectra::quant_plan::render_quant_plan_json(&rep));
             } else {
