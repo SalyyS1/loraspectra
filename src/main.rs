@@ -76,7 +76,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.25.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML + SARIF + CI Gate), 15-Tool Stdio MCP Server, Runtime Compat Matrix, Quantization Planner, Trajectory Analyzer & Batch HTML Leaderboard (.safetensors)
+        "loraspectra v1.26.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML + SARIF + CI Gate), 15-Tool Stdio MCP Server, Compress Preview, Runtime Compat Matrix, Quantization Planner, Trajectory Analyzer & Batch HTML Leaderboard (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -108,6 +108,7 @@ USAGE:
   loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json]
   loraspectra quant-plan <adapter_or_hf_uri> [--quant nf4|int8|fp8|bf16] [--energy 0.99] [--json]
   loraspectra compat <adapter_or_hf_uri> [--json]
+  loraspectra compress-preview <adapter_or_hf_uri> [--json]
   loraspectra mcp                                          # run built-in zero-dependency 15-tool JSON-RPC 2.0 stdio MCP server"
     );
 }
@@ -3050,6 +3051,48 @@ fn main() {
                     eprintln!("Compatibility check error: {}", e);
                     process::exit(1);
                 }
+            }
+        }
+        "compress-preview" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra compress-preview <adapter_or_hf_uri> [--json]");
+                process::exit(1);
+            }
+            let input_uri = &args[2];
+            let use_json = args[3..].iter().any(|a| a == "--json");
+            let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
+            let summary = audit_adapter(&layers);
+            let saved_bytes = summary.total_nominal_bytes.saturating_sub(summary.total_optimal_99_bytes);
+            let saved_pct = if summary.total_nominal_bytes > 0 {
+                (saved_bytes as f64 / summary.total_nominal_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            if use_json {
+                println!(
+                    r#"{{"source":"{}","dry_run":true,"layer_count":{},"total_nominal_bytes":{},"total_optimal_99_bytes":{},"saved_bytes_at_99":{},"saved_pct_at_99":{:.2},"mean_nominal_rank":{:.2},"mean_effective_rank":{:.2},"mean_rank_at_99_energy":{:.2},"mean_rank_mp":{:.2},"max_mp_relative_spectral_error":{:.6},"mean_99_relative_nuclear_error":{:.6}}}"#,
+                    json_escape(input_uri),
+                    summary.layers.len(),
+                    summary.total_nominal_bytes,
+                    summary.total_optimal_99_bytes,
+                    saved_bytes,
+                    saved_pct,
+                    summary.mean_nominal_rank,
+                    summary.mean_effective_rank,
+                    summary.mean_rank_at_99_energy,
+                    summary.mean_rank_mp,
+                    summary.max_mp_relative_spectral_error,
+                    summary.mean_99_relative_nuclear_error
+                );
+            } else {
+                println!("LoRASpectra SVD Compression Dry-Run Preview ({})", input_uri);
+                println!("  Layers Audited     : {}", summary.layers.len());
+                println!("  Nominal Bytes      : {} B -> Optimal 99% Energy: {} B (saves {} B / {:.1}%)",
+                    summary.total_nominal_bytes, summary.total_optimal_99_bytes, saved_bytes, saved_pct);
+                println!("  Mean Rank Profile  : nominal={:.1} | effective={:.1} | 99%={:.1} | MP-optimal={:.1}",
+                    summary.mean_nominal_rank, summary.mean_effective_rank, summary.mean_rank_at_99_energy, summary.mean_rank_mp);
+                println!("  Error Bounds       : max MP rel. spectral={:.6} | mean 99% rel. nuclear={:.6}",
+                    summary.max_mp_relative_spectral_error, summary.mean_99_relative_nuclear_error);
             }
         }
         "mcp" => {
