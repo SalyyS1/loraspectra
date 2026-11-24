@@ -2986,20 +2986,35 @@ fn main() {
         }
         "trajectory" => {
             let mut use_json = false;
+            let mut html_out: Option<String> = None;
             let mut sources: Vec<String> = Vec::new();
-            for arg in &args[2..] {
-                if arg == "--json" {
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "--json" {
                     use_json = true;
-                } else if !arg.starts_with('-') {
-                    sources.push(arg.clone());
+                } else if args[i] == "--html" {
+                    i += 1;
+                    if i < args.len() {
+                        html_out = Some(args[i].clone());
+                    }
+                } else if !args[i].starts_with('-') {
+                    sources.push(args[i].clone());
                 }
+                i += 1;
             }
             if sources.len() < 2 {
-                eprintln!("Usage: loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json]");
+                eprintln!("Usage: loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json] [--html <traj.html>]");
                 process::exit(1);
             }
             match loraspectra::trajectory::analyze_trajectory(&sources) {
                 Ok(rep) => {
+                    if let Some(ref path) = html_out {
+                        let html = loraspectra::trajectory::render_trajectory_html(&rep);
+                        if let Err(e) = std::fs::write(path, html) {
+                            eprintln!("Failed to write trajectory HTML report to {}: {}", path, e);
+                            process::exit(1);
+                        }
+                    }
                     if use_json {
                         println!("{}", loraspectra::trajectory::render_trajectory_json(&rep));
                     } else {
@@ -3053,11 +3068,24 @@ fn main() {
         }
         "compat" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra compat <adapter_or_hf_uri> [--json]");
+                eprintln!("Usage: loraspectra compat <adapter_or_hf_uri> [--json] [--fail-incompatible <vllm|sglang|peft|llama.cpp|comfyui>]");
                 process::exit(1);
             }
             let input_uri = &args[2];
-            let use_json = args[3..].iter().any(|a| a == "--json");
+            let mut use_json = false;
+            let mut required_runtime: Option<String> = None;
+            let mut i = 3;
+            while i < args.len() {
+                if args[i] == "--json" {
+                    use_json = true;
+                } else if args[i] == "--fail-incompatible" {
+                    i += 1;
+                    if i < args.len() {
+                        required_runtime = Some(args[i].clone());
+                    }
+                }
+                i += 1;
+            }
             let (tensors, _, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
             match loraspectra::compat::check_serving_compatibility(input_uri, &tensors) {
                 Ok(rep) => {
@@ -3065,6 +3093,19 @@ fn main() {
                         println!("{}", loraspectra::compat::render_compat_json(&rep));
                     } else {
                         print!("{}", loraspectra::compat::render_compat_table(&rep));
+                    }
+                    if let Some(ref rt) = required_runtime {
+                        match loraspectra::compat::is_runtime_ready(&rep, rt) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                eprintln!("CI gate failed: adapter '{}' is not ready for runtime '{}'.", input_uri, rt);
+                                process::exit(2);
+                            }
+                            Err(msg) => {
+                                eprintln!("{}", msg);
+                                process::exit(1);
+                            }
+                        }
                     }
                 }
                 Err(e) => {

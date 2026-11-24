@@ -313,6 +313,88 @@ pub fn render_trajectory_table(rep: &TrajectoryReport) -> String {
     out
 }
 
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Renders a self-contained dark-mode HTML report with an inline SVG Effective Rank &
+/// Frobenius Velocity convergence chart for sharing in PRs, W&B notes, or model cards.
+pub fn render_trajectory_html(rep: &TrajectoryReport) -> String {
+    let n = rep.points.len().max(1);
+    let max_rank = rep
+        .points
+        .iter()
+        .map(|p| p.mean_effective_rank)
+        .fold(1.0_f64, f64::max);
+    let mut rank_pts = Vec::with_capacity(n);
+    let mut health_pts = Vec::with_capacity(n);
+    for (i, p) in rep.points.iter().enumerate() {
+        let x = if n == 1 {
+            320.0
+        } else {
+            48.0 + (i as f64 / (n - 1) as f64) * 560.0
+        };
+        let y_rank = 178.0 - (p.mean_effective_rank / max_rank).clamp(0.0, 1.0) * 140.0;
+        let y_health = 178.0 - (p.health_score / 100.0).clamp(0.0, 1.0) * 140.0;
+        rank_pts.push(format!("{:.1},{:.1}", x, y_rank));
+        health_pts.push(format!("{:.1},{:.1}", x, y_health));
+    }
+    let mut rows = String::new();
+    for p in &rep.points {
+        let best_badge = if p.index == rep.best_checkpoint_index {
+            " <span style=\"color:#3fb950;font-weight:700\">[BEST]</span>"
+        } else {
+            ""
+        };
+        rows.push_str(&format!(
+            "<tr><td>#{}</td><td>{}{}</td><td>{:.2}</td><td>{:.1}%</td><td>{:.4}</td><td>{}</td><td>{:.1}</td></tr>\n",
+            p.index,
+            html_esc(&p.source),
+            best_badge,
+            p.mean_effective_rank,
+            p.mean_utilization * 100.0,
+            p.total_frobenius_norm,
+            p.collapsed_layers,
+            p.health_score
+        ));
+    }
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>LoRASpectra Trajectory Report</title>
+<style>
+body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,-apple-system,sans-serif}}
+.wrap{{max-width:960px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:18px}}
+h1{{margin:0 0 8px;font-size:22px}}.muted{{color:#8b949e;font-size:13px}}
+table{{width:100%;border-collapse:collapse;font-size:13px;font-family:ui-monospace,monospace}}
+th,td{{padding:8px 10px;border-bottom:1px solid #21262d;text-align:left}}th{{color:#8b949e}}
+.pill{{display:inline-block;padding:3px 10px;border-radius:999px;background:#1f2937;border:1px solid #30363d;font-size:12px;color:#58a6ff}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>LoRASpectra Training Trajectory Report</h1>
+<p><span class="pill">Phase: {}</span> <span class="pill">Early-Stop: {}</span> <span class="pill">Best: #{}</span></p>
+<p class="muted">{}</p>
+<svg viewBox="0 0 640 205" style="width:100%;max-width:640px;background:#0d1117;border:1px solid #21262d;border-radius:8px;margin-top:8px">
+<line x1="48" y1="38" x2="608" y2="38" stroke="#21262d"/><line x1="48" y1="108" x2="608" y2="108" stroke="#21262d"/><line x1="48" y1="178" x2="608" y2="178" stroke="#30363d"/>
+<polyline fill="none" stroke="#58a6ff" stroke-width="3" points="{}"/>
+<polyline fill="none" stroke="#3fb950" stroke-width="2" stroke-dasharray="5,4" points="{}"/>
+<text x="52" y="22" fill="#58a6ff" font-size="11" font-family="monospace">Effective Rank (peak {:.2})</text>
+<text x="270" y="22" fill="#3fb950" font-size="11" font-family="monospace">Health Score (0-100)</text>
+</svg></div>
+<div class="card"><table><thead><tr><th>Idx</th><th>Checkpoint</th><th>EffRank</th><th>Util%</th><th>||dW||_F</th><th>Collapsed</th><th>Health</th></tr></thead>
+<tbody>{}</tbody></table></div></div></body></html>"##,
+        html_esc(&rep.phase),
+        rep.early_stop_recommended,
+        rep.best_checkpoint_index,
+        html_esc(&rep.recommendation),
+        rank_pts.join(" "),
+        health_pts.join(" "),
+        rep.peak_effective_rank,
+        rows
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +444,10 @@ mod tests {
         assert_eq!(rep.phase, "converged-plateau");
         assert!(rep.early_stop_recommended);
         assert!(render_trajectory_json(&rep).contains("\"converged-plateau\""));
+        let html = render_trajectory_html(&rep);
+        assert!(html.contains("<!doctype html>"));
+        assert!(html.contains("<svg"));
+        assert!(html.contains("converged-plateau"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

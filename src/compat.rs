@@ -277,6 +277,29 @@ pub fn render_compat_json(rep: &CompatibilityReport) -> String {
     )
 }
 
+/// Checks whether a CompatibilityReport marks the requested serving runtime as `"ready"`.
+/// Accepts aliases such as `vllm`, `sglang`, `peft`, `llama.cpp`, `ollama`, `comfyui`, `diffusers`.
+pub fn is_runtime_ready(rep: &CompatibilityReport, target: &str) -> Result<bool, String> {
+    let needle = target.trim().to_ascii_lowercase();
+    let matched = rep.runtimes.iter().find(|r| {
+        let rt = r.runtime.to_ascii_lowercase();
+        rt == needle
+            || (needle == "vllm" && rt.contains("vllm"))
+            || (needle == "sglang" && rt.contains("sglang"))
+            || ((needle == "peft" || needle == "hf") && rt.contains("peft"))
+            || ((needle == "llama.cpp" || needle == "llamacpp" || needle == "ollama" || needle == "gguf")
+                && rt.contains("llama.cpp"))
+            || ((needle == "comfyui" || needle == "comfy" || needle == "diffusers") && rt.contains("comfyui"))
+    });
+    match matched {
+        Some(entry) => Ok(entry.status == "ready"),
+        None => Err(format!(
+            "Unknown runtime '{}'. Expected one of: vllm, sglang, peft, llama.cpp, comfyui.",
+            target
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +321,8 @@ mod tests {
         assert!(rep.ready_count >= 3);
         assert!(rep.runtimes.iter().any(|r| r.runtime == "vLLM" && r.status == "ready"));
         assert!(render_compat_json(&rep).contains("\"vLLM\""));
+        assert_eq!(is_runtime_ready(&rep, "vllm").unwrap(), true);
+        assert_eq!(is_runtime_ready(&rep, "comfyui").unwrap(), false);
+        assert!(is_runtime_ready(&rep, "unknown_engine").is_err());
     }
 }
