@@ -334,6 +334,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_check_compatibility","description":"Evaluate a .safetensors LoRA adapter's serve-readiness across vLLM, SGLang, HuggingFace PEFT, llama.cpp/Ollama, and ComfyUI/Diffusers with exact conversion commands.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_svd_compress_preview","description":"Run a read-only Eckart-Young SVD compression dry-run comparing nominal vs 90%, 95%, 99% energy, and Marchenko-Pastur optimal ranks with exact Frobenius/spectral error bounds and byte savings.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_batch_sarif","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and emit an OASIS SARIF v2.1.0 Code Scanning report flagging low-health adapters below min_score.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"},"min_score":{"type":"number"}},"required":["paths"],"additionalProperties":false}},
+{"name":"loraspectra_sensitivity_sarif","description":"Audit layer-wise catastrophic forgetting sensitivity and export OASIS SARIF v2.1.0 findings (LS051 brittle rank-1 dominance, LS052 energy spikes) for GitHub Code Scanning.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -646,6 +647,18 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 Ok(crate::batch::render_batch_sarif(&report, min_score))
             })
         }
+        "loraspectra_sensitivity_sarif" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let dom = args.get("dominance_warn_pct").and_then(|v| v.as_f64()).unwrap_or(85.0);
+                let spike = args.get("spike_multiplier").and_then(|v| v.as_f64()).unwrap_or(2.5);
+                let rep = analyze_sensitivity(&layers, s, dom, spike);
+                Ok(crate::sarif::build_sensitivity_sarif(&rep, env!("CARGO_PKG_VERSION")))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -729,6 +742,7 @@ mod tests {
         assert!(tools.contains("loraspectra_check_compatibility"));
         assert!(tools.contains("loraspectra_svd_compress_preview"));
         assert!(tools.contains("loraspectra_batch_sarif"));
+        assert!(tools.contains("loraspectra_sensitivity_sarif"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
