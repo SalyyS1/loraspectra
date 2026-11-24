@@ -339,6 +339,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_compat_html","description":"Evaluate 5-runtime LoRA serving compatibility (vLLM, SGLang, PEFT, llama.cpp, ComfyUI) and render a self-contained dark-mode HTML Scorecard.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_sensitivity_html","description":"Audit layer-wise catastrophic forgetting sensitivity (LS051-LS052) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_loraplus_html","description":"Audit LoRA+ B/A factor imbalance (LS047-LS048) and render a self-contained dark-mode HTML Balance & Lambda* Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"imbalance_warn":{"type":"number"},"cond_warn":{"type":"number"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_rank_schedule_html","description":"Compute AdaLoRA water-filling heterogeneous rank allocation (LS049-LS050) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_avg_rank":{"type":"number"},"min_rank":{"type":"integer"},"max_rank":{"type":"integer"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -726,6 +727,27 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_rank_schedule_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let target = args.get("target_avg_rank").and_then(|v| v.as_f64()).unwrap_or(16.0);
+                let min_r = args.get("min_rank").and_then(|v| v.as_f64()).unwrap_or(4.0).max(1.0) as usize;
+                let max_r = args.get("max_rank").and_then(|v| v.as_f64()).unwrap_or(64.0).max(min_r as f64) as usize;
+                let summary = optimize_rank_schedule(&layers, s, target, min_r, max_r);
+                let html = crate::adalora::render_rank_schedule_html(&summary);
+                Ok(format!(
+                    r#"{{"source":"{}","bottleneck_count":{},"over_allocated_count":{},"html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    summary.bottleneck_count,
+                    summary.over_allocated_count,
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -814,6 +836,7 @@ mod tests {
         assert!(tools.contains("loraspectra_compat_html"));
         assert!(tools.contains("loraspectra_sensitivity_html"));
         assert!(tools.contains("loraspectra_loraplus_html"));
+        assert!(tools.contains("loraspectra_rank_schedule_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
