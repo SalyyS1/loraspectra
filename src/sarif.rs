@@ -1,6 +1,8 @@
+use crate::adalora::RankScheduleSummary;
 use crate::audit::{AdapterAuditSummary, AdapterIntegrityReport, IssueSeverity, LayerHealth};
 use crate::knots::KnotsSummary;
 use crate::lora_ga::LoraGaSummary;
+use crate::loraplus::LoraPlusSummary;
 use crate::merge_check::MultiMergeCheckSummary;
 use crate::ortho_proj::OrthoProjectSummary;
 use crate::ties_dare::TiesDareComposeSummary;
@@ -335,6 +337,34 @@ pub const LORASPECTRA_SARIF_RULES: &[SarifRuleDefinition] = &[
         short_description: "Merged singular spectrum exhibits severe rank-1 anisotropy spike (stable rank < 1.35)",
         full_description: "The combined task delta on a nominal rank >= 4 layer concentrates nearly all energy into its top singular value (stable rank < 1.35); consider --mode iso spectral flattening.",
         default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS047",
+        name: "LoraFactorScaleImbalance",
+        short_description: "LoRA factor variational scale imbalance I = 0.5*(||B||_F^2+||A||_F^2)/||ΔW||_* is elevated",
+        full_description: "Factor matrices B and A deviate from the nuclear-norm optimal gauge balance sigma_i(B)=sigma_i(A)=sqrt(sigma_i(ΔW)), indicating sub-optimal LoRA+ learning-rate asymmetry or wasted quantization range.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS048",
+        name: "LoraFactorIllConditioning",
+        short_description: "LoRA factor B or A has extreme spectral condition number kappa",
+        full_description: "High factor condition number kappa(B) or kappa(A) amplifies NF4/FP8 quantization noise; run `loraspectra loraplus --rebalance` for zero-drift SVD gauge equilibration.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS049",
+        name: "LoraLayerCapacityBottleneck",
+        short_description: "LoRA layer is capacity-starved with high bottom-quartile tail energy",
+        full_description: "99% spectral energy requires >=90% of nominal rank with significant tail energy; reallocate rank from over-allocated layers using `loraspectra rank-schedule`.",
+        default_level: "warning",
+    },
+    SarifRuleDefinition {
+        id: "LS050",
+        name: "LoraLayerBudgetWaste",
+        short_description: "LoRA layer is heavily over-allocated relative to active spectral rank",
+        full_description: "Layer uses <=45% of its nominal rank at 99% energy; redistribute parameter budget to bottleneck modules.",
+        default_level: "note",
     },
 ];
 
@@ -961,6 +991,7 @@ pub fn build_lora_ga_sarif(summary: &LoraGaSummary, tool_version: &str) -> Strin
     render_sarif_envelope(tool_version, &results_json)
 }
 
+
 pub fn build_ortho_proj_sarif(summary: &OrthoProjectSummary, tool_version: &str) -> String {
     let mut results_json = Vec::new();
 
@@ -1038,6 +1069,7 @@ pub fn build_ortho_proj_sarif(summary: &OrthoProjectSummary, tool_version: &str)
 
     render_sarif_envelope(tool_version, &results_json)
 }
+
 
 pub fn build_knots_sarif(summary: &KnotsSummary, tool_version: &str) -> String {
     let mut results_json = Vec::new();
@@ -1118,5 +1150,75 @@ pub fn build_knots_sarif(summary: &KnotsSummary, tool_version: &str) -> String {
         ));
     }
 
+    render_sarif_envelope(tool_version, &results_json)
+}
+
+pub fn build_loraplus_sarif(summary: &LoraPlusSummary, tool_version: &str) -> String {
+    let results_json: Vec<String> = summary
+        .diagnostics
+        .iter()
+        .map(|d| {
+            format!(
+                r#"{{
+        "ruleId": "{}",
+        "level": "{}",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }},
+            "logicalLocations": [{{ "name": "{}", "kind": "module" }}]
+          }}
+        ],
+        "properties": {{
+          "imbalanceIndex": {:.6},
+          "normRatioBOverA": {:.6},
+          "condMax": {:.4}
+        }}
+      }}"#,
+                d.rule_id,
+                d.severity.as_str(),
+                escape_json(&d.message),
+                escape_json(&summary.source_uri),
+                escape_json(&d.layer_name),
+                d.imbalance_index,
+                d.norm_ratio_b_over_a,
+                d.cond_max
+            )
+        })
+        .collect();
+    render_sarif_envelope(tool_version, &results_json)
+}
+
+pub fn build_rank_schedule_sarif(summary: &RankScheduleSummary, tool_version: &str) -> String {
+    let results_json: Vec<String> = summary
+        .diagnostics
+        .iter()
+        .map(|d| {
+            format!(
+                r#"{{
+        "ruleId": "{}",
+        "level": "{}",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }},
+            "logicalLocations": [{{ "name": "{}", "kind": "module" }}]
+          }}
+        ],
+        "properties": {{
+          "currentRank": {},
+          "recommendedRank": {}
+        }}
+      }}"#,
+                d.rule_id,
+                d.level,
+                escape_json(&d.message),
+                escape_json(&summary.source_uri),
+                escape_json(&d.layer_name),
+                d.current_rank,
+                d.recommended_rank
+            )
+        })
+        .collect();
     render_sarif_envelope(tool_version, &results_json)
 }

@@ -20,7 +20,13 @@ use loraspectra::merge_check::{
     analyze_multi_adapter_merge, render_merge_check_json, render_merge_check_table,
     AdapterMergeInput,
 };
+use loraspectra::adalora::{
+    optimize_rank_schedule, render_rank_schedule_json, render_rank_schedule_table,
+};
 use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
+use loraspectra::loraplus::{
+    analyze_loraplus, rebalance_adapter_factors, render_loraplus_json, render_loraplus_table,
+};
 use loraspectra::knots::{
     compose_adapters_knots, render_knots_json, render_knots_table, KnotsConfig, KnotsMode,
     KnotsSeverity,
@@ -46,8 +52,9 @@ use loraspectra::safetensors::{
     PeftAdapterConfig, Tensor2D,
 };
 use loraspectra::sarif::{
-    build_audit_sarif, build_knots_sarif, build_lora_ga_sarif, build_merge_check_sarif,
-    build_ortho_proj_sarif, build_ties_dare_sarif,
+    build_audit_sarif, build_knots_sarif, build_lora_ga_sarif, build_loraplus_sarif,
+    build_merge_check_sarif, build_ortho_proj_sarif, build_rank_schedule_sarif,
+    build_ties_dare_sarif,
 };
 use loraspectra::ties_dare::{
     compose_adapters_ties_dare, render_ties_dare_json, render_ties_dare_table, DisjointAggregation,
@@ -57,7 +64,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.8.0 - Spectral SVD Auditor, Knots/TSV Subspace Aligner, LoRA-GA Initializer, Orthogonal Projector & TIES/DARE Merger (.safetensors)
+        "loraspectra v1.9.0 - Spectral SVD Auditor, LoRA+ Factor Balancer, AdaLoRA Rank Scheduler, Knots/TSV Aligner, LoRA-GA & TIES/DARE Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -80,7 +87,9 @@ USAGE:
   loraspectra vera <adapter_or_hf_uri> [--json]
   loraspectra subspace-drift <adapter_a_or_hf_uri> <adapter_b_or_hf_uri> [--config-a <cfg_a.json>] [--config-b <cfg_b.json>] [--json]
   loraspectra align <adapter_or_hf_uri> [--config <adapter_config.json>] [--json]
-  loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]"
+  loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]
+  loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <output.sarif>] [--json]
+  loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]"
     );
 }
 
@@ -2612,6 +2621,130 @@ fn main() {
                         .any(|d| d.rule_id == "LS043" || d.severity == KnotsSeverity::Error))
             {
                 process::exit(2);
+            }
+        }
+        "loraplus" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <out.sarif>] [--json]");
+                process::exit(1);
+            }
+            let input_uri = &args[2];
+            let mut rebalance_out: Option<String> = None;
+            let mut sarif_path: Option<String> = None;
+            let mut imbalance_warn: f64 = 1.5;
+            let mut cond_warn: f64 = 50.0;
+            let mut use_json = false;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--rebalance" => {
+                        i += 1;
+                        if i < args.len() {
+                            rebalance_out = Some(args[i].clone());
+                        }
+                    }
+                    "--sarif" => {
+                        i += 1;
+                        if i < args.len() {
+                            sarif_path = Some(args[i].clone());
+                        }
+                    }
+                    "--imbalance-warn" => {
+                        i += 1;
+                        if i < args.len() {
+                            imbalance_warn = args[i].parse().unwrap_or(1.5);
+                        }
+                    }
+                    "--cond-warn" => {
+                        i += 1;
+                        if i < args.len() {
+                            cond_warn = args[i].parse().unwrap_or(50.0);
+                        }
+                    }
+                    "--json" => use_json = true,
+                    _ => {}
+                }
+                i += 1;
+            }
+            let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
+            let summary = analyze_loraplus(&layers, input_uri, imbalance_warn, cond_warn);
+            if let Some(ref out_file) = rebalance_out {
+                let rebalanced = rebalance_adapter_factors(&layers);
+                let out_map = layers_to_tensor_map(&rebalanced);
+                if let Err(e) = write_safetensors(Path::new(out_file), &out_map) {
+                    eprintln!("Error writing rebalanced adapter {}: {}", out_file, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(ref sp) = sarif_path {
+                let sarif_str = build_loraplus_sarif(&summary, env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::write(sp, sarif_str) {
+                    eprintln!("Error writing SARIF report {}: {}", sp, e);
+                    process::exit(1);
+                }
+            }
+            if use_json {
+                print!("{}", render_loraplus_json(&summary));
+            } else {
+                print!("{}", render_loraplus_table(&summary));
+            }
+        }
+        "rank-schedule" => {
+            if args.len() < 3 {
+                eprintln!("Usage: loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <out.sarif>] [--json]");
+                process::exit(1);
+            }
+            let input_uri = &args[2];
+            let mut target_avg_rank: f64 = 16.0;
+            let mut min_rank: usize = 4;
+            let mut max_rank: usize = 64;
+            let mut sarif_path: Option<String> = None;
+            let mut use_json = false;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--target-avg-rank" => {
+                        i += 1;
+                        if i < args.len() {
+                            target_avg_rank = args[i].parse().unwrap_or(16.0);
+                        }
+                    }
+                    "--min-rank" => {
+                        i += 1;
+                        if i < args.len() {
+                            min_rank = args[i].parse().unwrap_or(4);
+                        }
+                    }
+                    "--max-rank" => {
+                        i += 1;
+                        if i < args.len() {
+                            max_rank = args[i].parse().unwrap_or(64);
+                        }
+                    }
+                    "--sarif" => {
+                        i += 1;
+                        if i < args.len() {
+                            sarif_path = Some(args[i].clone());
+                        }
+                    }
+                    "--json" => use_json = true,
+                    _ => {}
+                }
+                i += 1;
+            }
+            let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
+            let summary = optimize_rank_schedule(&layers, input_uri, target_avg_rank, min_rank, max_rank);
+            if let Some(ref sp) = sarif_path {
+                let sarif_str = build_rank_schedule_sarif(&summary, env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::write(sp, sarif_str) {
+                    eprintln!("Error writing SARIF report {}: {}", sp, e);
+                    process::exit(1);
+                }
+            }
+            if use_json {
+                print!("{}", render_rank_schedule_json(&summary));
+            } else {
+                print!("{}", render_rank_schedule_table(&summary));
             }
         }
         _ => {

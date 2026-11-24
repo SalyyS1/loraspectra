@@ -1,3 +1,4 @@
+pub mod adalora;
 pub mod align;
 pub mod audit;
 pub mod card;
@@ -6,6 +7,7 @@ pub mod diff;
 pub mod knots;
 pub mod linalg;
 pub mod lora_ga;
+pub mod loraplus;
 pub mod merge;
 pub mod merge_check;
 pub mod ortho_proj;
@@ -3528,7 +3530,7 @@ mod tests {
         use crate::ortho_proj::{project_adapter_orthogonal, OrthoDomain, OrthoProjectConfig};
         use crate::sarif::{build_lora_ga_sarif, build_ortho_proj_sarif, LORASPECTRA_SARIF_RULES};
 
-        assert_eq!(LORASPECTRA_SARIF_RULES.len(), 46);
+        assert_eq!(LORASPECTRA_SARIF_RULES.len(), 50);
         assert_eq!(LORASPECTRA_SARIF_RULES[38].id, "LS039");
         assert_eq!(LORASPECTRA_SARIF_RULES[39].id, "LS040");
         assert_eq!(LORASPECTRA_SARIF_RULES[40].id, "LS041");
@@ -3687,5 +3689,102 @@ mod tests {
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].rank(), 4);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_v190_loraplus_variational_imbalance_and_zero_drift_rebalance() {
+        use crate::loraplus::{analyze_loraplus, rebalance_adapter_factors, render_loraplus_json};
+        use crate::sarif::build_loraplus_sarif;
+
+        let mut rng = Rng64::new(9190);
+        // Create an intentionally imbalanced layer: B scaled by 10x, A scaled by 0.1x (identical ΔW = B*A!)
+        let mut b = random_matrix(32, 8, &mut rng, DType::F32);
+        let mut a = random_matrix(8, 32, &mut rng, DType::F32);
+        for v in &mut b.data {
+            *v *= 10.0;
+        }
+        for v in &mut a.data {
+            *v *= 0.1;
+        }
+        let layer = LoraLayer {
+            base_name: "model.layers.0.self_attn.q_proj".to_string(),
+            a_key: "model.layers.0.self_attn.q_proj.lora_A.weight".to_string(),
+            b_key: "model.layers.0.self_attn.q_proj.lora_B.weight".to_string(),
+            a,
+            b,
+        };
+        let dw_before = matmul(&layer.b, &layer.a);
+
+        let report_before = analyze_loraplus(std::slice::from_ref(&layer), "imbalanced.safetensors", 1.5, 50.0);
+        assert!(report_before.layers[0].imbalance_index > 10.0);
+        assert_eq!(report_before.imbalanced_layers, 1);
+        let sarif = build_loraplus_sarif(&report_before, "1.9.0");
+        assert!(sarif.contains("\"ruleId\": \"LS047\""));
+        assert!(render_loraplus_json(&report_before).contains("\"imbalance_index\""));
+
+        // Zero-drift SVD gauge equilibration: drives I -> 1.000000 while keeping ΔW identical!
+        let rebalanced = rebalance_adapter_factors(std::slice::from_ref(&layer));
+        let dw_after = matmul(&rebalanced[0].b, &rebalanced[0].a);
+        let mut diff_sq = 0.0;
+        for (x, y) in dw_before.data.iter().zip(dw_after.data.iter()) {
+            let d = x - y;
+            diff_sq += d * d;
+        }
+        assert!(diff_sq.sqrt() < 1e-11, "rebalance drifted ΔW by {}", diff_sq.sqrt());
+
+        let report_after = analyze_loraplus(&rebalanced, "balanced.safetensors", 1.5, 50.0);
+        assert!(
+            (report_after.layers[0].imbalance_index - 1.0).abs() < 1e-4,
+            "expected variational imbalance index == 1.0 after rebalance, got {}",
+            report_after.layers[0].imbalance_index
+        );
+        assert_eq!(report_after.imbalanced_layers, 0);
+    }
+
+    #[test]
+    fn test_v190_adalora_rank_schedule_reallocates_budget_from_waste_to_bottleneck() {
+        use crate::adalora::{optimize_rank_schedule, render_rank_schedule_json, RankScheduleStatus};
+        use crate::sarif::build_rank_schedule_sarif;
+
+        let mut rng = Rng64::new(9191);
+        // Layer 0: isotropic full-rank bottleneck (all 8 singular modes equal)
+        let mut b_full = Tensor2D::zeros(32, 8, DType::F32);
+        let mut a_full = Tensor2D::zeros(8, 32, DType::F32);
+        for k in 0..8 {
+            b_full.set(k, k, 2.0);
+            a_full.set(k, k, 2.0);
+        }
+        // Layer 1: rank-1 collapsed waste layer inside nominal rank 8
+        let mut b_waste = Tensor2D::zeros(32, 8, DType::F32);
+        let mut a_waste = Tensor2D::zeros(8, 32, DType::F32);
+        b_waste.set(0, 0, 1.0);
+        a_waste.set(0, 0, 1.0);
+        let _ = rng.next_f64();
+
+        let layers = vec![
+            LoraLayer {
+                base_name: "model.layers.0.mlp.down_proj".to_string(),
+                a_key: "a0".to_string(),
+                b_key: "b0".to_string(),
+                a: a_full,
+                b: b_full,
+            },
+            LoraLayer {
+                base_name: "model.layers.0.self_attn.k_proj".to_string(),
+                a_key: "a1".to_string(),
+                b_key: "b1".to_string(),
+                a: a_waste,
+                b: b_waste,
+            },
+        ];
+
+        let sched = optimize_rank_schedule(&layers, "adapter.safetensors", 8.0, 2, 16);
+        assert_eq!(sched.layers[0].status, RankScheduleStatus::Bottleneck);
+        assert_eq!(sched.layers[1].status, RankScheduleStatus::OverAllocated);
+        assert!(sched.layers[0].recommended_rank > sched.layers[1].recommended_rank);
+        let sarif = build_rank_schedule_sarif(&sched, "1.9.0");
+        assert!(sarif.contains("\"ruleId\": \"LS049\""));
+        assert!(sarif.contains("\"ruleId\": \"LS050\""));
+        assert!(render_rank_schedule_json(&sched).contains("\"rank_pattern\""));
     }
 }
