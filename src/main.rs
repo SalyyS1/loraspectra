@@ -2914,6 +2914,34 @@ fn main() {
                 print!("{}", render_doctor_markdown(&rep));
             }
         }
+        "trajectory" => {
+            let mut use_json = false;
+            let mut sources: Vec<String> = Vec::new();
+            for arg in &args[2..] {
+                if arg == "--json" {
+                    use_json = true;
+                } else if !arg.starts_with('-') {
+                    sources.push(arg.clone());
+                }
+            }
+            if sources.len() < 2 {
+                eprintln!("Usage: loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json]");
+                process::exit(1);
+            }
+            match loraspectra::trajectory::analyze_trajectory(&sources) {
+                Ok(rep) => {
+                    if use_json {
+                        println!("{}", loraspectra::trajectory::render_trajectory_json(&rep));
+                    } else {
+                        print!("{}", loraspectra::trajectory::render_trajectory_table(&rep));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Trajectory analysis error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
         "mcp" => {
             if let Err(e) = mcp::serve_stdio() {
                 eprintln!("loraspectra mcp server error: {}", e);

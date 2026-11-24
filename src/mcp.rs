@@ -25,6 +25,7 @@ use crate::safetensors::{
 };
 use crate::sarif::LORASPECTRA_SARIF_RULES;
 use crate::sensitivity::{analyze_sensitivity, render_sensitivity_json};
+use crate::trajectory::{analyze_trajectory, render_trajectory_json};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -326,6 +327,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_diff","description":"Compute exact O(r^2*(d_in+d_out)) Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_merge_check","description":"Evaluate N >= 2 LoRA adapters jointly prior to TIES/DARE/linear/ortho-svd merging for subspace collision, spectral norm inflation, and incompatible shapes.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_model_card","description":"Generate a ready-to-paste HuggingFace README.md Spectral Audit Model Card with shields.io badges and bottleneck tables from a local .safetensors or hf://org/repo URI.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_trajectory","description":"Analyze an ordered sequence of >=2 training checkpoints for Frobenius velocity, effective-rank evolution, Grassmannian subspace convergence, rank collapse, and early-stopping recommendation.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -562,6 +564,20 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_trajectory" => {
+            let raw_sources = args
+                .get("sources")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'sources' array (>= 2 ordered checkpoints)".to_string());
+            raw_sources.and_then(|arr| {
+                let srcs: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                let rep = analyze_trajectory(&srcs)?;
+                Ok(render_trajectory_json(&rep))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -640,6 +656,7 @@ mod tests {
         assert!(tools.contains("loraspectra_diff"));
         assert!(tools.contains("loraspectra_merge_check"));
         assert!(tools.contains("loraspectra_model_card"));
+        assert!(tools.contains("loraspectra_trajectory"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

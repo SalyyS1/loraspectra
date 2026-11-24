@@ -21,6 +21,7 @@ pub mod safetensors;
 pub mod sarif;
 pub mod sensitivity;
 pub mod ties_dare;
+pub mod trajectory;
 pub mod vera;
 
 /// Deterministic SplitMix64 pseudo-random generator for reproducible synthetic LoRA benchmarks and tests.
