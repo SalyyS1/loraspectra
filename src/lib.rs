@@ -16,6 +16,7 @@ pub mod merge_check;
 pub mod ortho_proj;
 pub mod quant;
 pub mod quant_fp8;
+pub mod quant_plan;
 pub mod remote;
 pub mod safetensors;
 pub mod sarif;

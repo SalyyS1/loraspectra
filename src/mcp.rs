@@ -18,6 +18,7 @@ use crate::diff::{diff_adapters_with_dora, render_diff_json};
 use crate::doctor::{render_doctor_json, run_doctor};
 use crate::loraplus::{analyze_loraplus, render_loraplus_json};
 use crate::merge_check::{analyze_multi_adapter_merge, render_merge_check_json, AdapterMergeInput};
+use crate::quant_plan::{build_quant_plan, render_quant_plan_json};
 use crate::remote::resolve_source_path;
 use crate::safetensors::{
     extract_dora_scales, extract_lora_alphas, extract_lora_layers, inspect_adapter_architecture,
@@ -328,6 +329,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_merge_check","description":"Evaluate N >= 2 LoRA adapters jointly prior to TIES/DARE/linear/ortho-svd merging for subspace collision, spectral norm inflation, and incompatible shapes.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_model_card","description":"Generate a ready-to-paste HuggingFace README.md Spectral Audit Model Card with shields.io badges and bottleneck tables from a local .safetensors or hf://org/repo URI.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_trajectory","description":"Analyze an ordered sequence of >=2 training checkpoints for Frobenius velocity, effective-rank evolution, Grassmannian subspace convergence, rank collapse, and early-stopping recommendation.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
+{"name":"loraspectra_quant_plan","description":"Generate a quantization-aware mixed-precision LoRA rank compression plan (nf4/fp4/int8/fp8/bf16/fp16) projecting byte savings and flagging brittle rank-1 outlier layers.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -578,6 +580,18 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 Ok(render_trajectory_json(&rep))
             })
         }
+        "loraspectra_quant_plan" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let q = args.get("target_quant").and_then(|v| v.as_str()).unwrap_or("nf4");
+                let energy = args.get("target_energy").and_then(|v| v.as_f64()).unwrap_or(0.99);
+                let rep = build_quant_plan(s, &layers, q, energy);
+                Ok(render_quant_plan_json(&rep))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -657,6 +671,7 @@ mod tests {
         assert!(tools.contains("loraspectra_merge_check"));
         assert!(tools.contains("loraspectra_model_card"));
         assert!(tools.contains("loraspectra_trajectory"));
+        assert!(tools.contains("loraspectra_quant_plan"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
