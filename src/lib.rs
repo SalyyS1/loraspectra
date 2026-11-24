@@ -3,6 +3,7 @@ pub mod align;
 pub mod audit;
 pub mod batch;
 pub mod card;
+pub mod compat;
 pub mod compress;
 pub mod diff;
 pub mod doctor;
