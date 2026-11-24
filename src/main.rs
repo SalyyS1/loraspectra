@@ -60,7 +60,7 @@ use loraspectra::safetensors::{
 use loraspectra::sarif::{
     build_audit_sarif, build_knots_sarif, build_lora_ga_sarif, build_loraplus_sarif,
     build_merge_check_sarif, build_ortho_proj_sarif, build_rank_schedule_sarif,
-    build_ties_dare_sarif,
+    build_sensitivity_sarif, build_ties_dare_sarif,
 };
 use loraspectra::sensitivity::{
     analyze_sensitivity, render_sensitivity_json, render_sensitivity_table,
@@ -73,7 +73,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.13.0 - Spectral SVD Auditor, Executive Doctor (A-F), 8-Tool Stdio MCP Server, Sensitivity/Forgetting Auditor, Batch Leaderboard, LoRA+ Balancer & AdaLoRA Scheduler (.safetensors)
+        "loraspectra v1.14.0 - Spectral SVD Auditor, Executive Doctor (A-F), 8-Tool Stdio MCP Server, Sensitivity/Forgetting SARIF Auditor, Batch Leaderboard, LoRA+ Balancer & AdaLoRA Scheduler (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -100,7 +100,7 @@ USAGE:
   loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <output.sarif>] [--json]
   loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]
   loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]
-  loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--json]
+  loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--sarif <output.sarif>] [--json]
   loraspectra doctor <adapter_or_hf_uri> [--json]
   loraspectra mcp                                          # run built-in zero-dependency 8-tool JSON-RPC 2.0 stdio MCP server"
     );
@@ -2829,12 +2829,13 @@ fn main() {
         }
         "sensitivity" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--json]");
+                eprintln!("Usage: loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--sarif <output.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut dom_warn: f64 = 85.0;
             let mut spike_mult: f64 = 2.5;
+            let mut sarif_out: Option<String> = None;
             let mut use_json = false;
             let mut i = 3;
             while i < args.len() {
@@ -2851,6 +2852,12 @@ fn main() {
                             spike_mult = args[i].parse().unwrap_or(2.5);
                         }
                     }
+                    "--sarif" => {
+                        i += 1;
+                        if i < args.len() {
+                            sarif_out = Some(args[i].clone());
+                        }
+                    }
                     "--json" => use_json = true,
                     _ => {}
                 }
@@ -2858,6 +2865,13 @@ fn main() {
             }
             let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
             let rep = analyze_sensitivity(&layers, input_uri, dom_warn, spike_mult);
+            if let Some(ref spath) = sarif_out {
+                let sarif_doc = build_sensitivity_sarif(&rep, env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::write(spath, sarif_doc) {
+                    eprintln!("Failed to write SARIF {}: {}", spath, e);
+                    process::exit(1);
+                }
+            }
             if use_json {
                 println!("{}", render_sensitivity_json(&rep));
             } else {

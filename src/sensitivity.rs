@@ -373,5 +373,8 @@ mod tests {
         assert!(rep.energy_spike_layers >= 1);
         assert!(rep.mlp_energy_pct > 90.0);
         assert!(render_sensitivity_json(&rep).contains("\"forgetting_risk_level\": \"HIGH\""));
+        let sarif = crate::sarif::build_sensitivity_sarif(&rep, "1.14.0");
+        assert!(sarif.contains("\"ruleId\": \"LS051\""));
+        assert!(sarif.contains("\"version\": \"2.1.0\""));
     }
 }

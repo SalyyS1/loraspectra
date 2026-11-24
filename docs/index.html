@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.11.0 - Interactive .safetensors Header, Spectral SVD, 6-Tool MCP Server, Batch Leaderboard, LoRA+ Balancer &amp; AdaLoRA Scheduler</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, 6-tool stdio MCP server (loraspectra mcp), LoRA/LoRA+/AdaLoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, multi-checkpoint batch-audit leaderboard, Knots joint-SVD &amp; TSV polar Procrustes aligner, LoRA-GA spectral initializer, O-LoRA orthogonal projector, TIES/DARE resolver, and zero-dependency Rust CLI (v1.11.0, SARIF LS001-LS050).">
-  <meta property="og:title" content="loraspectra v1.11.0 - Interactive .safetensors Header, Spectral SVD, 6-Tool MCP Server, Batch Leaderboard &amp; LoRA+ Balancer">
+  <title>loraspectra v1.14.0 - Interactive .safetensors SVD, Executive Doctor (A-F), 8-Tool MCP Server, Sensitivity SARIF (LS051-LS052) &amp; LoRA+ Balancer</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, 8-tool stdio MCP server (loraspectra mcp), Executive Adapter Doctor (A-F scorecard), Spectral Sensitivity &amp; Catastrophic Forgetting SARIF auditor (LS051-LS052), LoRA/LoRA+/AdaLoRA/rsLoRA/PiSSA/DoRA spectral SVD auditor, multi-checkpoint batch-audit leaderboard, and zero-dependency Rust CLI (v1.14.0, SARIF LS001-LS052).">
+  <meta property="og:title" content="loraspectra v1.14.0 - Interactive .safetensors SVD, Executive Doctor (A-F), 8-Tool MCP Server &amp; Sensitivity SARIF">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -419,7 +419,7 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.13.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.14.0</span></h1>
         <p class="lead">
           Spectral SVD Auditor, <strong>6-Tool Stdio MCP Server (<code>loraspectra mcp</code>)</strong>, Multi-Checkpoint Batch Leaderboard (<code>batch-audit</code>), LoRA+ Variational Factor Balancer, AdaLoRA Water-Filling Rank Scheduler, Knots/TSV Aligner, LoRA-GA Initializer, O-LoRA Projector, and TIES/DARE Merger
           &mdash; powered by exact QR-Core SVD (<code>O(r&sup2;d + r&sup3;)</code>) with zero dependencies.
@@ -786,6 +786,55 @@ loraspectra project ./candidate_lora.safetensors ./safety_anchor.safetensors ./m
 
 # Gauge-invariant Knots joint-SVD alignment, isotropic spectral flattening, or TSV polar Procrustes merge (LS043-LS046)
 loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knots.safetensors --mode knots-ties --density 0.5 --rank 16 --normalize-tasks --sarif knots.sarif</pre>
+      </div>
+    </div>
+
+    <!-- Interactive Executive Adapter Doctor (A-F) & Sensitivity Risk Simulator (v1.14.0) -->
+    <div class="card" id="v1140-doctor-card">
+      <div class="card-header">
+        <h2 class="card-title">Interactive Executive Adapter Doctor (A–F) &amp; Forgetting Risk Simulator (<code>v1.14.0</code>)</h2>
+        <span class="privacy-tag">8-Tool MCP · SARIF LS001–LS052</span>
+      </div>
+      <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 16px;">
+        Preview the exact composite A–F scoring model used by <code>loraspectra doctor</code> &amp; <code>loraspectra_doctor</code> MCP tool across dead layers, LoRA+ gauge imbalance, SVD utilization, and <code>LS051</code>/<code>LS052</code> catastrophic forgetting spikes.
+      </p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">
+        <div class="kpi-card">
+          <label class="kpi-label" for="doc-dead">Dead Layers (LS001)</label>
+          <input type="range" id="doc-dead" min="0" max="4" step="1" value="0" style="width:100%;margin-top:6px;">
+          <div class="kpi-sub">Count = <strong id="doc-dead-val">0</strong></div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="doc-imb">LoRA+ Imbalance Index</label>
+          <input type="range" id="doc-imb" min="1.0" max="3.5" step="0.1" value="1.2" style="width:100%;margin-top:6px;">
+          <div class="kpi-sub">Mean = <strong id="doc-imb-val">1.2x</strong></div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="doc-util">Mean Rank Utilization (%)</label>
+          <input type="range" id="doc-util" min="15" max="95" step="5" value="75" style="width:100%;margin-top:6px;">
+          <div class="kpi-sub">Avg = <strong id="doc-util-val">75%</strong></div>
+        </div>
+        <div class="kpi-card">
+          <label class="kpi-label" for="doc-brittle">Brittle Rank-1 / Spikes (LS051/52)</label>
+          <input type="range" id="doc-brittle" min="0" max="8" step="1" value="1" style="width:100%;margin-top:6px;">
+          <div class="kpi-sub">Flagged layers = <strong id="doc-brittle-val">1</strong></div>
+        </div>
+      </div>
+      <div class="kpi-grid" style="margin-bottom: 14px;">
+        <div class="kpi-card">
+          <div class="kpi-label">Executive Grade</div>
+          <div class="kpi-value green" id="doc-grade">A</div>
+          <div class="kpi-sub" id="doc-score-sub">Score: 93.6 / 100</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Forgetting Risk</div>
+          <div class="kpi-value accent" id="doc-risk">MEDIUM</div>
+          <div class="kpi-sub">LS051/LS052 SARIF gate</div>
+        </div>
+        <div class="kpi-card" style="grid-column: span 2;">
+          <div class="kpi-label">Recommended CLI Remediation</div>
+          <pre class="cli-code" id="doc-cmd" style="margin-top:6px;padding:8px 10px;font-size:12px;"></pre>
+        </div>
       </div>
     </div>
 
@@ -3206,6 +3255,39 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       lpSlider.addEventListener("input", updateLoraPlusLab);
       updateLoraPlusLab();
     }
+
+    function updateDoctorSim() {
+      const deadEl = document.getElementById("doc-dead");
+      if (!deadEl) return;
+      const dead = parseInt(deadEl.value, 10) || 0;
+      const imb = parseFloat(document.getElementById("doc-imb").value) || 1.0;
+      const utilPct = parseInt(document.getElementById("doc-util").value, 10) || 75;
+      const brittle = parseInt(document.getElementById("doc-brittle").value, 10) || 0;
+      document.getElementById("doc-dead-val").textContent = String(dead);
+      document.getElementById("doc-imb-val").textContent = imb.toFixed(1) + "x";
+      document.getElementById("doc-util-val").textContent = utilPct + "%";
+      document.getElementById("doc-brittle-val").textContent = String(brittle);
+      let score = 100.0 - dead * 20.0 - Math.min(20.0, Math.max(0.0, imb - 1.0) * 12.0) - brittle * 4.0;
+      if (utilPct / 100.0 < 0.55) score -= (0.55 - utilPct / 100.0) * 30.0;
+      score = Math.max(0.0, Math.min(100.0, score));
+      const grade = score >= 90 ? "A" : score >= 80 ? "B" : score >= 68 ? "C" : score >= 52 ? "D" : "F";
+      const risk = brittle >= 4 ? "HIGH" : brittle >= 1 ? "MEDIUM" : "LOW";
+      const gEl = document.getElementById("doc-grade");
+      gEl.textContent = grade;
+      gEl.className = "kpi-value " + (grade === "A" || grade === "B" ? "green" : grade === "C" ? "accent" : "purple");
+      document.getElementById("doc-score-sub").textContent = "Score: " + score.toFixed(1) + " / 100";
+      document.getElementById("doc-risk").textContent = risk;
+      const cmds = ["loraspectra doctor ./adapter_model.safetensors"];
+      if (imb >= 1.5) cmds.push("loraspectra loraplus ./adapter_model.safetensors --rebalance balanced.safetensors");
+      if (utilPct < 55) cmds.push("loraspectra compress ./adapter_model.safetensors compressed.safetensors --energy 0.99");
+      if (brittle > 0) cmds.push("loraspectra sensitivity ./adapter_model.safetensors --sarif sensitivity.sarif");
+      document.getElementById("doc-cmd").textContent = cmds.join("\n");
+    }
+    ["doc-dead", "doc-imb", "doc-util", "doc-brittle"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("input", updateDoctorSim);
+    });
+    updateDoctorSim();
   })();
   </script>
 </body>

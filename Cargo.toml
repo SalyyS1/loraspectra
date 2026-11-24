@@ -1,6 +1,6 @@
 [package]
 name = "loraspectra"
-version = "1.13.0"
+version = "1.14.0"
 edition = "2021"
 description = "Spectral SVD auditor, Knots joint-SVD & TSV multi-adapter subspace aligner, LoRA-GA initializer, orthogonal projector, compressor, and TIES/DARE merger for .safetensors LoRA adapters"
 license = "MIT"

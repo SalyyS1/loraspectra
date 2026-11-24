@@ -5,6 +5,7 @@ use crate::lora_ga::LoraGaSummary;
 use crate::loraplus::LoraPlusSummary;
 use crate::merge_check::MultiMergeCheckSummary;
 use crate::ortho_proj::OrthoProjectSummary;
+use crate::sensitivity::SensitivitySummary;
 use crate::ties_dare::TiesDareComposeSummary;
 
 pub struct SarifRuleDefinition {
@@ -1232,6 +1233,57 @@ pub fn build_rank_schedule_sarif(summary: &RankScheduleSummary, tool_version: &s
                 d.current_rank,
                 d.recommended_rank
             )
+        })
+        .collect();
+    render_sarif_envelope(tool_version, &results_json)
+}
+
+pub fn build_sensitivity_sarif(summary: &SensitivitySummary, tool_version: &str) -> String {
+    let results_json: Vec<String> = summary
+        .layers
+        .iter()
+        .filter_map(|l| {
+            let rule_id = l.risk_flag?;
+            let msg = if rule_id == "LS051" {
+                format!(
+                    "Layer '{}' ({}/{}) concentrates {:.1}% of Frobenius energy into its single top singular mode (rank={}, brittle rank-1 forgetting risk).",
+                    l.base_name, l.subsystem, l.depth_band, l.top1_dominance_pct, l.rank
+                )
+            } else {
+                format!(
+                    "Layer '{}' ({}/{}) absorbs {:.1}% of total adapter Frobenius energy (spectral norm {:.4}, energy concentration spike).",
+                    l.base_name, l.subsystem, l.depth_band, l.energy_share_pct, l.spectral_norm
+                )
+            };
+            Some(format!(
+                r#"{{
+        "ruleId": "{}",
+        "level": "warning",
+        "message": {{ "text": "{}" }},
+        "locations": [
+          {{
+            "physicalLocation": {{ "artifactLocation": {{ "uri": "{}" }} }},
+            "logicalLocations": [{{ "name": "{}", "kind": "module" }}]
+          }}
+        ],
+        "properties": {{
+          "subsystem": "{}",
+          "depthBand": "{}",
+          "top1DominancePct": {:.2},
+          "energySharePct": {:.2},
+          "forgettingRiskLevel": "{}"
+        }}
+      }}"#,
+                rule_id,
+                escape_json(&msg),
+                escape_json(&summary.source_uri),
+                escape_json(&l.base_name),
+                l.subsystem,
+                l.depth_band,
+                l.top1_dominance_pct,
+                l.energy_share_pct,
+                summary.forgetting_risk_level
+            ))
         })
         .collect();
     render_sarif_envelope(tool_version, &results_json)
