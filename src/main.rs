@@ -2087,11 +2087,20 @@ fn main() {
                 load_full_adapter_bundle_or_exit(&args[2], args.windows(2).find(|w| w[0] == "--config").map(|w| w[1].as_str()));
             let _ = (tensors, alphas, cfg);
             let use_json = args.iter().any(|a| a == "--json");
+            let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].as_str());
             if layers.is_empty() {
                 eprintln!("No LoRA layers found in {}", args[2]);
                 process::exit(1);
             }
             let matrix = analyze_cross_layer_alignment(&layers);
+            if let Some(hp) = html_out {
+                let html = loraspectra::align::render_alignment_html(&matrix);
+                if let Err(e) = std::fs::write(hp, &html) {
+                    eprintln!("Error writing alignment HTML report to '{}': {}", hp, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote cross-layer Grassmannian alignment HTML report to {}", hp);
+            }
             if use_json {
                 println!("{}", render_alignment_json(&matrix));
             } else {

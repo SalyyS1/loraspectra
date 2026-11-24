@@ -426,6 +426,61 @@ pub fn render_alignment_table(matrix: &AdapterAlignmentMatrix) -> String {
     out
 }
 
+fn html_esc_align(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML Cross-Layer Grassmannian Subspace Alignment Report (`align --html`).
+pub fn render_alignment_html(matrix: &AdapterAlignmentMatrix) -> String {
+    let mut rows = String::new();
+    for pair in &matrix.pairs {
+        let col = match pair.classification {
+            AlignmentClass::HighlyAligned | AlignmentClass::MaximallyDisjoint => "#f85149",
+            AlignmentClass::Orthogonal => "#d29922",
+            AlignmentClass::Diverse => "#3fb950",
+        };
+        let issues = if pair.issues.is_empty() {
+            "—".to_string()
+        } else {
+            pair.issues.join(", ")
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code> &harr; <code>{}</code></td><td>{}</td><td>{:.4}</td><td>{:.1}&deg;</td><td style=\"color:{}\"><b>{}</b></td><td><code>{}</code></td></tr>\n",
+            html_esc_align(&pair.layer_a),
+            html_esc_align(&pair.layer_b),
+            pair.k,
+            pair.grassmannian_distance,
+            pair.mean_angle_deg,
+            col,
+            pair.classification.as_str(),
+            html_esc_align(&issues)
+        ));
+    }
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>loraspectra Cross-Layer Grassmannian Alignment Report</title>
+<style>
+body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,sans-serif}}
+.wrap{{max-width:1080px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;font-size:12.5px}}th,td{{padding:8px 9px;border-bottom:1px solid #21262d;text-align:left}}
+th{{color:#8b949e}}code{{font-family:ui-monospace,monospace;color:#58a6ff}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>loraspectra Cross-Layer Grassmannian Subspace Alignment</h1>
+<p>Adjacent Pairs: <b>{}</b> &middot; Mean d_G: <b>{:.4}</b> &middot; Max d_G: <b>{:.4}</b> &middot; Redundant (LS029): <b>{}</b> &middot; Disjoint (LS030): <b>{}</b></p></div>
+<div class="card"><table><thead><tr><th>Adjacent Pair</th><th>k</th><th>d_G (rad)</th><th>Mean Angle</th><th>Class</th><th>SARIF</th></tr></thead>
+<tbody>{}</tbody></table></div></div></body></html>"##,
+        matrix.pairs.len(),
+        matrix.mean_grassmannian_distance,
+        matrix.max_grassmannian_distance,
+        matrix.redundant_pairs,
+        matrix.disjoint_pairs,
+        rows
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

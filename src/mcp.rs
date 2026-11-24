@@ -343,6 +343,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_quant_plan_html","description":"Generate a quantization-aware mixed-precision LoRA rank compression plan (nf4/fp4/int8/fp8/bf16/fp16) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_diff_html","description":"Compute Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_merge_check_html","description":"Run multi-adapter pre-merge subspace collision & norm-inflation analysis across >= 2 .safetensors LoRAs and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
+{"name":"loraspectra_align_html","description":"Compute cross-layer Grassmannian subspace alignment (LS029/LS030) for a .safetensors LoRA adapter and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -832,6 +833,26 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_align_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let matrix = crate::align::analyze_cross_layer_alignment(&layers);
+                let html = crate::align::render_alignment_html(&matrix);
+                Ok(format!(
+                    r#"{{"source":"{}","pair_count":{},"redundant_pairs":{},"disjoint_pairs":{},"mean_grassmannian_distance":{:.4},"html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    matrix.pairs.len(),
+                    matrix.redundant_pairs,
+                    matrix.disjoint_pairs,
+                    matrix.mean_grassmannian_distance,
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -924,6 +945,7 @@ mod tests {
         assert!(tools.contains("loraspectra_quant_plan_html"));
         assert!(tools.contains("loraspectra_diff_html"));
         assert!(tools.contains("loraspectra_merge_check_html"));
+        assert!(tools.contains("loraspectra_align_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
