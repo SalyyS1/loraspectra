@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.24.0 - Interactive .safetensors SVD, 15-Tool MCP Server, Executive Doctor SARIF, Runtime Compat &amp; Trajectory Lab</title>
+  <title>loraspectra v1.25.0 - Interactive .safetensors SVD, 15-Tool MCP Server, Doctor CI Gate, Runtime Compat &amp; Trajectory Lab</title>
   <meta name="description" content="100% client-side in-browser .safetensors header inspector, 15-tool stdio MCP server (loraspectra mcp), 5-runtime serving compatibility matrix (vLLM/SGLang/PEFT/llama.cpp/ComfyUI), Executive Adapter Doctor (A-F scorecard), Spectral Sensitivity &amp; Catastrophic Forgetting SARIF auditor (LS051-LS052), Quantization Planner, Training Trajectory analyzer, and Batch HTML Leaderboard (v1.23.0, SARIF LS001-LS052).">
   <meta property="og:title" content="loraspectra v1.23.0 - Interactive .safetensors SVD, 15-Tool MCP Server &amp; 5-Runtime Compatibility Matrix">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
@@ -930,7 +930,32 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       <div id="traj-svg-wrap" style="background:#0d1420;border:1px solid #2b3a4d;border-radius:8px;padding:12px;margin-bottom:10px;"></div>
       <div class="kpi-sub" id="traj-verdict" style="font-family:var(--mono);font-size:12.5px;margin-bottom:8px;"></div>
       <pre class="cli-code" style="padding:8px 10px;font-size:12px;">loraspectra trajectory ./ckpt-100.safetensors ./ckpt-200.safetensors ./ckpt-300.safetensors ./ckpt-400.safetensors --json
-loraspectra doctor ./ckpt-300.safetensors --html doctor.html --sarif doctor.sarif</pre>
+loraspectra doctor ./ckpt-300.safetensors --html doctor.html --sarif doctor.sarif --fail-below-grade B</pre>
+    </div>
+
+    <!-- 1-Click 15-Tool MCP Server Config (v1.25.0) -->
+    <div class="card" id="mcp-15-card">
+      <div class="card-header">
+        <h2 class="card-title">1-Click 15-Tool Stdio MCP Server Config (<code>loraspectra mcp</code>)</h2>
+        <span class="privacy-tag">Claude Code · Cursor · Windsurf · Codex</span>
+      </div>
+      <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 12px;">
+        Connect any MCP-compatible AI coding agent directly to <code>loraspectra</code> (zero Python/PyTorch required) for SVD audits, Executive Doctor (A–F), 5-runtime compatibility checks, quantization planning, trajectory plateau checks, and dry-run SVD compression previews.
+      </p>
+      <div class="cli-block">
+        <div class="cli-block-head">
+          <span>mcpServers JSON (<code>.mcp.json</code> / <code>.cursor/mcp.json</code>)</span>
+          <button type="button" class="btn btn-sm" data-copy="mcp-15-json">Copy</button>
+        </div>
+        <pre class="cli-code" id="mcp-15-json">{
+  "mcpServers": {
+    "loraspectra": {
+      "command": "loraspectra",
+      "args": ["mcp"]
+    }
+  }
+}</pre>
+      </div>
     </div>
 
     <!-- Interactive Knots Joint-SVD, Isotropic Flattening & TSV Lab (v1.8.0) -->

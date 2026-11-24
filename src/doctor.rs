@@ -321,6 +321,19 @@ pub fn render_doctor_json(r: &DoctorReport) -> String {
     )
 }
 
+pub fn grade_meets_threshold(actual_grade: &str, min_grade: &str) -> bool {
+    fn rank(g: &str) -> u8 {
+        match g.trim().to_ascii_uppercase().as_str() {
+            "A" => 5,
+            "B" => 4,
+            "C" => 3,
+            "D" => 2,
+            _ => 1,
+        }
+    }
+    rank(actual_grade) >= rank(min_grade)
+}
+
 /// Render an OASIS SARIF v2.1.0 report summarizing executive doctor findings (`LS001`, `LS047`, `LS051`, `LS052`).
 pub fn render_doctor_sarif(r: &DoctorReport) -> String {
     let mut results = Vec::new();
@@ -416,5 +429,8 @@ mod tests {
         let sarif = render_doctor_sarif(&d_rep);
         assert!(sarif.contains("\"version\": \"2.1.0\""));
         assert!(sarif.contains("LS001"));
+        assert!(grade_meets_threshold("A", "B"));
+        assert!(grade_meets_threshold("B", "B"));
+        assert!(!grade_meets_threshold("C", "B"));
     }
 }
