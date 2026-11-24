@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.29.0 - Interactive .safetensors SVD, 15-Tool MCP Server, 52 SARIF Rules CLI, Trajectory HTML &amp; Compat CI Gate</title>
+  <title>loraspectra v1.30.0 - Interactive .safetensors SVD, 52 SARIF Rules Explorer, 15-Tool MCP Server &amp; Trajectory Lab</title>
   <meta name="description" content="100% client-side in-browser .safetensors header inspector, 15-tool stdio MCP server (loraspectra mcp), 5-runtime serving compatibility matrix with CI gate (compat --fail-incompatible), Executive Adapter Doctor (A-F scorecard + CI gate), Batch Audit HTML Leaderboard &amp; SARIF v2.1.0, Compress Preview CLI, Quantization Planner, and Training Trajectory HTML SVG analyzer (v1.28.0, SARIF LS001-LS052).">
   <meta property="og:title" content="loraspectra v1.28.0 - Interactive .safetensors SVD, 15-Tool MCP Server, Trajectory HTML &amp; Compat CI Gate">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
@@ -929,8 +929,15 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       </div>
       <div id="traj-svg-wrap" style="background:#0d1420;border:1px solid #2b3a4d;border-radius:8px;padding:12px;margin-bottom:10px;"></div>
       <div class="kpi-sub" id="traj-verdict" style="font-family:var(--mono);font-size:12.5px;margin-bottom:8px;"></div>
-      <pre class="cli-code" style="padding:8px 10px;font-size:12px;">loraspectra trajectory ./ckpt-100.safetensors ./ckpt-200.safetensors ./ckpt-300.safetensors ./ckpt-400.safetensors --json
+      <pre class="cli-code" style="padding:8px 10px;font-size:12px;">loraspectra trajectory ./ckpt-100.safetensors ./ckpt-200.safetensors ./ckpt-300.safetensors ./ckpt-400.safetensors --html trajectory.html --json
 loraspectra doctor ./ckpt-300.safetensors --html doctor.html --sarif doctor.sarif --fail-below-grade B</pre>
+    </div>
+
+    <div class="card" style="margin-top:18px;">
+      <div class="card-title">Interactive OASIS SARIF v2.1.0 Rules Explorer (<code>LS001</code>&ndash;<code>LS052</code>)</div>
+      <p class="kpi-sub" style="margin-bottom:10px;">Search LoRASpectra's diagnostic catalog (DoRA, PiSSA, rsLoRA, LoRA+, AdaLoRA, FP8, Quantization, Knots/TSV, Forgetting Risk) or run <code>loraspectra rules --json</code> locally.</p>
+      <input type="search" id="sarif-rule-search" placeholder="Filter rules (e.g. DoRA, PiSSA, forgetting, FP8, LoRA+, LS051)..." style="width:100%;padding:8px 10px;margin-bottom:10px;border-radius:6px;border:1px solid var(--border);background:#0d1117;color:var(--text);font-family:var(--mono);font-size:12.5px;">
+      <div id="sarif-rule-list" style="display:grid;gap:6px;max-height:220px;overflow:auto;"></div>
     </div>
 
     <!-- 1-Click 15-Tool MCP Server Config (v1.25.0) -->
@@ -3533,6 +3540,38 @@ loraspectra doctor ./ckpt-300.safetensors --html doctor.html --sarif doctor.sari
     if (tp2) tp2.onclick = () => renderTrajectoryPreset("learning");
     if (tp3) tp3.onclick = () => renderTrajectoryPreset("overfit");
     renderTrajectoryPreset("converged");
+
+    const SARIF_CATALOG = [
+      ["LS001", "error", "DeadLoraLayer", "Zero-norm / dead LoRA layer producing no weight update"],
+      ["LS002", "warning", "SevereRankCollapse", "Effective rank < 2.0 or 99% energy in <=15% of nominal rank"],
+      ["LS019", "error", "DoraMagnitudeMismatch", "DoRA lora_magnitude_vector shape mismatch or zeroed channels"],
+      ["LS021", "warning", "RsLoraOverscaling", "Naive alpha=2r rsLoRA overscaling or ambiguous .alpha tensor"],
+      ["LS022", "error", "UnconvertedPissaResidual", "PiSSA checkpoint requires W_res base or pissa_init conversion"],
+      ["LS023", "error", "QuantizationCorruption", "Corrupt bitsandbytes NF4/FP4/INT8 absmax scale or high SQNR error"],
+      ["LS024", "warning", "WedinSubspaceInstability", "Small singular value gap causing unstable SVD truncation"],
+      ["LS026", "warning", "VeraHighDispersion", "VeRA gating vector extreme channel dispersion"],
+      ["LS036", "warning", "TiesSignConflict", "Severe multi-adapter sign interference during TIES/DARE merge"],
+      ["LS039", "warning", "LoraGaWarmupDrift", "Rank-deficient uncompensated LoRA-GA initialization drift"],
+      ["LS041", "warning", "OrthoSignalAnnihilation", "Orthogonal anchor projection annihilated target task signal"],
+      ["LS043", "warning", "KnotsJointRedundancy", "High subspace overlap detected in Knots/TSV joint-SVD alignment"],
+      ["LS047", "warning", "LoraPlusFactorImbalance", "LoRA+ variational nuclear-norm B/A factor imbalance"],
+      ["LS049", "note", "AdaLoraRankBudgetShift", "AdaLoRA spectral water-filling reallocates wasted rank capacity"],
+      ["LS051", "warning", "BrittleRank1Dominance", "Single singular direction carries >75% layer energy (overfit risk)"],
+      ["LS052", "warning", "MlpEnergyForgettingSpike", "Deep MLP layer Frobenius spike threatening catastrophic forgetting"]
+    ];
+    const srIn = document.getElementById("sarif-rule-search");
+    const srList = document.getElementById("sarif-rule-list");
+    function renderSarifRules() {
+      if (!srList) return;
+      const q = ((srIn && srIn.value) || "").trim().toLowerCase();
+      const hits = SARIF_CATALOG.filter((r) => !q || r.join(" ").toLowerCase().includes(q));
+      srList.innerHTML = hits.map((r) => {
+        const col = r[1] === "error" ? "#f85149" : (r[1] === "warning" ? "#d29922" : "#58a6ff");
+        return `<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-family:var(--mono);font-size:12px;"><span><strong style="color:${col}">${r[0]}</strong> <b>${r[2]}</b> &mdash; <span style="color:#8b949e">${r[3]}</span></span><span style="color:${col}">${r[1]}</span></div>`;
+      }).join("");
+    }
+    if (srIn) srIn.addEventListener("input", renderSarifRules);
+    renderSarifRules();
   })();
   </script>
 </body>
