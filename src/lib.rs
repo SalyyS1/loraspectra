@@ -5,6 +5,7 @@ pub mod batch;
 pub mod card;
 pub mod compress;
 pub mod diff;
+pub mod doctor;
 pub mod knots;
 pub mod linalg;
 pub mod lora_ga;

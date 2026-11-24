@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
   "name": "io.github.SalyyS1/loraspectra",
-  "description": "Zero-dependency Rust Spectral SVD auditor, Sensitivity/Forgetting Risk auditor (LS051-LS052), LoRA+ balancer, AdaLoRA rank scheduler, multi-checkpoint batch leaderboard, and 7-tool stdio MCP server for .safetensors LoRA adapters (52 SARIF rules).",
-  "version": "1.12.0",
+  "description": "Zero-dependency Rust Spectral SVD auditor, Executive Doctor (A-F), Sensitivity/Forgetting Risk auditor (LS051-LS052), LoRA+ balancer, AdaLoRA rank scheduler, multi-checkpoint batch leaderboard, and 8-tool stdio MCP server for .safetensors LoRA adapters.",
+  "version": "1.13.0",
   "repository": {
     "url": "https://github.com/SalyyS1/loraspectra",
     "source": "github"

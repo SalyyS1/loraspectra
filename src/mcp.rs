@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use crate::adalora::{optimize_rank_schedule, render_rank_schedule_json};
 use crate::audit::{audit_adapter, audit_adapter_integrity, render_audit_json};
 use crate::batch::{discover_checkpoints, render_batch_json, run_batch_audit};
+use crate::doctor::{render_doctor_json, run_doctor};
 use crate::loraplus::{analyze_loraplus, render_loraplus_json};
 use crate::remote::resolve_source_path;
 use crate::safetensors::{
@@ -318,6 +319,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_rank_schedule","description":"Compute AdaLoRA spectral-importance water-filling heterogeneous rank_pattern & alpha_pattern schedule (LS049-LS050).","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_avg_rank":{"type":"number"},"min_rank":{"type":"integer"},"max_rank":{"type":"integer"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_batch_audit","description":"Recursively scan directories or checkpoint files and rank all LoRA adapters on a 0-100 Spectral Health Leaderboard.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"}},"required":["paths"],"additionalProperties":false}},
 {"name":"loraspectra_sensitivity","description":"Audit layer-wise spectral sensitivity across Attention vs MLP and Early/Mid/Deep transformer blocks for brittle rank-1 dominance (LS051) and energy spikes (LS052).","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_doctor","description":"Run an all-in-one executive adapter health diagnosis combining SVD utilization, integrity, LoRA+ imbalance, sensitivity/forgetting risk, and AdaLoRA budget into an A-F grade.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -477,6 +479,16 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 let spike = args.get("spike_multiplier").and_then(|v| v.as_f64()).unwrap_or(2.5);
                 let rep = analyze_sensitivity(&layers, s, dom, spike);
                 Ok(render_sensitivity_json(&rep))
+            })
+        }
+        "loraspectra_doctor" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let rep = run_doctor(s, &layers, &tensors, None);
+                Ok(render_doctor_json(&rep))
             })
         }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
