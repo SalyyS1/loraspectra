@@ -17,7 +17,7 @@ use loraspectra::compress::{
     CompressionPolicy,
 };
 use loraspectra::diff::{diff_adapters_full, render_diff_json, render_diff_table, analyze_subspace_drift, render_subspace_drift_json, render_subspace_drift_table};
-use loraspectra::doctor::{render_doctor_json, render_doctor_markdown, run_doctor};
+use loraspectra::doctor::{render_doctor_html, render_doctor_json, render_doctor_markdown, run_doctor};
 use loraspectra::merge::{
     analyze_adapter_interference, merge_multiple_adapters, parse_layer_weights, BlockWeightRule,
 };
@@ -73,7 +73,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.14.0 - Spectral SVD Auditor, Executive Doctor (A-F), 8-Tool Stdio MCP Server, Sensitivity/Forgetting SARIF Auditor, Batch Leaderboard, LoRA+ Balancer & AdaLoRA Scheduler (.safetensors)
+        "loraspectra v1.15.0 - Spectral SVD Auditor, Executive Doctor (A-F + HTML), 9-Tool Stdio MCP Server, Sensitivity/Forgetting SARIF Auditor, Batch Leaderboard, LoRA+ Balancer & AdaLoRA Scheduler (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -101,8 +101,8 @@ USAGE:
   loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]
   loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]
   loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--sarif <output.sarif>] [--json]
-  loraspectra doctor <adapter_or_hf_uri> [--json]
-  loraspectra mcp                                          # run built-in zero-dependency 8-tool JSON-RPC 2.0 stdio MCP server"
+  loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--json]
+  loraspectra mcp                                          # run built-in zero-dependency 9-tool JSON-RPC 2.0 stdio MCP server"
     );
 }
 
@@ -2880,13 +2880,34 @@ fn main() {
         }
         "doctor" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra doctor <adapter_or_hf_uri> [--json]");
+                eprintln!("Usage: loraspectra doctor <adapter_or_hf_uri> [--html <report.html>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
-            let use_json = args.iter().skip(3).any(|a| a == "--json");
+            let mut use_json = false;
+            let mut html_out: Option<String> = None;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--json" => use_json = true,
+                    "--html" => {
+                        i += 1;
+                        if i < args.len() {
+                            html_out = Some(args[i].clone());
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
             let (tensors, layers, _, _, peft_cfg) = load_full_adapter_bundle_or_exit(input_uri, None);
             let rep = run_doctor(input_uri, &layers, &tensors, peft_cfg.as_ref());
+            if let Some(ref hpath) = html_out {
+                if let Err(e) = std::fs::write(hpath, render_doctor_html(&rep)) {
+                    eprintln!("Failed to write HTML doctor report {}: {}", hpath, e);
+                    process::exit(1);
+                }
+            }
             if use_json {
                 println!("{}", render_doctor_json(&rep));
             } else {

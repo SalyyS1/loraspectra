@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use crate::adalora::{optimize_rank_schedule, render_rank_schedule_json};
 use crate::audit::{audit_adapter, audit_adapter_integrity, render_audit_json};
 use crate::batch::{discover_checkpoints, render_batch_json, run_batch_audit};
+use crate::diff::{diff_adapters_with_dora, render_diff_json};
 use crate::doctor::{render_doctor_json, run_doctor};
 use crate::loraplus::{analyze_loraplus, render_loraplus_json};
 use crate::remote::resolve_source_path;
@@ -320,6 +321,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_batch_audit","description":"Recursively scan directories or checkpoint files and rank all LoRA adapters on a 0-100 Spectral Health Leaderboard.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"}},"required":["paths"],"additionalProperties":false}},
 {"name":"loraspectra_sensitivity","description":"Audit layer-wise spectral sensitivity across Attention vs MLP and Early/Mid/Deep transformer blocks for brittle rank-1 dominance (LS051) and energy spikes (LS052).","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_doctor","description":"Run an all-in-one executive adapter health diagnosis combining SVD utilization, integrity, LoRA+ imbalance, sensitivity/forgetting risk, and AdaLoRA budget into an A-F grade.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_diff","description":"Compute exact O(r^2*(d_in+d_out)) Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -491,6 +493,26 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 Ok(render_doctor_json(&rep))
             })
         }
+        "loraspectra_diff" => {
+            let src_a = args.get("source_a").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_a' string".to_string());
+            let src_b = args.get("source_b").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_b' string".to_string());
+            src_a.and_then(|a| {
+                src_b.and_then(|b| {
+                    let pa = resolve_source_path(a)?;
+                    let pb = resolve_source_path(b)?;
+                    let ta = read_safetensors(&pa)?;
+                    let tb = read_safetensors(&pb)?;
+                    let la = extract_lora_layers(&ta)?;
+                    let lb = extract_lora_layers(&tb)?;
+                    let aa = extract_lora_alphas(&ta);
+                    let ab = extract_lora_alphas(&tb);
+                    let da = extract_dora_scales(&ta);
+                    let db = extract_dora_scales(&tb);
+                    let summary = diff_adapters_with_dora(&la, &aa, &da, &lb, &ab, &db);
+                    Ok(render_diff_json(&summary))
+                })
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -565,6 +587,8 @@ mod tests {
         assert!(tools.contains("loraspectra_loraplus"));
         assert!(tools.contains("loraspectra_rank_schedule"));
         assert!(tools.contains("loraspectra_batch_audit"));
+        assert!(tools.contains("loraspectra_doctor"));
+        assert!(tools.contains("loraspectra_diff"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

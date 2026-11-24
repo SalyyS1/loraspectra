@@ -163,6 +163,106 @@ pub fn render_doctor_markdown(r: &DoctorReport) -> String {
     out
 }
 
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+pub fn render_doctor_html(r: &DoctorReport) -> String {
+    let grade_color = match r.grade {
+        "A" | "B" => "#3fb950",
+        "C" => "#58a6ff",
+        _ => "#f85149",
+    };
+    let recs_html: String = r
+        .recommendations
+        .iter()
+        .map(|rec| format!("<li>{}</li>", html_esc(rec)))
+        .collect::<Vec<_>>()
+        .join("\n        ");
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LoRASpectra Doctor Report — {src}</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    body {{ margin:0; background:#0b0f17; color:#e6edf3; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; line-height:1.55; }}
+    .wrap {{ max-width:940px; margin:0 auto; padding:28px 20px 56px; }}
+    .hero {{ background:#161b22; border:1px solid #30363d; border-radius:12px; padding:20px 22px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px; }}
+    .hero h1 {{ margin:0 0 4px; font-size:1.45rem; }}
+    .muted {{ color:#8b949e; font-size:0.88rem; }}
+    .grade {{ font-size:1.4rem; font-weight:800; padding:8px 18px; border-radius:999px; border:1px solid {gcol}; color:{gcol}; }}
+    .kpis {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:12px; margin:18px 0 22px; }}
+    .kpi {{ background:#161b22; border:1px solid #30363d; border-radius:10px; padding:14px; }}
+    .kpi span {{ display:block; color:#8b949e; font-size:0.78rem; text-transform:uppercase; }}
+    .kpi strong {{ font-size:1.25rem; color:#58a6ff; }}
+    .card {{ background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 20px; margin-bottom:16px; }}
+    ul {{ margin:8px 0 0 18px; padding:0; }}
+    li {{ margin-bottom:6px; }}
+    footer {{ text-align:center; color:#8b949e; font-size:0.8rem; margin-top:24px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div>
+        <h1>LoRASpectra Executive Doctor Report</h1>
+        <div class="muted"><code>{src}</code> · {fmt} · {arch} · {layers} layers (r={minr}..{maxr}, {bytes} bytes)</div>
+      </div>
+      <div class="grade">Grade {grade} ({score:.1}/100)</div>
+    </header>
+    <section class="kpis">
+      <div class="kpi"><span>Mean Utilization</span><strong>{util:.1}%</strong></div>
+      <div class="kpi"><span>LoRA+ Imbalance</span><strong>{imb:.2}x</strong></div>
+      <div class="kpi"><span>Forgetting Risk</span><strong>{risk}</strong></div>
+      <div class="kpi"><span>AdaLoRA Target Avg r</span><strong>{recr:.1}</strong></div>
+    </section>
+    <section class="card">
+      <h2>Diagnostics Breakdown</h2>
+      <p class="muted">Dead layers: <strong>{dead}</strong> · Collapsed: <strong>{col}</strong> · Over-parameterized: <strong>{over}</strong> · Integrity issues: <strong>{integ}</strong> · LS051 Rank-1 Brittle: <strong>{brittle}</strong> · LS052 Spikes: <strong>{spikes}</strong></p>
+    </section>
+    <section class="card">
+      <h2>Actionable Remediation</h2>
+      <ul>
+        {recs}
+      </ul>
+    </section>
+    <footer>Generated locally by loraspectra v{ver} · Zero Python/PyTorch required.</footer>
+  </div>
+</body>
+</html>
+"#,
+        src = html_esc(&r.source_uri),
+        fmt = html_esc(r.naming_format),
+        arch = html_esc(r.inferred_architecture),
+        layers = r.layer_count,
+        minr = r.min_rank,
+        maxr = r.max_rank,
+        bytes = r.total_bytes,
+        gcol = grade_color,
+        grade = r.grade,
+        score = r.score,
+        util = r.avg_utilization_pct,
+        imb = r.loraplus_mean_imbalance,
+        risk = r.forgetting_risk_level,
+        recr = r.recommended_avg_rank,
+        dead = r.dead_layers,
+        col = r.collapsed_layers,
+        over = r.over_param_layers,
+        integ = r.integrity_issue_count,
+        brittle = r.brittle_rank1_layers,
+        spikes = r.energy_spike_layers,
+        recs = recs_html,
+        ver = env!("CARGO_PKG_VERSION"),
+    )
+}
+
 fn json_esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -249,5 +349,8 @@ mod tests {
         assert!(g_rep.score > d_rep.score);
         assert!(render_doctor_markdown(&g_rep).contains("Grade **"));
         assert!(render_doctor_json(&d_rep).contains("\"dead_layers\": 1"));
+        let html = render_doctor_html(&g_rep);
+        assert!(html.contains("<!doctype html>"));
+        assert!(html.contains("LoRASpectra Executive Doctor Report"));
     }
 }
