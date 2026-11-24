@@ -66,7 +66,7 @@ use loraspectra::sarif::{
     build_sensitivity_sarif, build_ties_dare_sarif,
 };
 use loraspectra::sensitivity::{
-    analyze_sensitivity, render_sensitivity_json, render_sensitivity_table,
+    analyze_sensitivity, render_sensitivity_html, render_sensitivity_json, render_sensitivity_table,
 };
 use loraspectra::ties_dare::{
     compose_adapters_ties_dare, render_ties_dare_json, render_ties_dare_table, DisjointAggregation,
@@ -2864,12 +2864,13 @@ fn main() {
         }
         "sensitivity" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--sarif <output.sarif>] [--json]");
+                eprintln!("Usage: loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--html <sensitivity.html>] [--sarif <output.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut dom_warn: f64 = 85.0;
             let mut spike_mult: f64 = 2.5;
+            let mut html_out: Option<String> = None;
             let mut sarif_out: Option<String> = None;
             let mut use_json = false;
             let mut i = 3;
@@ -2887,6 +2888,12 @@ fn main() {
                             spike_mult = args[i].parse().unwrap_or(2.5);
                         }
                     }
+                    "--html" => {
+                        i += 1;
+                        if i < args.len() {
+                            html_out = Some(args[i].clone());
+                        }
+                    }
                     "--sarif" => {
                         i += 1;
                         if i < args.len() {
@@ -2900,6 +2907,13 @@ fn main() {
             }
             let (_, layers, _, _, _) = load_full_adapter_bundle_or_exit(input_uri, None);
             let rep = analyze_sensitivity(&layers, input_uri, dom_warn, spike_mult);
+            if let Some(ref hpath) = html_out {
+                let html_doc = render_sensitivity_html(&rep);
+                if let Err(e) = std::fs::write(hpath, html_doc) {
+                    eprintln!("Failed to write HTML {}: {}", hpath, e);
+                    process::exit(1);
+                }
+            }
             if let Some(ref spath) = sarif_out {
                 let sarif_doc = build_sensitivity_sarif(&rep, env!("CARGO_PKG_VERSION"));
                 if let Err(e) = std::fs::write(spath, sarif_doc) {

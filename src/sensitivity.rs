@@ -331,6 +331,128 @@ pub fn render_sensitivity_json(s: &SensitivitySummary) -> String {
     )
 }
 
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML Catastrophic-Forgetting & Layer Sensitivity Report.
+pub fn render_sensitivity_html(s: &SensitivitySummary) -> String {
+    let risk_color = match s.forgetting_risk_level {
+        "HIGH" => "#f85149",
+        "MODERATE" => "#d29922",
+        _ => "#3fb950",
+    };
+    let mut rows = String::new();
+    for l in &s.layers {
+        let (badge_txt, badge_cls) = match l.risk_flag {
+            Some("LS051") => ("LS051 BRITTLE", "bad"),
+            Some("LS052") => ("LS052 SPIKE", "warn"),
+            Some(other) => (other, "warn"),
+            None => ("OK", "ok"),
+        };
+        let bar_w = l.energy_share_pct.clamp(0.0, 100.0);
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td><div class=\"bar\"><span style=\"width:{:.1}%\"></span></div> {:.1}%</td><td>{:.1}%</td><td>{:.4}</td><td><span class=\"pill {}\">{}</span></td></tr>\n",
+            html_esc(&l.base_name),
+            html_esc(l.subsystem),
+            html_esc(l.depth_band),
+            l.rank,
+            bar_w,
+            l.energy_share_pct,
+            l.top1_dominance_pct,
+            l.spectral_norm,
+            badge_cls,
+            html_esc(badge_txt),
+        ));
+    }
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>loraspectra Sensitivity &amp; Forgetting Risk Report</title>
+<style>
+:root{{--bg:#0d1117;--card:#161b22;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;--ac:#58a6ff;--ok:#3fb950;--wa:#d29922;--ba:#f85149}}
+body{{margin:0;padding:24px;background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}}
+.wrap{{max-width:1160px;margin:0 auto}}
+.head{{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:20px}}
+.risk{{padding:6px 14px;border-radius:999px;font-weight:700;background:rgba(255,255,255,.06);border:1px solid {risk_color};color:{risk_color}}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}}
+.card{{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}}
+.k{{font-size:12px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em}}
+.v{{font-size:22px;font-weight:700;margin-top:4px}}
+.split{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}}
+.bar{{display:inline-block;width:72px;height:8px;background:#21262d;border-radius:4px;overflow:hidden;vertical-align:middle;margin-right:6px}}
+.bar span{{display:block;height:100%;background:var(--ac)}}
+table{{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--bd);border-radius:10px;overflow:hidden;font-size:13px}}
+th,td{{padding:9px 10px;border-bottom:1px solid #21262d;text-align:left}}
+th{{color:var(--mu);font-weight:600;background:#11161d}}
+.pill{{padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}}
+.pill.ok{{background:rgba(63,185,80,.15);color:var(--ok)}}
+.pill.warn{{background:rgba(210,153,34,.15);color:var(--wa)}}
+.pill.bad{{background:rgba(248,81,73,.15);color:var(--ba)}}
+code{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}}
+@media(max-width:720px){{.split{{grid-template-columns:1fr}}}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1 style="margin:0;font-size:22px">loraspectra Sensitivity &amp; Forgetting Risk Report</h1>
+      <div style="color:var(--mu);font-size:13px;margin-top:4px">Source: <code>{source}</code> &middot; Layers: {layers}</div>
+    </div>
+    <div class="risk">FORGETTING RISK: {risk}</div>
+  </div>
+  <div class="grid">
+    <div class="card"><div class="k">Attention Energy</div><div class="v">{attn:.1}%</div></div>
+    <div class="card"><div class="k">MLP Energy</div><div class="v">{mlp:.1}%</div></div>
+    <div class="card"><div class="k">Mean Top-1 Dominance</div><div class="v">{top1:.1}%</div></div>
+    <div class="card"><div class="k">Brittle Rank-1 (LS051)</div><div class="v">{r1}</div></div>
+    <div class="card"><div class="k">Energy Spikes (LS052)</div><div class="v">{spikes}</div></div>
+    <div class="card"><div class="k">Total Frobenius Energy</div><div class="v">{energy:.3}</div></div>
+  </div>
+  <div class="split">
+    <div class="card">
+      <div class="k">Subsystem Share</div>
+      <div style="margin-top:8px">Attention: <strong>{attn:.1}%</strong> &middot; MLP: <strong>{mlp:.1}%</strong> &middot; Other: <strong>{other:.1}%</strong></div>
+    </div>
+    <div class="card">
+      <div class="k">Depth Distribution</div>
+      <div style="margin-top:8px">Early: <strong>{early:.1}%</strong> &middot; Mid: <strong>{mid:.1}%</strong> &middot; Deep: <strong>{deep:.1}%</strong></div>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th>Layer</th><th>Subsystem</th><th>Depth</th><th>Rank</th><th>Energy Share</th><th>Top-1%</th><th>Spectral Norm</th><th>Rule</th></tr></thead>
+    <tbody>
+{rows}    </tbody>
+  </table>
+</div>
+</body>
+</html>
+"##,
+        risk_color = risk_color,
+        source = html_esc(&s.source_uri),
+        layers = s.layer_count,
+        risk = html_esc(s.forgetting_risk_level),
+        attn = s.attention_energy_pct,
+        mlp = s.mlp_energy_pct,
+        other = s.other_energy_pct,
+        early = s.early_depth_pct,
+        mid = s.mid_depth_pct,
+        deep = s.deep_depth_pct,
+        top1 = s.mean_top1_dominance_pct,
+        r1 = s.brittle_rank1_layers,
+        spikes = s.energy_spike_layers,
+        energy = s.total_frobenius_energy,
+        rows = rows,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,7 +495,12 @@ mod tests {
         assert!(rep.energy_spike_layers >= 1);
         assert!(rep.mlp_energy_pct > 90.0);
         assert!(render_sensitivity_json(&rep).contains("\"forgetting_risk_level\": \"HIGH\""));
-        let sarif = crate::sarif::build_sensitivity_sarif(&rep, "1.14.0");
+        let html = render_sensitivity_html(&rep);
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("FORGETTING RISK: HIGH"));
+        assert!(html.contains("LS051 BRITTLE"));
+        assert!(html.contains("model.layers.31.mlp.down_proj"));
+        let sarif = crate::sarif::build_sensitivity_sarif(&rep, "1.36.0");
         assert!(sarif.contains("\"ruleId\": \"LS051\""));
         assert!(sarif.contains("\"version\": \"2.1.0\""));
     }
