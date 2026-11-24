@@ -340,6 +340,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_sensitivity_html","description":"Audit layer-wise catastrophic forgetting sensitivity (LS051-LS052) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_loraplus_html","description":"Audit LoRA+ B/A factor imbalance (LS047-LS048) and render a self-contained dark-mode HTML Balance & Lambda* Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"imbalance_warn":{"type":"number"},"cond_warn":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_rank_schedule_html","description":"Compute AdaLoRA water-filling heterogeneous rank allocation (LS049-LS050) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_avg_rank":{"type":"number"},"min_rank":{"type":"integer"},"max_rank":{"type":"integer"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_quant_plan_html","description":"Generate a quantization-aware mixed-precision LoRA rank compression plan (nf4/fp4/int8/fp8/bf16/fp16) and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -748,6 +749,25 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_quant_plan_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let q = args.get("target_quant").and_then(|v| v.as_str()).unwrap_or("nf4");
+                let energy = args.get("target_energy").and_then(|v| v.as_f64()).unwrap_or(0.99);
+                let rep = build_quant_plan(s, &layers, q, energy);
+                let html = crate::quant_plan::render_quant_plan_html(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","target_quant":"{}","html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    json_escape(q),
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -837,6 +857,7 @@ mod tests {
         assert!(tools.contains("loraspectra_sensitivity_html"));
         assert!(tools.contains("loraspectra_loraplus_html"));
         assert!(tools.contains("loraspectra_rank_schedule_html"));
+        assert!(tools.contains("loraspectra_quant_plan_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
