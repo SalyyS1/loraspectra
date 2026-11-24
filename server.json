@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
   "name": "io.github.SalyyS1/loraspectra",
-  "description": "Zero-dependency Rust Spectral SVD auditor, Executive Doctor (A-F + HTML/SARIF CI gate + shields_badge), 5-Runtime Serving Compat Matrix (--html), Mixed-Precision Quantization Planner (--html), Training Trajectory SVG analyzer, Sensitivity/Forgetting Risk auditor (LS051-LS052 + --html), LoRA+ (--html)/AdaLoRA (--html)/Knots/TSV, Batch Leaderboard + SARIF, and 18-tool stdio MCP server (52 SARIF rules) for .safetensors LoRA adapters.",
-  "version": "1.40.0",
+  "description": "Zero-dependency Rust Spectral SVD auditor, Executive Doctor (A-F + HTML/SARIF CI gate + shields_badge), 5-Runtime Serving Compat Matrix (--html), Mixed-Precision Quantization Planner (--html), Training Trajectory SVG analyzer, Sensitivity/Forgetting Risk auditor (LS051-LS052 + --html), LoRA+ (--html)/AdaLoRA (--html)/Knots/TSV, Batch Leaderboard + SARIF, and 19-tool stdio MCP server (52 SARIF rules) for .safetensors LoRA adapters.",
+  "version": "1.41.0",
   "repository": {
     "url": "https://github.com/SalyyS1/loraspectra",
     "source": "github"

@@ -336,6 +336,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_batch_sarif","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and emit an OASIS SARIF v2.1.0 Code Scanning report flagging low-health adapters below min_score.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"},"min_score":{"type":"number"}},"required":["paths"],"additionalProperties":false}},
 {"name":"loraspectra_sensitivity_sarif","description":"Audit layer-wise catastrophic forgetting sensitivity and export OASIS SARIF v2.1.0 findings (LS051 brittle rank-1 dominance, LS052 energy spikes) for GitHub Code Scanning.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_doctor_sarif","description":"Run Executive Adapter Doctor (A-F) and emit OASIS SARIF v2.1.0 Code Scanning JSON for GitHub CI gates.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_compat_html","description":"Evaluate 5-runtime LoRA serving compatibility (vLLM, SGLang, PEFT, llama.cpp, ComfyUI) and render a self-contained dark-mode HTML Scorecard.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -670,6 +671,21 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 Ok(crate::doctor::render_doctor_sarif(&rep))
             })
         }
+        "loraspectra_compat_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let rep = check_serving_compatibility(s, &tensors)?;
+                let html = crate::compat::render_compat_html(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -755,6 +771,7 @@ mod tests {
         assert!(tools.contains("loraspectra_batch_sarif"));
         assert!(tools.contains("loraspectra_sensitivity_sarif"));
         assert!(tools.contains("loraspectra_doctor_sarif"));
+        assert!(tools.contains("loraspectra_compat_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
