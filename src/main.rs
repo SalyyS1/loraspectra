@@ -31,6 +31,7 @@ use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, r
 use loraspectra::loraplus::{
     analyze_loraplus, rebalance_adapter_factors, render_loraplus_json, render_loraplus_table,
 };
+use loraspectra::mcp;
 use loraspectra::knots::{
     compose_adapters_knots, render_knots_json, render_knots_table, KnotsConfig, KnotsMode,
     KnotsSeverity,
@@ -68,7 +69,7 @@ use loraspectra::vera::{audit_vera_adapter, render_vera_json, render_vera_table}
 
 fn print_usage() {
     eprintln!(
-        "loraspectra v1.10.0 - Spectral SVD Auditor, Batch Leaderboard, LoRA+ Factor Balancer, AdaLoRA Rank Scheduler, Knots/TSV Aligner, LoRA-GA & TIES/DARE Merger (.safetensors)
+        "loraspectra v1.11.0 - Spectral SVD Auditor, 6-Tool Stdio MCP Server, Batch Leaderboard, LoRA+ Factor Balancer, AdaLoRA Rank Scheduler, Knots/TSV Aligner, LoRA-GA & TIES/DARE Merger (.safetensors)
 
 SOURCES:
   All input checkpoints accept local paths, HuggingFace Hub URIs (hf://<org>/<repo> or hf://<org>/<repo>/<file.safetensors>),
@@ -94,7 +95,8 @@ USAGE:
   loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]
   loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--sarif <output.sarif>] [--json]
   loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--sarif <output.sarif>] [--json]
-  loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]"
+  loraspectra batch-audit <dir_or_file...> [--max-depth 6] [--fail-below-score 60] [--max-dead-layers 0] [--markdown] [--json]
+  loraspectra mcp                                          # run built-in zero-dependency JSON-RPC 2.0 stdio MCP server"
     );
 }
 
@@ -2817,6 +2819,12 @@ fn main() {
             }
             if gate_failed {
                 process::exit(2);
+            }
+        }
+        "mcp" => {
+            if let Err(e) = mcp::serve_stdio() {
+                eprintln!("loraspectra mcp server error: {}", e);
+                process::exit(1);
             }
         }
         _ => {

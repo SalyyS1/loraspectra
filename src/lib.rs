@@ -9,6 +9,7 @@ pub mod knots;
 pub mod linalg;
 pub mod lora_ga;
 pub mod loraplus;
+pub mod mcp;
 pub mod merge;
 pub mod merge_check;
 pub mod ortho_proj;
