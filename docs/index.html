@@ -411,26 +411,67 @@
   <div class="container">
     <div class="badge-row">
       <span class="badge badge-green">100% Local Browser SVD (0 Uploads)</span>
-      <span class="badge">Pure Rust CLI (0 Dependencies)</span>
+      <span class="badge">Pure Rust CLI + 6-Tool Stdio MCP Server</span>
       <span class="badge">1,050x&ndash;2,680x Faster QR-Core SVD</span>
-      <span class="badge">hf://org/repo Remote Inspection</span>
+      <span class="badge">50 OASIS SARIF Rules (LS001&ndash;LS050)</span>
       <span class="badge">PEFT &bull; Kohya &bull; ComfyUI &bull; FLUX &bull; Diffusers</span>
     </div>
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.8.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.11.0</span></h1>
         <p class="lead">
-          Spectral SVD Auditor, LoRA-GA Gradient-Aligned Initializer, Cross-Checkpoint Orthogonal Subspace Projector (O-LoRA / InfLoRA), TIES/DARE Sign-Conflict Merger, NF4/FP8 Quantization Validator, and Zero-Copy <code>.safetensors</code> Header Inspector
-          - powered by exact QR-Core SVD
-          (<code>O(r&sup2;d + r&sup3;)</code>) in your browser or native Rust CLI without PyTorch or GPU VRAM.
+          Spectral SVD Auditor, <strong>6-Tool Stdio MCP Server (<code>loraspectra mcp</code>)</strong>, Multi-Checkpoint Batch Leaderboard (<code>batch-audit</code>), LoRA+ Variational Factor Balancer, AdaLoRA Water-Filling Rank Scheduler, Knots/TSV Aligner, LoRA-GA Initializer, O-LoRA Projector, and TIES/DARE Merger
+          &mdash; powered by exact QR-Core SVD (<code>O(r&sup2;d + r&sup3;)</code>) with zero dependencies.
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/SalyyS1/loraspectra">View on GitHub &rarr;</a>
           <a class="btn" href="https://github.com/SalyyS1/loraspectra/releases">Prebuilt Binaries &amp; Releases &rarr;</a>
-          <a class="btn" href="https://github.com/SalyyS1/mcp-slim">Companion: mcp-slim &rarr;</a>
+          <a class="btn" href="#v111-lab">LoRA+ / AdaLoRA / MCP Lab &darr;</a>
         </div>
       </div>
+    </div>
+
+    <div class="card" id="v111-lab" style="margin-bottom:20px">
+      <div class="card-header">
+        <h2 class="card-title">v1.9&ndash;v1.11 Interactive Lab: LoRA+ Variational Imbalance, AdaLoRA Budget &amp; Stdio MCP</h2>
+        <span class="privacy-tag">LS047&ndash;LS050 &middot; 6 MCP Tools</span>
+      </div>
+      <div class="slider-panel" style="margin-bottom:14px">
+        <div class="slider-left">
+          <div class="slider-title">Factor Norm Ratio ||B||<sub>F</sub> / ||A||<sub>F</sub> (LoRA+ Gauge Asymmetry)</div>
+          <div class="slider-desc">By the nuclear-norm variational theorem, 0.5(&#8214;B&#8214;<sub>F</sub>&sup2; + &#8214;A&#8214;<sub>F</sub>&sup2;)/&#8214;&Delta;W&#8214;<sub>*</sub> &ge; 1.0, attaining 1.0 iff &#8214;B&#8214;<sub>F</sub> = &#8214;A&#8214;<sub>F</sub>.</div>
+        </div>
+        <div class="slider-controls">
+          <input type="range" id="lp-ratio-slider" min="0.1" max="6.0" step="0.1" value="3.2">
+          <span class="energy-readout" id="lp-ratio-val">3.2x</span>
+        </div>
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-label">Variational Imbalance I</div>
+          <div class="kpi-value accent" id="lp-imb-val">1.76x</div>
+          <div class="kpi-sub" id="lp-imb-verdict">LS047 Warning (&gt;1.5x)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Quantization Energy Waste</div>
+          <div class="kpi-value" id="lp-waste-val">43.1%</div>
+          <div class="kpi-sub">Eliminated at 0 drift via --rebalance</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Recommended LoRA+ &lambda;*</div>
+          <div class="kpi-value green" id="lp-lambda-val">16.0x</div>
+          <div class="kpi-sub">eta_B / eta_A per Hayou et al.</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Stdio MCP Server</div>
+          <div class="kpi-value purple">loraspectra mcp</div>
+          <div class="kpi-sub">info · audit · loraplus · rank-schedule · batch</div>
+        </div>
+      </div>
+      <pre style="margin:0;padding:12px;background:#090d16;border:1px solid var(--border);border-radius:6px;overflow-x:auto;font-family:var(--mono);font-size:12px;color:#d9e5ff" id="lp-cli-out">loraspectra loraplus adapter.safetensors --rebalance balanced.safetensors --sarif lp.sarif
+loraspectra batch-audit ./checkpoints --fail-below-score 75 --markdown
+# MCP config: { "mcpServers": { "loraspectra": { "command": "loraspectra", "args": ["mcp"] } } }</pre>
     </div>
 
     <!-- Interactive Browser Inspector -->
@@ -3146,6 +3187,25 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
       }
     });
     runV180KnotsLab();
+
+    function updateLoraPlusLab() {
+      const slider = document.getElementById("lp-ratio-slider");
+      if (!slider) return;
+      const ratio = Math.max(0.05, parseFloat(slider.value) || 1.0);
+      const imb = 0.5 * (ratio + 1.0 / ratio);
+      const wastePct = ((imb - 1.0) / imb) * 100.0;
+      const lambdaStar = Math.min(32, Math.max(2, Math.round(16 / Math.sqrt(ratio))));
+      document.getElementById("lp-ratio-val").textContent = ratio.toFixed(1) + "x";
+      document.getElementById("lp-imb-val").textContent = imb.toFixed(2) + "x";
+      document.getElementById("lp-imb-verdict").textContent = imb >= 1.5 ? "LS047 Warning (>= 1.5x)" : "Balanced (< 1.5x)";
+      document.getElementById("lp-waste-val").textContent = wastePct.toFixed(1) + "%";
+      document.getElementById("lp-lambda-val").textContent = lambdaStar.toFixed(1) + "x";
+    }
+    const lpSlider = document.getElementById("lp-ratio-slider");
+    if (lpSlider) {
+      lpSlider.addEventListener("input", updateLoraPlusLab);
+      updateLoraPlusLab();
+    }
   })();
   </script>
 </body>
