@@ -456,6 +456,24 @@ code{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size
     )
 }
 
+/// Renders a shields.io Endpoint Badge JSON summarizing LoRA+ B/A factor balance and lambda*.
+pub fn render_loraplus_badge_json(summary: &LoraPlusSummary) -> String {
+    let color = if summary.imbalanced_layers == 0 && summary.ill_conditioned_layers == 0 {
+        "brightgreen"
+    } else if summary.mean_imbalance_index <= 2.5 {
+        "yellow"
+    } else {
+        "red"
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra loraplus","message":"I={:.2} (attn {:.1}x / mlp {:.1}x)","color":"{}"}}"#,
+        summary.mean_imbalance_index,
+        summary.recommended_attn_lambda,
+        summary.recommended_mlp_lambda,
+        color
+    )
+}
+
 #[cfg(test)]
 mod html_tests {
     use super::*;
@@ -475,5 +493,8 @@ mod html_tests {
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("model.layers.0.self_attn.q_proj"));
         assert!(html.contains("Rec. Attn"));
+        let badge = render_loraplus_badge_json(&summary);
+        assert!(badge.contains("\"schemaVersion\":1"));
+        assert!(badge.contains("loraspectra loraplus"));
     }
 }

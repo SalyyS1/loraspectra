@@ -34,7 +34,8 @@ use loraspectra::adalora::{
 };
 use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
 use loraspectra::loraplus::{
-    analyze_loraplus, rebalance_adapter_factors, render_loraplus_html, render_loraplus_json,
+    analyze_loraplus, rebalance_adapter_factors, render_loraplus_badge_json, render_loraplus_html,
+    render_loraplus_json,
     render_loraplus_table,
 };
 use loraspectra::mcp;
@@ -68,7 +69,8 @@ use loraspectra::sarif::{
     build_sensitivity_sarif, build_ties_dare_sarif,
 };
 use loraspectra::sensitivity::{
-    analyze_sensitivity, render_sensitivity_html, render_sensitivity_json, render_sensitivity_table,
+    analyze_sensitivity, render_sensitivity_badge_json, render_sensitivity_html,
+    render_sensitivity_json, render_sensitivity_table,
 };
 use loraspectra::ties_dare::{
     compose_adapters_ties_dare, render_ties_dare_json, render_ties_dare_table, DisjointAggregation,
@@ -2707,12 +2709,13 @@ fn main() {
         }
         "loraplus" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--html <loraplus.html>] [--sarif <out.sarif>] [--json]");
+                eprintln!("Usage: loraspectra loraplus <adapter_or_hf_uri> [--rebalance <out.safetensors>] [--imbalance-warn 1.5] [--cond-warn 50.0] [--html <loraplus.html>] [--badge-json <loraplus-badge.json>] [--sarif <out.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut rebalance_out: Option<String> = None;
             let mut html_path: Option<String> = None;
+            let mut badge_path: Option<String> = None;
             let mut sarif_path: Option<String> = None;
             let mut imbalance_warn: f64 = 1.5;
             let mut cond_warn: f64 = 50.0;
@@ -2730,6 +2733,12 @@ fn main() {
                         i += 1;
                         if i < args.len() {
                             html_path = Some(args[i].clone());
+                        }
+                    }
+                    "--badge-json" => {
+                        i += 1;
+                        if i < args.len() {
+                            badge_path = Some(args[i].clone());
                         }
                     }
                     "--sarif" => {
@@ -2769,6 +2778,13 @@ fn main() {
                 let html_str = render_loraplus_html(&summary);
                 if let Err(e) = std::fs::write(hp, html_str) {
                     eprintln!("Error writing HTML report {}: {}", hp, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(ref bp) = badge_path {
+                let badge_str = render_loraplus_badge_json(&summary);
+                if let Err(e) = std::fs::write(bp, badge_str) {
+                    eprintln!("Error writing badge JSON {}: {}", bp, e);
                     process::exit(1);
                 }
             }
@@ -2968,13 +2984,14 @@ fn main() {
         }
         "sensitivity" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--html <sensitivity.html>] [--sarif <output.sarif>] [--json]");
+                eprintln!("Usage: loraspectra sensitivity <adapter_or_hf_uri> [--dominance-warn 85.0] [--spike-mult 2.5] [--html <sensitivity.html>] [--badge-json <sensitivity-badge.json>] [--sarif <output.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut dom_warn: f64 = 85.0;
             let mut spike_mult: f64 = 2.5;
             let mut html_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut sarif_out: Option<String> = None;
             let mut use_json = false;
             let mut i = 3;
@@ -2998,6 +3015,12 @@ fn main() {
                             html_out = Some(args[i].clone());
                         }
                     }
+                    "--badge-json" => {
+                        i += 1;
+                        if i < args.len() {
+                            badge_out = Some(args[i].clone());
+                        }
+                    }
                     "--sarif" => {
                         i += 1;
                         if i < args.len() {
@@ -3015,6 +3038,13 @@ fn main() {
                 let html_doc = render_sensitivity_html(&rep);
                 if let Err(e) = std::fs::write(hpath, html_doc) {
                     eprintln!("Failed to write HTML {}: {}", hpath, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(ref bpath) = badge_out {
+                let badge_doc = render_sensitivity_badge_json(&rep);
+                if let Err(e) = std::fs::write(bpath, badge_doc) {
+                    eprintln!("Failed to write badge JSON {}: {}", bpath, e);
                     process::exit(1);
                 }
             }

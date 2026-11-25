@@ -349,6 +349,8 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_batch_badge","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and emit a shields.io Endpoint Badge JSON summarizing mean health score and audited adapter count.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"}},"required":["paths"],"additionalProperties":false}},
 {"name":"loraspectra_subspace_drift_html","description":"Compute principal-angle subspace drift (LS027-LS028) between two .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_compat_badge","description":"Evaluate 5-runtime LoRA serving compatibility (vLLM, SGLang, PEFT, llama.cpp, ComfyUI) and emit a shields.io Endpoint Badge JSON readiness payload.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_loraplus_badge","description":"Audit LoRA+ B/A factor imbalance (LS047-LS048) and emit a shields.io Endpoint Badge JSON summarizing mean imbalance index and recommended lambda*.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"imbalance_warn":{"type":"number"},"cond_warn":{"type":"number"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_sensitivity_badge","description":"Audit layer-wise catastrophic forgetting sensitivity (LS051-LS052) and emit a shields.io Endpoint Badge JSON summarizing forgetting risk level.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -752,6 +754,42 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_loraplus_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let imb = args.get("imbalance_warn").and_then(|v| v.as_f64()).unwrap_or(1.5);
+                let cond = args.get("cond_warn").and_then(|v| v.as_f64()).unwrap_or(50.0);
+                let summary = analyze_loraplus(&layers, s, imb, cond);
+                let badge = crate::loraplus::render_loraplus_badge_json(&summary);
+                Ok(format!(
+                    r#"{{"source":"{}","mean_imbalance_index":{:.4},"badge":{}}}"#,
+                    json_escape(s),
+                    summary.mean_imbalance_index,
+                    badge
+                ))
+            })
+        }
+        "loraspectra_sensitivity_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let dom = args.get("dominance_warn_pct").and_then(|v| v.as_f64()).unwrap_or(85.0);
+                let spike = args.get("spike_multiplier").and_then(|v| v.as_f64()).unwrap_or(2.5);
+                let rep = analyze_sensitivity(&layers, s, dom, spike);
+                let badge = crate::sensitivity::render_sensitivity_badge_json(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","forgetting_risk_level":"{}","badge":{}}}"#,
+                    json_escape(s),
+                    rep.forgetting_risk_level,
+                    badge
+                ))
+            })
+        }
         "loraspectra_rank_schedule_html" => {
             let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
             src.and_then(|s| {
@@ -1055,6 +1093,8 @@ mod tests {
         assert!(tools.contains("loraspectra_batch_badge"));
         assert!(tools.contains("loraspectra_subspace_drift_html"));
         assert!(tools.contains("loraspectra_compat_badge"));
+        assert!(tools.contains("loraspectra_loraplus_badge"));
+        assert!(tools.contains("loraspectra_sensitivity_badge"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

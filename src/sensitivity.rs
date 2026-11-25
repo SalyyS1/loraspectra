@@ -453,6 +453,19 @@ code{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size
     )
 }
 
+/// Renders a shields.io Endpoint Badge JSON summarizing catastrophic forgetting risk (LS051-LS052).
+pub fn render_sensitivity_badge_json(s: &SensitivitySummary) -> String {
+    let color = match s.forgetting_risk_level {
+        "LOW" => "brightgreen",
+        "MODERATE" => "yellow",
+        _ => "red",
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra sensitivity","message":"{} risk (LS051:{}, LS052:{})","color":"{}"}}"#,
+        s.forgetting_risk_level, s.brittle_rank1_layers, s.energy_spike_layers, color
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +516,8 @@ mod tests {
         let sarif = crate::sarif::build_sensitivity_sarif(&rep, "1.36.0");
         assert!(sarif.contains("\"ruleId\": \"LS051\""));
         assert!(sarif.contains("\"version\": \"2.1.0\""));
+        let badge = render_sensitivity_badge_json(&rep);
+        assert!(badge.contains("\"schemaVersion\":1"));
+        assert!(badge.contains("HIGH risk"));
     }
 }
