@@ -2017,12 +2017,13 @@ fn main() {
         "subspace-drift" => {
             // Subspace drift analysis between two LoRA checkpoints
             if args.len() < 4 {
-                eprintln!("Usage: loraspectra subspace-drift <adapter_a> <adapter_b> [--config-a <cfg.json>] [--config-b <cfg.json>] [--json]");
+                eprintln!("Usage: loraspectra subspace-drift <adapter_a> <adapter_b> [--config-a <cfg.json>] [--config-b <cfg.json>] [--html <drift.html>] [--json]");
                 process::exit(1);
             }
             let path_a = resolve_input_or_exit(&args[2]);
             let path_b = resolve_input_or_exit(&args[3]);
             let use_json = args.iter().any(|a| a == "--json");
+            let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].clone());
 
             let config_a_path = args.windows(2).find(|w| w[0] == "--config-a").map(|w| w[1].clone())
                 .or_else(|| resolve_companion_config_path(&args[2], &path_a).map(|p| p.to_string_lossy().to_string()));
@@ -2074,6 +2075,13 @@ fn main() {
             if summary.total_shared_layers == 0 {
                 eprintln!("No shared LoRA layers found between the two adapters.");
                 process::exit(1);
+            }
+            if let Some(hp) = html_out {
+                let html = loraspectra::diff::render_subspace_drift_html(&summary);
+                if let Err(e) = std::fs::write(&hp, html) {
+                    eprintln!("Error writing HTML drift report to {}: {}", hp, e);
+                    process::exit(1);
+                }
             }
 
             if use_json {

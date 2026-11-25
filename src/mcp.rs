@@ -347,6 +347,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_fp8_validate_html","description":"Validate FP8 E4M3/E5M2 scale factor tensors (LS031-LS034) in a .safetensors checkpoint and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"format":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_vera_html","description":"Audit VeRA adapter scalar gating vectors (lambda_b/lambda_d, LS025-LS026) and render a self-contained dark-mode HTML Spectral & Gating Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_batch_badge","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and emit a shields.io Endpoint Badge JSON summarizing mean health score and audited adapter count.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"}},"required":["paths"],"additionalProperties":false}},
+{"name":"loraspectra_subspace_drift_html","description":"Compute principal-angle subspace drift (LS027-LS028) between two .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -912,6 +913,33 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_subspace_drift_html" => {
+            let sa = args.get("source_a").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_a' string".to_string());
+            let sb = args.get("source_b").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_b' string".to_string());
+            sa.and_then(|a| {
+                sb.and_then(|b| {
+                    let pa = resolve_source_path(a)?;
+                    let pb = resolve_source_path(b)?;
+                    let ta = read_safetensors(&pa)?;
+                    let tb = read_safetensors(&pb)?;
+                    let la = extract_lora_layers(&ta)?;
+                    let lb = extract_lora_layers(&tb)?;
+                    let aa = extract_lora_alphas(&ta);
+                    let ab = extract_lora_alphas(&tb);
+                    let summary = crate::diff::analyze_subspace_drift(&la, &aa, &lb, &ab);
+                    let html = crate::diff::render_subspace_drift_html(&summary);
+                    Ok(format!(
+                        r#"{{"total_shared_layers":{},"healthy_layers":{},"catastrophic_drift_layers":{},"mean_angle_deg":{:.4},"html_bytes":{},"html":"{}"}}"#,
+                        summary.total_shared_layers,
+                        summary.healthy_layers,
+                        summary.catastrophic_drift_layers,
+                        summary.mean_angle_deg,
+                        html.len(),
+                        json_escape(&html)
+                    ))
+                })
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -1008,6 +1036,7 @@ mod tests {
         assert!(tools.contains("loraspectra_fp8_validate_html"));
         assert!(tools.contains("loraspectra_vera_html"));
         assert!(tools.contains("loraspectra_batch_badge"));
+        assert!(tools.contains("loraspectra_subspace_drift_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

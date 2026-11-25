@@ -1169,3 +1169,52 @@ pub fn render_subspace_drift_table(summary: &AdapterSubspaceDriftSummary) -> Str
     }
     out
 }
+
+/// Render a self-contained dark-mode HTML Subspace Drift Report between two LoRA checkpoints.
+pub fn render_subspace_drift_html(summary: &AdapterSubspaceDriftSummary) -> String {
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let mut rows = String::new();
+    for layer in &summary.layers {
+        let cls = layer.classification.as_str();
+        let color = if cls == "HEALTHY" {
+            "#3fb950"
+        } else if cls == "STAGNANT" {
+            "#d29922"
+        } else {
+            "#f85149"
+        };
+        let issues = if layer.issues.is_empty() {
+            "—".to_string()
+        } else {
+            layer.issues.join(", ")
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{} &rarr; {}</td><td>{:.2}&deg;</td><td>{:.2}&deg;</td><td>{:.4}</td><td style=\"color:{};font-weight:700\">{}</td><td>{}</td></tr>\n",
+            esc(&layer.base_name),
+            layer.rank_a,
+            layer.rank_b,
+            layer.mean_angle_input_deg,
+            layer.mean_angle_output_deg,
+            layer.relative_frob_drift,
+            color,
+            esc(cls),
+            esc(&issues),
+        ));
+    }
+    format!(
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>loraspectra v{} Subspace Drift Report</title><style>body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}}.wrap{{max-width:1120px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}table{{width:100%;border-collapse:collapse;font-size:12.5px}}th,td{{padding:8px 10px;border-bottom:1px solid #21262d;text-align:left}}th{{color:#8b949e}}code{{font-family:ui-monospace,monospace;color:#58a6ff}}</style></head><body><div class="wrap"><div class="card"><h1>loraspectra Subspace Drift Report (LS027–LS028)</h1><p>Shared Layers: <b>{}</b> &middot; Healthy: <b>{}</b> &middot; Stagnant: <b>{}</b> &middot; Catastrophic: <b>{}</b> &middot; Mean Angle: <b>{:.2}&deg;</b> &middot; Max Angle: <b>{:.2}&deg;</b></p></div><div class="card"><table><thead><tr><th>Layer</th><th>Rank A&rarr;B</th><th>Input Angle</th><th>Output Angle</th><th>Rel Frob</th><th>Class</th><th>Rules</th></tr></thead><tbody>{}</tbody></table></div></div></body></html>"##,
+        env!("CARGO_PKG_VERSION"),
+        summary.total_shared_layers,
+        summary.healthy_layers,
+        summary.stagnant_layers,
+        summary.catastrophic_drift_layers,
+        summary.mean_angle_deg,
+        summary.max_angle_deg,
+        rows
+    )
+}
