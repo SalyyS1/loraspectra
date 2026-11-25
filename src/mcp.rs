@@ -355,6 +355,10 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_rank_schedule_badge","description":"Compute AdaLoRA water-filling heterogeneous rank allocation (LS049-LS050) and emit a shields.io Endpoint Badge JSON summarizing rank reallocation and bottlenecks.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_avg_rank":{"type":"number"},"min_rank":{"type":"integer"},"max_rank":{"type":"integer"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_fp8_validate_badge","description":"Validate FP8 E4M3/E5M2 scale factor tensors (LS031-LS034) and emit a shields.io Endpoint Badge JSON pass/fail summary.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"format":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_vera_badge","description":"Audit VeRA adapter scalar gating vectors (LS025-LS026) and emit a shields.io Endpoint Badge JSON health summary.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_diff_badge","description":"Compute Frobenius drift and Grassmannian subspace overlap between two LoRA checkpoints and emit a shields.io Endpoint Badge JSON summary.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
+{"name":"loraspectra_subspace_drift_badge","description":"Compute principal-angle subspace drift (LS027-LS028) between two LoRA checkpoints and emit a shields.io Endpoint Badge JSON health summary.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
+{"name":"loraspectra_merge_check_badge","description":"Run multi-adapter pre-merge conflict analysis across >= 2 LoRAs and emit a shields.io Endpoint Badge JSON risk summary.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
+{"name":"loraspectra_align_badge","description":"Compute cross-layer Grassmannian subspace alignment (LS029/LS030) for a LoRA adapter and emit a shields.io Endpoint Badge JSON summary.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -1071,6 +1075,110 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 })
             })
         }
+        "loraspectra_diff_badge" => {
+            let sa = args.get("source_a").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_a' string".to_string());
+            let sb = args.get("source_b").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_b' string".to_string());
+            sa.and_then(|a| {
+                sb.and_then(|b| {
+                    let pa = resolve_source_path(a)?;
+                    let pb = resolve_source_path(b)?;
+                    let ta = read_safetensors(&pa)?;
+                    let tb = read_safetensors(&pb)?;
+                    let la = extract_lora_layers(&ta)?;
+                    let lb = extract_lora_layers(&tb)?;
+                    let aa = extract_lora_alphas(&ta);
+                    let ab = extract_lora_alphas(&tb);
+                    let da = extract_dora_scales(&ta);
+                    let db = extract_dora_scales(&tb);
+                    let summary = diff_adapters_with_dora(&la, &aa, &da, &lb, &ab, &db);
+                    let badge = crate::diff::render_diff_badge_json(&summary);
+                    Ok(format!(
+                        r#"{{"shared_layers":{},"mean_relative_drift":{:.4},"mean_subspace_similarity":{:.4},"badge":{}}}"#,
+                        summary.shared_layers.len(),
+                        summary.mean_relative_drift,
+                        summary.mean_subspace_similarity,
+                        badge
+                    ))
+                })
+            })
+        }
+        "loraspectra_subspace_drift_badge" => {
+            let sa = args.get("source_a").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_a' string".to_string());
+            let sb = args.get("source_b").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source_b' string".to_string());
+            sa.and_then(|a| {
+                sb.and_then(|b| {
+                    let pa = resolve_source_path(a)?;
+                    let pb = resolve_source_path(b)?;
+                    let ta = read_safetensors(&pa)?;
+                    let tb = read_safetensors(&pb)?;
+                    let la = extract_lora_layers(&ta)?;
+                    let lb = extract_lora_layers(&tb)?;
+                    let aa = extract_lora_alphas(&ta);
+                    let ab = extract_lora_alphas(&tb);
+                    let summary = crate::diff::analyze_subspace_drift(&la, &aa, &lb, &ab);
+                    let badge = crate::diff::render_subspace_drift_badge_json(&summary);
+                    Ok(format!(
+                        r#"{{"total_shared_layers":{},"healthy_layers":{},"catastrophic_drift_layers":{},"mean_angle_deg":{:.4},"badge":{}}}"#,
+                        summary.total_shared_layers,
+                        summary.healthy_layers,
+                        summary.catastrophic_drift_layers,
+                        summary.mean_angle_deg,
+                        badge
+                    ))
+                })
+            })
+        }
+        "loraspectra_merge_check_badge" => {
+            let raw_sources = args
+                .get("sources")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'sources' array (>= 2 adapter paths/URIs)".to_string());
+            raw_sources.and_then(|arr| {
+                let mut inputs = Vec::new();
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        let p = resolve_source_path(s)?;
+                        let t = read_safetensors(&p)?;
+                        let layers = extract_lora_layers(&t)?;
+                        let alphas = extract_lora_alphas(&t);
+                        inputs.push(AdapterMergeInput {
+                            name: s.to_string(),
+                            layers,
+                            alphas,
+                            peft_config: None,
+                            weight: 1.0,
+                        });
+                    }
+                }
+                let summary = analyze_multi_adapter_merge(&inputs)?;
+                let badge = crate::merge_check::render_merge_check_badge_json(&summary);
+                Ok(format!(
+                    r#"{{"adapter_count":{},"risk_level":"{}","recommended_mode":"{}","badge":{}}}"#,
+                    summary.adapter_names.len(),
+                    json_escape(summary.advisor.risk_level),
+                    json_escape(summary.advisor.recommended_mode),
+                    badge
+                ))
+            })
+        }
+        "loraspectra_align_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let matrix = crate::align::analyze_cross_layer_alignment(&layers);
+                let badge = crate::align::render_alignment_badge_json(&matrix);
+                Ok(format!(
+                    r#"{{"source":"{}","pair_count":{},"redundant_pairs":{},"disjoint_pairs":{},"badge":{}}}"#,
+                    json_escape(s),
+                    matrix.pairs.len(),
+                    matrix.redundant_pairs,
+                    matrix.disjoint_pairs,
+                    badge
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -1175,6 +1283,10 @@ mod tests {
         assert!(tools.contains("loraspectra_rank_schedule_badge"));
         assert!(tools.contains("loraspectra_fp8_validate_badge"));
         assert!(tools.contains("loraspectra_vera_badge"));
+        assert!(tools.contains("loraspectra_diff_badge"));
+        assert!(tools.contains("loraspectra_subspace_drift_badge"));
+        assert!(tools.contains("loraspectra_merge_check_badge"));
+        assert!(tools.contains("loraspectra_align_badge"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

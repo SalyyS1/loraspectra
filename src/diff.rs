@@ -723,6 +723,27 @@ fn html_esc_diff(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Render a shields.io Endpoint Badge JSON summarizing checkpoint differential drift (`diff --badge-json`).
+pub fn render_diff_badge_json(summary: &AdapterDiffSummary) -> String {
+    let color = if summary.mean_relative_drift >= 0.5 || summary.mean_subspace_similarity < 0.6 {
+        "red"
+    } else if summary.mean_relative_drift >= 0.2 || summary.mean_subspace_similarity < 0.85 {
+        "yellow"
+    } else {
+        "brightgreen"
+    };
+    let msg = format!(
+        "drift {:.3} · sim {:.3} ({} layers)",
+        summary.mean_relative_drift,
+        summary.mean_subspace_similarity,
+        summary.shared_layers.len()
+    );
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra diff","message":"{}","color":"{}"}}"#,
+        msg, color
+    )
+}
+
 /// Render a self-contained dark-mode HTML Checkpoint Differential Drift Report for `loraspectra diff --html`.
 pub fn render_diff_html(summary: &AdapterDiffSummary) -> String {
     let mut rows = String::new();
@@ -1168,6 +1189,32 @@ pub fn render_subspace_drift_table(summary: &AdapterSubspaceDriftSummary) -> Str
         ));
     }
     out
+}
+
+/// Render a shields.io Endpoint Badge JSON summarizing principal-angle subspace drift (`subspace-drift --badge-json`).
+pub fn render_subspace_drift_badge_json(summary: &AdapterSubspaceDriftSummary) -> String {
+    let color = if summary.catastrophic_drift_layers > 0 {
+        "red"
+    } else if summary.heavy_drift_layers > 0 || summary.stagnant_layers > 0 {
+        "yellow"
+    } else {
+        "brightgreen"
+    };
+    let status = if summary.catastrophic_drift_layers > 0 {
+        "CATASTROPHIC"
+    } else if summary.heavy_drift_layers > 0 {
+        "HEAVY DRIFT"
+    } else {
+        "HEALTHY"
+    };
+    let msg = format!(
+        "{} ({:.1}° mean, {}/{} ok)",
+        status, summary.mean_angle_deg, summary.healthy_layers, summary.total_shared_layers
+    );
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra drift","message":"{}","color":"{}"}}"#,
+        msg, color
+    )
 }
 
 /// Render a self-contained dark-mode HTML Subspace Drift Report between two LoRA checkpoints.

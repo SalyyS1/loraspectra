@@ -524,6 +524,7 @@ fn main() {
         "diff" => {
             let mut json_mode = false;
             let mut html_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut config_a_opt: Option<String> = None;
             let mut config_b_opt: Option<String> = None;
             let mut pos: Vec<String> = Vec::new();
@@ -536,6 +537,10 @@ fn main() {
                     }
                     "--html" if i + 1 < args.len() => {
                         html_out = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--badge-json" if i + 1 < args.len() => {
+                        badge_out = Some(args[i + 1].clone());
                         i += 2;
                     }
                     "--config-a" if i + 1 < args.len() => {
@@ -585,6 +590,14 @@ fn main() {
                     process::exit(1);
                 }
                 eprintln!("Wrote checkpoint differential drift HTML report to {}", hp);
+            }
+            if let Some(ref bp) = badge_out {
+                let badge = loraspectra::diff::render_diff_badge_json(&summary);
+                if let Err(e) = std::fs::write(bp, &badge) {
+                    eprintln!("Error writing diff badge JSON to '{}': {}", bp, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote checkpoint differential drift badge JSON to {}", bp);
             }
             if json_mode {
                 println!("{}", render_diff_json(&summary));
@@ -1368,6 +1381,7 @@ fn main() {
             let mut custom_weights: Option<Vec<f64>> = None;
             let mut json_mode = false;
             let mut html_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut sarif_opt: Option<String> = None;
             let mut fail_on_conflict = false;
 
@@ -1388,6 +1402,10 @@ fn main() {
                     }
                     "--html" if i + 1 < args.len() => {
                         html_out = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--badge-json" if i + 1 < args.len() => {
+                        badge_out = Some(args[i + 1].clone());
                         i += 2;
                     }
                     "--sarif" if i + 1 < args.len() => {
@@ -1461,6 +1479,14 @@ fn main() {
                     process::exit(1);
                 }
                 eprintln!("Wrote multi-adapter merge-check HTML report to {}", h_path);
+            }
+            if let Some(ref b_path) = badge_out {
+                let badge_str = loraspectra::merge_check::render_merge_check_badge_json(&summary);
+                if let Err(e) = std::fs::write(b_path, &badge_str) {
+                    eprintln!("Error writing merge-check badge JSON to {}: {}", b_path, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote multi-adapter merge-check badge JSON to {}", b_path);
             }
 
             if json_mode {
@@ -2035,6 +2061,7 @@ fn main() {
             let path_b = resolve_input_or_exit(&args[3]);
             let use_json = args.iter().any(|a| a == "--json");
             let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].clone());
+            let badge_out = args.windows(2).find(|w| w[0] == "--badge-json").map(|w| w[1].clone());
 
             let config_a_path = args.windows(2).find(|w| w[0] == "--config-a").map(|w| w[1].clone())
                 .or_else(|| resolve_companion_config_path(&args[2], &path_a).map(|p| p.to_string_lossy().to_string()));
@@ -2094,6 +2121,13 @@ fn main() {
                     process::exit(1);
                 }
             }
+            if let Some(bp) = badge_out {
+                let badge = loraspectra::diff::render_subspace_drift_badge_json(&summary);
+                if let Err(e) = std::fs::write(&bp, badge) {
+                    eprintln!("Error writing subspace-drift badge JSON to {}: {}", bp, e);
+                    process::exit(1);
+                }
+            }
 
             if use_json {
                 println!("{}", render_subspace_drift_json(&summary));
@@ -2115,6 +2149,7 @@ fn main() {
             let _ = (tensors, alphas, cfg);
             let use_json = args.iter().any(|a| a == "--json");
             let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].as_str());
+            let badge_out = args.windows(2).find(|w| w[0] == "--badge-json").map(|w| w[1].as_str());
             if layers.is_empty() {
                 eprintln!("No LoRA layers found in {}", args[2]);
                 process::exit(1);
@@ -2127,6 +2162,14 @@ fn main() {
                     process::exit(1);
                 }
                 eprintln!("Wrote cross-layer Grassmannian alignment HTML report to {}", hp);
+            }
+            if let Some(bp) = badge_out {
+                let badge = loraspectra::align::render_alignment_badge_json(&matrix);
+                if let Err(e) = std::fs::write(bp, &badge) {
+                    eprintln!("Error writing alignment badge JSON to '{}': {}", bp, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote cross-layer Grassmannian alignment badge JSON to {}", bp);
             }
             if use_json {
                 println!("{}", render_alignment_json(&matrix));

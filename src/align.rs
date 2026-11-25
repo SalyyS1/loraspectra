@@ -433,6 +433,26 @@ fn html_esc_align(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Render a shields.io Endpoint Badge JSON summarizing cross-layer Grassmannian alignment (`align --badge-json`).
+pub fn render_alignment_badge_json(matrix: &AdapterAlignmentMatrix) -> String {
+    let issues = matrix.redundant_pairs + matrix.disjoint_pairs;
+    let color = if issues == 0 {
+        "brightgreen"
+    } else if matrix.disjoint_pairs > 0 {
+        "red"
+    } else {
+        "yellow"
+    };
+    let msg = format!(
+        "d_G {:.3} ({} redundant, {} disjoint)",
+        matrix.mean_grassmannian_distance, matrix.redundant_pairs, matrix.disjoint_pairs
+    );
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra align","message":"{}","color":"{}"}}"#,
+        msg, color
+    )
+}
+
 /// Render a self-contained dark-mode HTML Cross-Layer Grassmannian Subspace Alignment Report (`align --html`).
 pub fn render_alignment_html(matrix: &AdapterAlignmentMatrix) -> String {
     let mut rows = String::new();

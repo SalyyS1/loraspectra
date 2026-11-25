@@ -1086,6 +1086,25 @@ fn html_esc_mc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Render a shields.io Endpoint Badge JSON summarizing multi-adapter pre-merge risk (`merge-check --badge-json`).
+pub fn render_merge_check_badge_json(summary: &MultiMergeCheckSummary) -> String {
+    let color = match summary.advisor.risk_level {
+        "HIGH" | "CRITICAL" => "red",
+        "MODERATE" | "MEDIUM" => "yellow",
+        _ => "brightgreen",
+    };
+    let msg = format!(
+        "{} RISK · {} ({} adapters)",
+        summary.advisor.risk_level,
+        summary.advisor.recommended_mode,
+        summary.adapter_names.len()
+    );
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra merge","message":"{}","color":"{}"}}"#,
+        msg, color
+    )
+}
+
 /// Render a self-contained dark-mode HTML Multi-Adapter Pre-Merge Conflict Report (`merge-check --html`).
 pub fn render_merge_check_html(summary: &MultiMergeCheckSummary) -> String {
     let mut rows = String::new();
