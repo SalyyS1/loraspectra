@@ -363,6 +363,11 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_trajectory_badge","description":"Analyze an ordered sequence of >=2 training checkpoints and emit a shields.io Endpoint Badge JSON summarizing convergence phase and best checkpoint.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_doctor_badge","description":"Run Executive Adapter Doctor (A-F) and emit a shields.io Endpoint Badge JSON summarizing composite grade and score.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_svd_compress_badge","description":"Run a read-only Eckart-Young 99%-energy SVD compression dry-run and emit a shields.io Endpoint Badge JSON summarizing byte savings.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_doctor_html","description":"Run Executive Adapter Doctor (A-F) and render a self-contained dark-mode HTML Executive Diagnosis Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_doctor_markdown","description":"Run Executive Adapter Doctor (A-F) and render a ready-to-paste GitHub PR / Issue Markdown Diagnosis Scorecard.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_audit_badge","description":"Run QR-Core SVD spectral audit across all LoRA layers and emit a shields.io Endpoint Badge JSON summarizing mean effective rank and compressibility.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_info_badge","description":"Inspect a .safetensors LoRA header and emit a shields.io Endpoint Badge JSON summarizing architecture, layer count, and rank.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_rules_badge","description":"Emit a shields.io Endpoint Badge JSON summarizing all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -1272,6 +1277,107 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_doctor_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let rep = run_doctor(s, &layers, &tensors, None);
+                let html = crate::doctor::render_doctor_html(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","grade":"{}","score":{:.1},"html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    rep.grade,
+                    rep.score,
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
+        "loraspectra_doctor_markdown" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let rep = run_doctor(s, &layers, &tensors, None);
+                let md = crate::doctor::render_doctor_markdown(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","grade":"{}","score":{:.1},"markdown":"{}"}}"#,
+                    json_escape(s),
+                    rep.grade,
+                    rep.score,
+                    json_escape(&md)
+                ))
+            })
+        }
+        "loraspectra_audit_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let summary = audit_adapter(&layers);
+                let util_pct = if summary.mean_nominal_rank > 0.0 {
+                    (summary.mean_effective_rank / summary.mean_nominal_rank * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+                let color = if util_pct >= 65.0 {
+                    "brightgreen"
+                } else if util_pct >= 35.0 {
+                    "yellow"
+                } else {
+                    "red"
+                };
+                let badge = format!(
+                    r#"{{"schemaVersion":1,"label":"loraspectra svd","message":"r_eff {:.1}/{:.0} ({:.0}% util)","color":"{}"}}"#,
+                    summary.mean_effective_rank, summary.mean_nominal_rank, util_pct, color
+                );
+                Ok(format!(
+                    r#"{{"source":"{}","layer_count":{},"mean_effective_rank":{:.2},"mean_nominal_rank":{:.2},"badge":{}}}"#,
+                    json_escape(s),
+                    summary.layers.len(),
+                    summary.mean_effective_rank,
+                    summary.mean_nominal_rank,
+                    badge
+                ))
+            })
+        }
+        "loraspectra_info_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let alphas = extract_lora_alphas(&tensors);
+                let arch = inspect_adapter_architecture(&layers, &alphas);
+                let badge = format!(
+                    r#"{{"schemaVersion":1,"label":"loraspectra","message":"{} · {}L · r={} ({})","color":"blue"}}"#,
+                    json_escape(arch.inferred_architecture),
+                    layers.len(),
+                    arch.max_rank,
+                    arch.primary_dtype.as_str()
+                );
+                Ok(format!(
+                    r#"{{"source":"{}","architecture":"{}","layer_count":{},"max_rank":{},"badge":{}}}"#,
+                    json_escape(s),
+                    json_escape(arch.inferred_architecture),
+                    layers.len(),
+                    arch.max_rank,
+                    badge
+                ))
+            })
+        }
+        "loraspectra_rules_badge" => {
+            let n = LORASPECTRA_SARIF_RULES.len();
+            let badge = format!(
+                r#"{{"schemaVersion":1,"label":"loraspectra sarif","message":"{} rules (LS001-LS{:03})","color":"brightgreen"}}"#,
+                n, n
+            );
+            Ok(format!(r#"{{"rule_count":{},"badge":{}}}"#, n, badge))
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -1384,6 +1490,11 @@ mod tests {
         assert!(tools.contains("loraspectra_trajectory_badge"));
         assert!(tools.contains("loraspectra_doctor_badge"));
         assert!(tools.contains("loraspectra_svd_compress_badge"));
+        assert!(tools.contains("loraspectra_doctor_html"));
+        assert!(tools.contains("loraspectra_doctor_markdown"));
+        assert!(tools.contains("loraspectra_audit_badge"));
+        assert!(tools.contains("loraspectra_info_badge"));
+        assert!(tools.contains("loraspectra_rules_badge"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
