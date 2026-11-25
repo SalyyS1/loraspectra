@@ -261,6 +261,24 @@ pre{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;
     )
 }
 
+/// Renders a shields.io Endpoint Badge JSON summarizing mixed-precision LoRA quantization savings.
+pub fn render_quant_plan_badge_json(rep: &QuantPlanReport) -> String {
+    let color = if rep.high_risk_layers == 0 {
+        "brightgreen"
+    } else if rep.high_risk_layers <= 2 {
+        "yellow"
+    } else {
+        "orange"
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra quant","message":"{} -{:.1}% ({} protected)","color":"{}"}}"#,
+        rep.target_quant.replace('"', "\\\""),
+        rep.total_savings_pct,
+        rep.high_risk_layers,
+        color
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +318,8 @@ mod tests {
         let html = render_quant_plan_html(&rep);
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("bf16"));
+        let badge = render_quant_plan_badge_json(&rep);
+        assert!(badge.contains("\"schemaVersion\":1"));
+        assert!(badge.contains("loraspectra quant"));
     }
 }

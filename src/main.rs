@@ -29,7 +29,8 @@ use loraspectra::merge_check::{
     AdapterMergeInput,
 };
 use loraspectra::adalora::{
-    optimize_rank_schedule, render_rank_schedule_html, render_rank_schedule_json,
+    optimize_rank_schedule, render_rank_schedule_badge_json, render_rank_schedule_html,
+    render_rank_schedule_json,
     render_rank_schedule_table,
 };
 use loraspectra::align::{analyze_cross_layer_alignment, render_alignment_json, render_alignment_table};
@@ -2803,7 +2804,7 @@ fn main() {
         }
         "rank-schedule" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--html <adalora.html>] [--sarif <out.sarif>] [--json]");
+                eprintln!("Usage: loraspectra rank-schedule <adapter_or_hf_uri> [--target-avg-rank 16] [--min-rank 4] [--max-rank 64] [--html <adalora.html>] [--badge-json <adalora-badge.json>] [--sarif <out.sarif>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
@@ -2811,6 +2812,7 @@ fn main() {
             let mut min_rank: usize = 4;
             let mut max_rank: usize = 64;
             let mut html_path: Option<String> = None;
+            let mut badge_path: Option<String> = None;
             let mut sarif_path: Option<String> = None;
             let mut use_json = false;
             let mut i = 3;
@@ -2840,6 +2842,12 @@ fn main() {
                             html_path = Some(args[i].clone());
                         }
                     }
+                    "--badge-json" => {
+                        i += 1;
+                        if i < args.len() {
+                            badge_path = Some(args[i].clone());
+                        }
+                    }
                     "--sarif" => {
                         i += 1;
                         if i < args.len() {
@@ -2857,6 +2865,13 @@ fn main() {
                 let html_str = render_rank_schedule_html(&summary);
                 if let Err(e) = std::fs::write(hp, html_str) {
                     eprintln!("Error writing HTML report {}: {}", hp, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(ref bp) = badge_path {
+                let badge_str = render_rank_schedule_badge_json(&summary);
+                if let Err(e) = std::fs::write(bp, badge_str) {
+                    eprintln!("Error writing badge JSON {}: {}", bp, e);
                     process::exit(1);
                 }
             }
@@ -3185,7 +3200,7 @@ fn main() {
         }
         "quant-plan" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra quant-plan <adapter_or_hf_uri> [--quant nf4|fp4|int4|int8|fp8|bf16|fp16] [--energy 0.99] [--json]");
+                eprintln!("Usage: loraspectra quant-plan <adapter_or_hf_uri> [--quant nf4|fp4|int4|int8|fp8|bf16|fp16] [--energy 0.99] [--html <quant.html>] [--badge-json <quant-badge.json>] [--json]");
                 process::exit(1);
             }
             let input_uri = &args[2];
@@ -3193,6 +3208,7 @@ fn main() {
             let mut energy = 0.99_f64;
             let mut use_json = false;
             let mut html_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
@@ -3201,6 +3217,12 @@ fn main() {
                         i += 1;
                         if i < args.len() {
                             html_out = Some(args[i].clone());
+                        }
+                    }
+                    "--badge-json" => {
+                        i += 1;
+                        if i < args.len() {
+                            badge_out = Some(args[i].clone());
                         }
                     }
                     "--quant" => {
@@ -3227,6 +3249,13 @@ fn main() {
                 let html = loraspectra::quant_plan::render_quant_plan_html(&rep);
                 if let Err(e) = std::fs::write(hpath, html) {
                     eprintln!("Failed to write quant-plan HTML to {}: {}", hpath, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(ref bpath) = badge_out {
+                let badge = loraspectra::quant_plan::render_quant_plan_badge_json(&rep);
+                if let Err(e) = std::fs::write(bpath, badge) {
+                    eprintln!("Failed to write quant-plan badge JSON to {}: {}", bpath, e);
                     process::exit(1);
                 }
             }

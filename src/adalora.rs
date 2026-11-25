@@ -378,6 +378,24 @@ code{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size
     )
 }
 
+/// Render a shields.io Endpoint Badge JSON summarizing AdaLoRA water-filling rank allocation.
+pub fn render_rank_schedule_badge_json(summary: &RankScheduleSummary) -> String {
+    let color = if summary.bottleneck_count == 0 {
+        "brightgreen"
+    } else if summary.bottleneck_count <= 2 {
+        "yellow"
+    } else {
+        "red"
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra adalora","message":"rank {}->{} ({} bottlenecks)","color":"{}"}}"#,
+        summary.current_total_rank,
+        summary.recommended_total_rank,
+        summary.bottleneck_count,
+        color
+    )
+}
+
 #[cfg(test)]
 mod html_tests {
     use super::*;
@@ -397,5 +415,8 @@ mod html_tests {
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("model.layers.4.mlp.down_proj"));
         assert!(html.contains("AdaLoRA Water-Filling Rank Schedule"));
+        let badge = render_rank_schedule_badge_json(&summary);
+        assert!(badge.contains("\"schemaVersion\":1"));
+        assert!(badge.contains("loraspectra adalora"));
     }
 }
