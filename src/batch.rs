@@ -464,6 +464,22 @@ pub fn render_batch_sarif(report: &BatchAuditReport, min_score: f64) -> String {
     )
 }
 
+/// Render a shields.io Endpoint Badge JSON summarizing a batch checkpoint audit.
+pub fn render_batch_badge_json(report: &BatchAuditReport) -> String {
+    let any_dead = report.entries.iter().any(|e| e.dead_layers > 0);
+    let color = if any_dead || report.mean_health_score < 60.0 {
+        "red"
+    } else if report.mean_health_score < 80.0 {
+        "yellow"
+    } else {
+        "brightgreen"
+    };
+    format!(
+        "{{\"schemaVersion\":1,\"label\":\"loraspectra batch\",\"message\":\"{:.1}/100 ({} adapters)\",\"color\":\"{}\"}}",
+        report.mean_health_score, report.audited_count, color
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +539,9 @@ mod tests {
         let sarif = render_batch_sarif(&report, 80.0);
         assert!(sarif.contains("\"version\": \"2.1.0\""));
         assert!(sarif.contains("LS001"));
+        let badge = render_batch_badge_json(&report);
+        assert!(badge.contains("\"loraspectra batch\""));
+        assert!(badge.contains("2 adapters"));
 
         let _ = fs::remove_dir_all(&dir);
     }

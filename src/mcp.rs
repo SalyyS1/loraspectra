@@ -346,6 +346,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_align_html","description":"Compute cross-layer Grassmannian subspace alignment (LS029/LS030) for a .safetensors LoRA adapter and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_fp8_validate_html","description":"Validate FP8 E4M3/E5M2 scale factor tensors (LS031-LS034) in a .safetensors checkpoint and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"format":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_vera_html","description":"Audit VeRA adapter scalar gating vectors (lambda_b/lambda_d, LS025-LS026) and render a self-contained dark-mode HTML Spectral & Gating Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_batch_badge","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and emit a shields.io Endpoint Badge JSON summarizing mean health score and audited adapter count.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"}},"required":["paths"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -894,6 +895,23 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_batch_badge" => {
+            let raw_paths = args
+                .get("paths")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'paths' array of directories or files".to_string());
+            raw_paths.and_then(|arr| {
+                let paths: Vec<PathBuf> = arr.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect();
+                let max_depth = args.get("max_depth").and_then(|v| v.as_f64()).map(|n| n.max(1.0) as usize).unwrap_or(6);
+                let discovered = discover_checkpoints(&paths, max_depth);
+                let report = run_batch_audit(&discovered);
+                let badge = crate::batch::render_batch_badge_json(&report);
+                Ok(format!(
+                    r#"{{"audited_count":{},"mean_health_score":{:.2},"badge":{}}}"#,
+                    report.audited_count, report.mean_health_score, badge
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -989,6 +1007,7 @@ mod tests {
         assert!(tools.contains("loraspectra_align_html"));
         assert!(tools.contains("loraspectra_fp8_validate_html"));
         assert!(tools.contains("loraspectra_vera_html"));
+        assert!(tools.contains("loraspectra_batch_badge"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

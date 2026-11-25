@@ -2860,6 +2860,7 @@ fn main() {
             let mut max_dead_layers: Option<usize> = None;
             let mut html_out: Option<String> = None;
             let mut sarif_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut use_json = false;
             let mut use_markdown = false;
             let mut i = 2;
@@ -2895,6 +2896,12 @@ fn main() {
                             sarif_out = Some(args[i].clone());
                         }
                     }
+                    "--badge-json" => {
+                        i += 1;
+                        if i < args.len() {
+                            badge_out = Some(args[i].clone());
+                        }
+                    }
                     "--json" => use_json = true,
                     "--markdown" => use_markdown = true,
                     other if !other.starts_with("--") => inputs.push(PathBuf::from(other)),
@@ -2919,6 +2926,13 @@ fn main() {
                 let sarif = render_batch_sarif(&report, fail_below_score.unwrap_or(60.0));
                 if let Err(e) = std::fs::write(&sp, sarif) {
                     eprintln!("Error writing SARIF batch report {}: {}", sp, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(bp) = badge_out {
+                let badge = loraspectra::batch::render_batch_badge_json(&report);
+                if let Err(e) = std::fs::write(&bp, badge) {
+                    eprintln!("Error writing batch badge JSON {}: {}", bp, e);
                     process::exit(1);
                 }
             }
