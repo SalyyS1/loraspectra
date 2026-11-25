@@ -2118,6 +2118,7 @@ fn main() {
             }
             let input_path = resolve_input_or_exit(&args[2]);
             let use_json = args.iter().any(|a| a == "--json");
+            let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].as_str());
             let fmt_str = args.windows(2)
                 .find(|w| w[0] == "--format")
                 .map(|w| w[1].as_str())
@@ -2137,6 +2138,14 @@ fn main() {
                 }
             };
             let report = validate_fp8_scale_factors(&tensor_map, fp8_format);
+            if let Some(hp) = html_out {
+                let html = loraspectra::quant_fp8::render_fp8_scale_html(&report);
+                if let Err(e) = std::fs::write(hp, &html) {
+                    eprintln!("Error writing FP8 HTML report to '{}': {}", hp, e);
+                    process::exit(1);
+                }
+                eprintln!("Wrote FP8 scale validation HTML report to {}", hp);
+            }
             if use_json {
                 println!("{}", render_fp8_scale_json(&report));
             } else {

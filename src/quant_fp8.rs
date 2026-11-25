@@ -397,6 +397,66 @@ pub fn render_fp8_scale_table(report: &Fp8ScaleReport) -> String {
     out
 }
 
+fn fp8_html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML FP8 E4M3/E5M2 Scale Factor Validation Report (`fp8-validate --html`).
+pub fn render_fp8_scale_html(report: &Fp8ScaleReport) -> String {
+    let mut rows = String::new();
+    if report.issues.is_empty() {
+        rows.push_str(
+            "<tr><td colspan=\"5\" style=\"color:#3fb950\"><b>PASS &mdash; All FP8 scale factor tensors are finite, positive, and within dynamic range.</b></td></tr>\n",
+        );
+    } else {
+        for iss in &report.issues {
+            let col = match iss.severity {
+                Fp8ScaleSeverity::Critical | Fp8ScaleSeverity::Error => "#f85149",
+                Fp8ScaleSeverity::Warning => "#d29922",
+                Fp8ScaleSeverity::Info => "#58a6ff",
+            };
+            rows.push_str(&format!(
+                "<tr><td><code>{}</code></td><td><code>{}</code></td><td style=\"color:{}\"><b>{}</b></td><td><code>{}</code></td><td>{}</td></tr>\n",
+                fp8_html_escape(&iss.key),
+                fp8_html_escape(iss.rule_code),
+                col,
+                iss.severity.as_str(),
+                fp8_html_escape(&fmt_f64(iss.scale_value)),
+                fp8_html_escape(&iss.message),
+            ));
+        }
+    }
+    let ok = report.critical_count == 0 && report.error_count == 0;
+    let status_col = if ok { "#3fb950" } else { "#f85149" };
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>loraspectra FP8 Scale Validation ({})</title>
+<style>
+body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,sans-serif}}
+.wrap{{max-width:1060px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;font-size:12.5px}}th,td{{padding:8px 9px;border-bottom:1px solid #21262d;text-align:left}}
+th{{color:#8b949e}}code{{font-family:ui-monospace,monospace;color:#58a6ff}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>loraspectra FP8 {} Scale Factor Validation (LS031&ndash;LS034)</h1>
+<p>Status: <b style="color:{}">{}</b> &middot; Scale Tensors: <b>{}</b> &middot; Critical: <b>{}</b> &middot; Error: <b>{}</b> &middot; Warning: <b>{}</b> &middot; Info: <b>{}</b></p></div>
+<div class="card"><table><thead><tr><th>Tensor Key</th><th>Rule</th><th>Severity</th><th>Scale</th><th>Detail</th></tr></thead>
+<tbody>{}</tbody></table></div></div></body></html>"##,
+        report.format.as_str(),
+        report.format.as_str(),
+        status_col,
+        if ok { "PASS" } else { "FAIL" },
+        report.total_scale_tensors,
+        report.critical_count,
+        report.error_count,
+        report.warning_count,
+        report.info_count,
+        rows
+    )
+}
+
 fn fmt_f64(v: f64) -> String {
     if v.is_nan() {
         "null".to_string()

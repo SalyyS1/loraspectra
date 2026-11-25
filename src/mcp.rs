@@ -344,6 +344,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_diff_html","description":"Compute Frobenius drift, Grassmannian subspace overlap, and DoRA magnitude drift between two .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_merge_check_html","description":"Run multi-adapter pre-merge subspace collision & norm-inflation analysis across >= 2 .safetensors LoRAs and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_align_html","description":"Compute cross-layer Grassmannian subspace alignment (LS029/LS030) for a .safetensors LoRA adapter and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_fp8_validate_html","description":"Validate FP8 E4M3/E5M2 scale factor tensors (LS031-LS034) in a .safetensors checkpoint and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"format":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -853,6 +854,27 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_fp8_validate_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let fmt_str = args.get("format").and_then(|v| v.as_str()).unwrap_or("e4m3");
+                let fp8_fmt = crate::quant_fp8::Fp8Format::from_name(fmt_str)?;
+                let rep = crate::quant_fp8::validate_fp8_scale_factors(&tensors, fp8_fmt);
+                let html = crate::quant_fp8::render_fp8_scale_html(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","format":"{}","total_scale_tensors":{},"critical_count":{},"error_count":{},"html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    rep.format.as_str(),
+                    rep.total_scale_tensors,
+                    rep.critical_count,
+                    rep.error_count,
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -946,6 +968,7 @@ mod tests {
         assert!(tools.contains("loraspectra_diff_html"));
         assert!(tools.contains("loraspectra_merge_check_html"));
         assert!(tools.contains("loraspectra_align_html"));
+        assert!(tools.contains("loraspectra_fp8_validate_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
