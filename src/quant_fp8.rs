@@ -404,6 +404,28 @@ fn fp8_html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Render a shields.io Endpoint Badge JSON summarizing FP8 E4M3/E5M2 scale validation (LS031-LS034).
+pub fn render_fp8_badge_json(report: &Fp8ScaleReport) -> String {
+    let ok = report.critical_count == 0 && report.error_count == 0;
+    let color = if ok && report.warning_count == 0 {
+        "brightgreen"
+    } else if ok {
+        "yellow"
+    } else {
+        "red"
+    };
+    let msg = if ok {
+        format!("{} PASS ({} scales, {} warn)", report.format.as_str(), report.total_scale_tensors, report.warning_count)
+    } else {
+        format!("{} FAIL ({} crit, {} err)", report.format.as_str(), report.critical_count, report.error_count)
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra fp8","message":"{}","color":"{}"}}"#,
+        fp8_json_escape(&msg),
+        color
+    )
+}
+
 /// Render a self-contained dark-mode HTML FP8 E4M3/E5M2 Scale Factor Validation Report (`fp8-validate --html`).
 pub fn render_fp8_scale_html(report: &Fp8ScaleReport) -> String {
     let mut rows = String::new();

@@ -418,6 +418,25 @@ pub fn render_vera_html(report: &VeraAdapterReport) -> String {
     )
 }
 
+/// Renders a shields.io Endpoint Badge JSON summarizing VeRA gating health (LS025-LS026).
+pub fn render_vera_badge_json(report: &VeraAdapterReport) -> String {
+    let bad = report.non_finite_layers + report.dead_rank_layers + report.dead_output_layers;
+    let color = if bad == 0 && report.negative_scale_layers == 0 {
+        "brightgreen"
+    } else if bad == 0 {
+        "yellow"
+    } else {
+        "red"
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra vera","message":"{}/{} healthy ({:.0}% dead rank)","color":"{}"}}"#,
+        report.healthy_layers,
+        report.total_layers,
+        report.mean_dead_rank_fraction * 100.0,
+        color
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

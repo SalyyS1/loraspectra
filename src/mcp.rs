@@ -353,6 +353,8 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_sensitivity_badge","description":"Audit layer-wise catastrophic forgetting sensitivity (LS051-LS052) and emit a shields.io Endpoint Badge JSON summarizing forgetting risk level.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"dominance_warn_pct":{"type":"number"},"spike_multiplier":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_quant_plan_badge","description":"Generate a mixed-precision LoRA quantization plan (nf4/fp4/int8/fp8/bf16/fp16) and emit a shields.io Endpoint Badge JSON summarizing projected savings and protected layers.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_quant":{"type":"string"},"target_energy":{"type":"number"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_rank_schedule_badge","description":"Compute AdaLoRA water-filling heterogeneous rank allocation (LS049-LS050) and emit a shields.io Endpoint Badge JSON summarizing rank reallocation and bottlenecks.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"target_avg_rank":{"type":"number"},"min_rank":{"type":"integer"},"max_rank":{"type":"integer"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_fp8_validate_badge","description":"Validate FP8 E4M3/E5M2 scale factor tensors (LS031-LS034) and emit a shields.io Endpoint Badge JSON pass/fail summary.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"format":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_vera_badge","description":"Audit VeRA adapter scalar gating vectors (LS025-LS026) and emit a shields.io Endpoint Badge JSON health summary.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -830,6 +832,40 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_fp8_validate_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let fmt_name = args.get("format").and_then(|v| v.as_str()).unwrap_or("e4m3");
+                let fmt = crate::quant_fp8::Fp8Format::from_name(fmt_name)?;
+                let rep = crate::quant_fp8::validate_fp8_scale_factors(&tensors, fmt);
+                let badge = crate::quant_fp8::render_fp8_badge_json(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","format":"{}","total_scale_tensors":{},"badge":{}}}"#,
+                    json_escape(s),
+                    rep.format.as_str(),
+                    rep.total_scale_tensors,
+                    badge
+                ))
+            })
+        }
+        "loraspectra_vera_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let rep = crate::vera::audit_vera_adapter(&tensors);
+                let badge = crate::vera::render_vera_badge_json(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","healthy_layers":{},"total_layers":{},"badge":{}}}"#,
+                    json_escape(s),
+                    rep.healthy_layers,
+                    rep.total_layers,
+                    badge
+                ))
+            })
+        }
         "loraspectra_rank_schedule_html" => {
             let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
             src.and_then(|s| {
@@ -1137,6 +1173,8 @@ mod tests {
         assert!(tools.contains("loraspectra_sensitivity_badge"));
         assert!(tools.contains("loraspectra_quant_plan_badge"));
         assert!(tools.contains("loraspectra_rank_schedule_badge"));
+        assert!(tools.contains("loraspectra_fp8_validate_badge"));
+        assert!(tools.contains("loraspectra_vera_badge"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

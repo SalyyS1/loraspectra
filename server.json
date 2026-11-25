@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
   "name": "io.github.SalyyS1/loraspectra",
-  "description": "Zero-dependency Rust Spectral SVD auditor, Executive Doctor (A-F + HTML/SARIF CI gate + shields_badge), Checkpoint Diff (--html), Subspace Drift (--html), Multi-Adapter Merge-Check (--html), Cross-Layer Grassmannian Alignment (--html), FP8 E4M3/E5M2 Scale Validator (--html), VeRA Gating Auditor (--html), 5-Runtime Serving Compat Matrix (--html/--badge-json), Mixed-Precision Quantization Planner (--html/--badge-json), Training Trajectory SVG analyzer, Sensitivity/Forgetting Risk auditor (LS051-LS052 + --html/--badge-json), LoRA+ (--html/--badge-json)/AdaLoRA (--html/--badge-json)/Knots/TSV, Batch Leaderboard + SARIF + Badge, and 35-tool stdio MCP server milestone (52 SARIF rules) for .safetensors LoRA adapters.",
-  "version": "1.55.0",
+  "description": "Zero-dependency Rust Spectral SVD auditor, Executive Doctor (A-F + HTML/SARIF CI gate + shields_badge), Checkpoint Diff (--html), Subspace Drift (--html), Multi-Adapter Merge-Check (--html), Cross-Layer Grassmannian Alignment (--html), FP8 E4M3/E5M2 Scale Validator (--html/--badge-json), VeRA Gating Auditor (--html/--badge-json), 5-Runtime Serving Compat Matrix (--html/--badge-json), Mixed-Precision Quantization Planner (--html/--badge-json), Training Trajectory SVG analyzer, Sensitivity/Forgetting Risk auditor (LS051-LS052 + --html/--badge-json), LoRA+ (--html/--badge-json)/AdaLoRA (--html/--badge-json)/Knots/TSV, Batch Leaderboard + SARIF + Badge, and 37-tool stdio MCP server (52 SARIF rules) for .safetensors LoRA adapters.",
+  "version": "1.56.0",
   "repository": {
     "url": "https://github.com/SalyyS1/loraspectra",
     "source": "github"

@@ -1986,12 +1986,13 @@ fn main() {
         "vera" => {
             // VeRA scaling vector fingerprinting
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra vera <adapter_or_hf_uri> [--json] [--html <vera.html>]");
+                eprintln!("Usage: loraspectra vera <adapter_or_hf_uri> [--json] [--html <vera.html>] [--badge-json <vera-badge.json>]");
                 process::exit(1);
             }
             let input_path = resolve_input_or_exit(&args[2]);
             let use_json = args.iter().any(|a| a == "--json");
             let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].clone());
+            let badge_out = args.windows(2).find(|w| w[0] == "--badge-json").map(|w| w[1].clone());
             let tensor_map = read_safetensors(&input_path).unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", args[2], e);
                 process::exit(1);
@@ -2005,6 +2006,13 @@ fn main() {
                 let html = loraspectra::vera::render_vera_html(&report);
                 if let Err(e) = std::fs::write(&hp, html) {
                     eprintln!("Error writing HTML report to {}: {}", hp, e);
+                    process::exit(1);
+                }
+            }
+            if let Some(bp) = badge_out {
+                let badge = loraspectra::vera::render_vera_badge_json(&report);
+                if let Err(e) = std::fs::write(&bp, badge) {
+                    eprintln!("Error writing badge JSON to {}: {}", bp, e);
                     process::exit(1);
                 }
             }
@@ -2132,12 +2140,13 @@ fn main() {
         "fp8-validate" => {
             // FP8 E4M3/E5M2 scale factor validation
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--json]");
+                eprintln!("Usage: loraspectra fp8-validate <adapter_or_hf_uri> --format e4m3|e5m2 [--html <fp8.html>] [--badge-json <fp8-badge.json>] [--json]");
                 process::exit(1);
             }
             let input_path = resolve_input_or_exit(&args[2]);
             let use_json = args.iter().any(|a| a == "--json");
             let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].as_str());
+            let badge_out = args.windows(2).find(|w| w[0] == "--badge-json").map(|w| w[1].as_str());
             let fmt_str = args.windows(2)
                 .find(|w| w[0] == "--format")
                 .map(|w| w[1].as_str())
@@ -2164,6 +2173,13 @@ fn main() {
                     process::exit(1);
                 }
                 eprintln!("Wrote FP8 scale validation HTML report to {}", hp);
+            }
+            if let Some(bp) = badge_out {
+                let badge = loraspectra::quant_fp8::render_fp8_badge_json(&report);
+                if let Err(e) = std::fs::write(bp, &badge) {
+                    eprintln!("Error writing FP8 badge JSON to '{}': {}", bp, e);
+                    process::exit(1);
+                }
             }
             if use_json {
                 println!("{}", render_fp8_scale_json(&report));
