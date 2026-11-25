@@ -368,6 +368,8 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_audit_badge","description":"Run QR-Core SVD spectral audit across all LoRA layers and emit a shields.io Endpoint Badge JSON summarizing mean effective rank and compressibility.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_info_badge","description":"Inspect a .safetensors LoRA header and emit a shields.io Endpoint Badge JSON summarizing architecture, layer count, and rank.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_rules_badge","description":"Emit a shields.io Endpoint Badge JSON summarizing all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+{"name":"loraspectra_batch_html","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Spectral Health Leaderboard.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"}},"required":["paths"],"additionalProperties":false}},
+{"name":"loraspectra_model_card_html","description":"Generate a HuggingFace Spectral Audit Model Card and render it as a self-contained dark-mode HTML preview.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -1378,6 +1380,51 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
             );
             Ok(format!(r#"{{"rule_count":{},"badge":{}}}"#, n, badge))
         }
+        "loraspectra_batch_html" => {
+            let raw_paths = args
+                .get("paths")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'paths' array of directories or files".to_string());
+            raw_paths.and_then(|arr| {
+                let paths: Vec<PathBuf> = arr.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect();
+                let max_depth = args.get("max_depth").and_then(|v| v.as_f64()).map(|n| n.max(1.0) as usize).unwrap_or(6);
+                let discovered = discover_checkpoints(&paths, max_depth);
+                let report = run_batch_audit(&discovered);
+                let html = crate::batch::render_batch_html(&report);
+                Ok(format!(
+                    r#"{{"audited_count":{},"mean_health_score":{:.2},"html_bytes":{},"html":"{}"}}"#,
+                    report.audited_count,
+                    report.mean_health_score,
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
+        "loraspectra_model_card_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let alphas = extract_lora_alphas(&tensors);
+                let dora = extract_dora_scales(&tensors);
+                let summary = audit_adapter(&layers);
+                let integrity = audit_adapter_integrity(&layers, &tensors, &alphas, &dora, None);
+                let arch = inspect_adapter_architecture(&layers, &alphas);
+                let md = crate::card::generate_model_card(s, &arch, &summary, &integrity);
+                let esc_md = md.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+                let html = format!(
+                    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>LoRASpectra Model Card</title><style>body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:system-ui,sans-serif}}.wrap{{max-width:960px;margin:0 auto}}pre{{white-space:pre-wrap;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.55}}</style></head><body><div class=\"wrap\"><h1>LoRASpectra HuggingFace Model Card Preview</h1><pre>{}</pre></div></body></html>",
+                    esc_md
+                );
+                Ok(format!(
+                    r#"{{"source":"{}","html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -1495,6 +1542,8 @@ mod tests {
         assert!(tools.contains("loraspectra_audit_badge"));
         assert!(tools.contains("loraspectra_info_badge"));
         assert!(tools.contains("loraspectra_rules_badge"));
+        assert!(tools.contains("loraspectra_batch_html"));
+        assert!(tools.contains("loraspectra_model_card_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
