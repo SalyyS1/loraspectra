@@ -3208,12 +3208,13 @@ fn main() {
         }
         "compat" => {
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra compat <adapter_or_hf_uri> [--json] [--html <compat.html>] [--fail-incompatible <vllm|sglang|peft|llama.cpp|comfyui>]");
+                eprintln!("Usage: loraspectra compat <adapter_or_hf_uri> [--json] [--html <compat.html>] [--badge-json <compat-badge.json>] [--fail-incompatible <vllm|sglang|peft|llama.cpp|comfyui>]");
                 process::exit(1);
             }
             let input_uri = &args[2];
             let mut use_json = false;
             let mut html_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut required_runtime: Option<String> = None;
             let mut i = 3;
             while i < args.len() {
@@ -3223,6 +3224,11 @@ fn main() {
                     i += 1;
                     if i < args.len() {
                         html_out = Some(args[i].clone());
+                    }
+                } else if args[i] == "--badge-json" {
+                    i += 1;
+                    if i < args.len() {
+                        badge_out = Some(args[i].clone());
                     }
                 } else if args[i] == "--fail-incompatible" {
                     i += 1;
@@ -3239,6 +3245,13 @@ fn main() {
                         let html = loraspectra::compat::render_compat_html(&rep);
                         if let Err(e) = std::fs::write(hpath, html) {
                             eprintln!("Failed to write compat HTML to {}: {}", hpath, e);
+                            process::exit(1);
+                        }
+                    }
+                    if let Some(ref bpath) = badge_out {
+                        let badge = loraspectra::compat::render_compat_badge_json(&rep);
+                        if let Err(e) = std::fs::write(bpath, badge) {
+                            eprintln!("Failed to write compat badge JSON to {}: {}", bpath, e);
                             process::exit(1);
                         }
                     }

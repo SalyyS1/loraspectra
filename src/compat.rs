@@ -307,6 +307,25 @@ fn html_esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Renders a shields.io Endpoint Badge JSON summarizing serving runtime readiness.
+pub fn render_compat_badge_json(rep: &CompatibilityReport) -> String {
+    let total = rep.runtimes.len();
+    let color = if rep.ready_count >= 4 {
+        "brightgreen"
+    } else if rep.ready_count >= 2 {
+        "yellow"
+    } else {
+        "red"
+    };
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra compat","message":"{}/{} ready ({})","color":"{}"}}"#,
+        rep.ready_count,
+        total,
+        json_esc(&rep.naming_format),
+        color
+    )
+}
+
 /// Renders a self-contained dark-mode 5-runtime serving compatibility HTML scorecard.
 pub fn render_compat_html(rep: &CompatibilityReport) -> String {
     let mut rows = String::new();
@@ -373,5 +392,8 @@ mod tests {
         let html = render_compat_html(&rep);
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("vLLM"));
+        let badge = render_compat_badge_json(&rep);
+        assert!(badge.contains("\"schemaVersion\":1"));
+        assert!(badge.contains("ready"));
     }
 }

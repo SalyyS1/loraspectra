@@ -348,6 +348,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_vera_html","description":"Audit VeRA adapter scalar gating vectors (lambda_b/lambda_d, LS025-LS026) and render a self-contained dark-mode HTML Spectral & Gating Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_batch_badge","description":"Recursively audit a directory or list of .safetensors LoRA checkpoints and emit a shields.io Endpoint Badge JSON summarizing mean health score and audited adapter count.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer"}},"required":["paths"],"additionalProperties":false}},
 {"name":"loraspectra_subspace_drift_html","description":"Compute principal-angle subspace drift (LS027-LS028) between two .safetensors LoRA checkpoints and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
+{"name":"loraspectra_compat_badge","description":"Evaluate 5-runtime LoRA serving compatibility (vLLM, SGLang, PEFT, llama.cpp, ComfyUI) and emit a shields.io Endpoint Badge JSON readiness payload.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -697,6 +698,22 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_compat_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let rep = check_serving_compatibility(s, &tensors)?;
+                let badge = crate::compat::render_compat_badge_json(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","ready_count":{},"total_runtimes":{},"badge":{}}}"#,
+                    json_escape(s),
+                    rep.ready_count,
+                    rep.runtimes.len(),
+                    badge
+                ))
+            })
+        }
         "loraspectra_sensitivity_html" => {
             let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
             src.and_then(|s| {
@@ -1037,6 +1054,7 @@ mod tests {
         assert!(tools.contains("loraspectra_vera_html"));
         assert!(tools.contains("loraspectra_batch_badge"));
         assert!(tools.contains("loraspectra_subspace_drift_html"));
+        assert!(tools.contains("loraspectra_compat_badge"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,
