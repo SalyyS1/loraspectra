@@ -345,6 +345,7 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_merge_check_html","description":"Run multi-adapter pre-merge subspace collision & norm-inflation analysis across >= 2 .safetensors LoRAs and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_align_html","description":"Compute cross-layer Grassmannian subspace alignment (LS029/LS030) for a .safetensors LoRA adapter and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_fp8_validate_html","description":"Validate FP8 E4M3/E5M2 scale factor tensors (LS031-LS034) in a .safetensors checkpoint and render a self-contained dark-mode HTML Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"format":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_vera_html","description":"Audit VeRA adapter scalar gating vectors (lambda_b/lambda_d, LS025-LS026) and render a self-contained dark-mode HTML Spectral & Gating Report.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -875,6 +876,24 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_vera_html" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let rep = crate::vera::audit_vera_adapter(&tensors);
+                let html = crate::vera::render_vera_html(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","total_layers":{},"healthy_layers":{},"dead_rank_layers":{},"html_bytes":{},"html":"{}"}}"#,
+                    json_escape(s),
+                    rep.total_layers,
+                    rep.healthy_layers,
+                    rep.dead_rank_layers,
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -969,6 +988,7 @@ mod tests {
         assert!(tools.contains("loraspectra_merge_check_html"));
         assert!(tools.contains("loraspectra_align_html"));
         assert!(tools.contains("loraspectra_fp8_validate_html"));
+        assert!(tools.contains("loraspectra_vera_html"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

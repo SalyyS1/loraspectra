@@ -367,6 +367,57 @@ pub fn render_vera_table(report: &VeraAdapterReport) -> String {
     out
 }
 
+fn escape_html_vera(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render a self-contained dark-mode HTML VeRA Adapter Spectral & Gating Report.
+pub fn render_vera_html(report: &VeraAdapterReport) -> String {
+    let mut rows = String::new();
+    for layer in &report.layers {
+        let color = match layer.health {
+            VeraLayerHealth::Healthy => "#3fb950",
+            VeraLayerHealth::NegativeScale => "#d29922",
+            VeraLayerHealth::NonFiniteScale
+            | VeraLayerHealth::DeadRankGating
+            | VeraLayerHealth::DeadOutputGating => "#f85149",
+        };
+        let issues = if layer.issues.is_empty() {
+            "—".to_string()
+        } else {
+            layer.issues.join(", ")
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{:.4}</td><td>{:.4}</td><td>{:.1}%</td><td>{:.6}</td><td style=\"color:{};font-weight:700\">{}</td><td>{}</td></tr>\n",
+            escape_html_vera(&layer.base_name),
+            layer.rank,
+            layer.d_out,
+            layer.lambda_b_cv,
+            layer.lambda_d_cv,
+            layer.dead_rank_fraction * 100.0,
+            layer.spectral_norm_lower_bound,
+            color,
+            layer.health.as_str(),
+            escape_html_vera(&issues),
+        ));
+    }
+    format!(
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>loraspectra v{} VeRA Spectral &amp; Gating Report</title><style>body{{margin:0;padding:28px;background:#0b0f17;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}}.wrap{{max-width:1120px;margin:0 auto}}.card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;margin-bottom:16px}}table{{width:100%;border-collapse:collapse;font-size:12.5px}}th,td{{padding:8px 10px;border-bottom:1px solid #21262d;text-align:left}}th{{color:#8b949e}}code{{font-family:ui-monospace,monospace;color:#58a6ff}}</style></head><body><div class="wrap"><div class="card"><h1>loraspectra VeRA Adapter Spectral &amp; Gating Report</h1><p>Healthy Layers: <b>{}/{}</b> &middot; Dead Rank Layers: <b>{}</b> &middot; Dead Output: <b>{}</b> &middot; Negative Scale: <b>{}</b> &middot; Non-Finite: <b>{}</b> &middot; Mean Dead Rank: <b>{:.1}%</b></p></div><div class="card"><table><thead><tr><th>Layer</th><th>Rank</th><th>d_out</th><th>&lambda;_b CV</th><th>&lambda;_d CV</th><th>Dead Rank</th><th>Spectral LB</th><th>Health</th><th>Rules</th></tr></thead><tbody>{}</tbody></table></div></div></body></html>"##,
+        env!("CARGO_PKG_VERSION"),
+        report.healthy_layers,
+        report.total_layers,
+        report.dead_rank_layers,
+        report.dead_output_layers,
+        report.negative_scale_layers,
+        report.non_finite_layers,
+        report.mean_dead_rank_fraction * 100.0,
+        rows
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +646,17 @@ mod tests {
         let ld = make_tensor1d(vec![0.5, 1.5, 0.1], DType::F32);
         let report = audit_vera_layer("test.layer", &lb, &ld);
         assert!((report.spectral_norm_lower_bound - 4.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_vera_html_render_contains_summary_and_layers() {
+        let mut map: BTreeMap<String, Tensor2D> = BTreeMap::new();
+        map.insert("model.q_proj.vera_lambda_b".to_string(), make_tensor1d(vec![1.0; 16], DType::F32));
+        map.insert("model.q_proj.vera_lambda_d".to_string(), make_tensor1d(vec![0.5; 4], DType::F32));
+        let report = audit_vera_adapter(&map);
+        let html = render_vera_html(&report);
+        assert!(html.contains("VeRA Adapter Spectral"));
+        assert!(html.contains("model.q_proj"));
+        assert!(html.contains("HEALTHY"));
     }
 }

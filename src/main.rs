@@ -1983,11 +1983,12 @@ fn main() {
         "vera" => {
             // VeRA scaling vector fingerprinting
             if args.len() < 3 {
-                eprintln!("Usage: loraspectra vera <adapter_or_hf_uri> [--json]");
+                eprintln!("Usage: loraspectra vera <adapter_or_hf_uri> [--json] [--html <vera.html>]");
                 process::exit(1);
             }
             let input_path = resolve_input_or_exit(&args[2]);
             let use_json = args.iter().any(|a| a == "--json");
+            let html_out = args.windows(2).find(|w| w[0] == "--html").map(|w| w[1].clone());
             let tensor_map = read_safetensors(&input_path).unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", args[2], e);
                 process::exit(1);
@@ -1996,6 +1997,13 @@ fn main() {
             if report.total_layers == 0 {
                 eprintln!("No VeRA scaling vectors (vera_lambda_b/vera_lambda_d or scaling_b/scaling_d) found in {}", args[2]);
                 process::exit(1);
+            }
+            if let Some(hp) = html_out {
+                let html = loraspectra::vera::render_vera_html(&report);
+                if let Err(e) = std::fs::write(&hp, html) {
+                    eprintln!("Error writing HTML report to {}: {}", hp, e);
+                    process::exit(1);
+                }
             }
             if use_json {
                 println!("{}", render_vera_json(&report));
