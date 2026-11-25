@@ -320,6 +320,26 @@ fn html_esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Render a shields.io Endpoint Badge JSON summarizing training trajectory phase & best checkpoint.
+pub fn render_trajectory_badge_json(rep: &TrajectoryReport) -> String {
+    let color = if rep.phase.eq_ignore_ascii_case("COLLAPSING") || rep.phase.eq_ignore_ascii_case("OVERFITTING") {
+        "red"
+    } else if rep.early_stop_recommended {
+        "yellow"
+    } else {
+        "brightgreen"
+    };
+    let msg = format!(
+        "{} · best #{} ({} ckpts)",
+        rep.phase, rep.best_checkpoint_index, rep.checkpoint_count
+    );
+    format!(
+        r#"{{"schemaVersion":1,"label":"loraspectra trajectory","message":"{}","color":"{}"}}"#,
+        json_esc(&msg),
+        color
+    )
+}
+
 /// Renders a self-contained dark-mode HTML report with an inline SVG Effective Rank &
 /// Frobenius Velocity convergence chart for sharing in PRs, W&B notes, or model cards.
 pub fn render_trajectory_html(rep: &TrajectoryReport) -> String {

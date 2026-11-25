@@ -359,6 +359,10 @@ fn tools_list_json() -> &'static str {
 {"name":"loraspectra_subspace_drift_badge","description":"Compute principal-angle subspace drift (LS027-LS028) between two LoRA checkpoints and emit a shields.io Endpoint Badge JSON health summary.","inputSchema":{"type":"object","properties":{"source_a":{"type":"string"},"source_b":{"type":"string"}},"required":["source_a","source_b"],"additionalProperties":false}},
 {"name":"loraspectra_merge_check_badge","description":"Run multi-adapter pre-merge conflict analysis across >= 2 LoRAs and emit a shields.io Endpoint Badge JSON risk summary.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
 {"name":"loraspectra_align_badge","description":"Compute cross-layer Grassmannian subspace alignment (LS029/LS030) for a LoRA adapter and emit a shields.io Endpoint Badge JSON summary.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_trajectory_html","description":"Analyze an ordered sequence of >=2 training checkpoints and render a self-contained dark-mode HTML SVG Convergence Report.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
+{"name":"loraspectra_trajectory_badge","description":"Analyze an ordered sequence of >=2 training checkpoints and emit a shields.io Endpoint Badge JSON summarizing convergence phase and best checkpoint.","inputSchema":{"type":"object","properties":{"sources":{"type":"array","items":{"type":"string"}}},"required":["sources"],"additionalProperties":false}},
+{"name":"loraspectra_doctor_badge","description":"Run Executive Adapter Doctor (A-F) and emit a shields.io Endpoint Badge JSON summarizing composite grade and score.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
+{"name":"loraspectra_svd_compress_badge","description":"Run a read-only Eckart-Young 99%-energy SVD compression dry-run and emit a shields.io Endpoint Badge JSON summarizing byte savings.","inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false}},
 {"name":"loraspectra_list_rules","description":"List all 52 OASIS SARIF v2.1.0 LoRASpectra diagnostic rules (LS001-LS052).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ]}"#
 }
@@ -1179,6 +1183,95 @@ fn handle_tool_call(id_lit: &str, params: &BTreeMap<String, JsonVal>) -> String 
                 ))
             })
         }
+        "loraspectra_trajectory_html" => {
+            let raw_sources = args
+                .get("sources")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'sources' array (>= 2 ordered checkpoints)".to_string());
+            raw_sources.and_then(|arr| {
+                let srcs: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                let rep = analyze_trajectory(&srcs)?;
+                let html = crate::trajectory::render_trajectory_html(&rep);
+                Ok(format!(
+                    r#"{{"checkpoint_count":{},"phase":"{}","best_checkpoint_index":{},"early_stop_recommended":{},"html_bytes":{},"html":"{}"}}"#,
+                    rep.checkpoint_count,
+                    json_escape(&rep.phase),
+                    rep.best_checkpoint_index,
+                    if rep.early_stop_recommended { "true" } else { "false" },
+                    html.len(),
+                    json_escape(&html)
+                ))
+            })
+        }
+        "loraspectra_trajectory_badge" => {
+            let raw_sources = args
+                .get("sources")
+                .and_then(|v| v.as_arr())
+                .ok_or_else(|| "Missing 'sources' array (>= 2 ordered checkpoints)".to_string());
+            raw_sources.and_then(|arr| {
+                let srcs: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                let rep = analyze_trajectory(&srcs)?;
+                let badge = crate::trajectory::render_trajectory_badge_json(&rep);
+                Ok(format!(
+                    r#"{{"checkpoint_count":{},"phase":"{}","best_checkpoint_index":{},"badge":{}}}"#,
+                    rep.checkpoint_count,
+                    json_escape(&rep.phase),
+                    rep.best_checkpoint_index,
+                    badge
+                ))
+            })
+        }
+        "loraspectra_doctor_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let rep = run_doctor(s, &layers, &tensors, None);
+                let badge = crate::doctor::render_doctor_badge_json(&rep);
+                Ok(format!(
+                    r#"{{"source":"{}","grade":"{}","health_score":{:.1},"badge":{}}}"#,
+                    json_escape(s),
+                    rep.grade,
+                    rep.score,
+                    badge
+                ))
+            })
+        }
+        "loraspectra_svd_compress_badge" => {
+            let src = args.get("source").and_then(|v| v.as_str()).ok_or_else(|| "Missing 'source' string".to_string());
+            src.and_then(|s| {
+                let path = resolve_source_path(s)?;
+                let tensors = read_safetensors(&path)?;
+                let layers = extract_lora_layers(&tensors)?;
+                let summary = audit_adapter(&layers);
+                let saved_bytes = summary.total_nominal_bytes.saturating_sub(summary.total_optimal_99_bytes);
+                let pct = if summary.total_nominal_bytes > 0 {
+                    (saved_bytes as f64 / summary.total_nominal_bytes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let color = if pct >= 50.0 {
+                    "orange"
+                } else if pct >= 20.0 {
+                    "yellow"
+                } else {
+                    "brightgreen"
+                };
+                let badge = format!(
+                    r#"{{"schemaVersion":1,"label":"loraspectra compress","message":"-{:.1}% @99% energy","color":"{}"}}"#,
+                    pct, color
+                );
+                Ok(format!(
+                    r#"{{"source":"{}","nominal_bytes":{},"optimal_99_bytes":{},"savings_pct":{:.2},"badge":{}}}"#,
+                    json_escape(s),
+                    summary.total_nominal_bytes,
+                    summary.total_optimal_99_bytes,
+                    pct,
+                    badge
+                ))
+            })
+        }
         unknown => return rpc_error(id_lit, -32602, &format!("Unknown tool: {}", unknown)),
     };
 
@@ -1287,6 +1380,10 @@ mod tests {
         assert!(tools.contains("loraspectra_subspace_drift_badge"));
         assert!(tools.contains("loraspectra_merge_check_badge"));
         assert!(tools.contains("loraspectra_align_badge"));
+        assert!(tools.contains("loraspectra_trajectory_html"));
+        assert!(tools.contains("loraspectra_trajectory_badge"));
+        assert!(tools.contains("loraspectra_doctor_badge"));
+        assert!(tools.contains("loraspectra_svd_compress_badge"));
 
         let rules = handle_mcp_message(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loraspectra_list_rules","arguments":{}}}"#,

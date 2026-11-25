@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>loraspectra v1.57.0 - Interactive .safetensors SVD, 41-Tool MCP Server, Live Shields.io Badge Lab &amp; 52 SARIF Rules</title>
-  <meta name="description" content="100% client-side in-browser .safetensors header inspector, 41-tool stdio MCP server (loraspectra mcp), live browser Shields.io Badge preview, 5-runtime serving compatibility matrix (--html/--badge-json/--fail-incompatible), Executive Adapter Doctor (A-F + HTML/SARIF/Badge CI gate), LoRA+, AdaLoRA, Quantization Planner, FP8, VeRA &amp; Sensitivity (--html/--badge-json), Subspace Drift (--html/--badge-json), Checkpoint Diff (--html/--badge-json), Multi-Adapter Merge-Check (--html/--badge-json), Grassmannian Alignment (--html/--badge-json), Batch Audit HTML/SARIF/Badge, and Training Trajectory SVG analyzer (v1.57.0, SARIF LS001-LS052).">
-  <meta property="og:title" content="loraspectra v1.57.0 - Interactive .safetensors SVD, 41-Tool MCP Server, Live Shields.io Badge Lab &amp; 52 SARIF Rules">
+  <title>loraspectra v1.58.0 - Interactive .safetensors SVD, 45-Tool MCP Server Milestone, Live Shields.io Badge Lab &amp; 52 SARIF Rules</title>
+  <meta name="description" content="100% client-side in-browser .safetensors header inspector, 45-tool stdio MCP server milestone (loraspectra mcp), live browser Shields.io Badge preview, 5-runtime serving compatibility matrix (--html/--badge-json/--fail-incompatible), Executive Adapter Doctor (A-F + HTML/SARIF/Badge CI gate), LoRA+, AdaLoRA, Quantization Planner, FP8, VeRA &amp; Sensitivity (--html/--badge-json), Subspace Drift (--html/--badge-json), Checkpoint Diff (--html/--badge-json), Multi-Adapter Merge-Check (--html/--badge-json), Grassmannian Alignment (--html/--badge-json), Batch Audit HTML/SARIF/Badge, and Training Trajectory SVG + Badge analyzer (v1.58.0, SARIF LS001-LS052).">
+  <meta property="og:title" content="loraspectra v1.58.0 - Interactive .safetensors SVD, 45-Tool MCP Server Milestone, Live Shields.io Badge Lab &amp; 52 SARIF Rules">
   <meta property="og:description" content="Drop any PEFT, Kohya/ComfyUI, FLUX, or Diffusers .safetensors LoRA in your browser to compute exact QR-Core SVD singular spectra, effective rank, Marchenko-Pastur noise floor, and optimal compression.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://salyys1.github.io/loraspectra/">
@@ -411,7 +411,7 @@
   <div class="container">
     <div class="badge-row">
       <span class="badge badge-green">100% Local Browser SVD (0 Uploads)</span>
-      <span class="badge">Pure Rust CLI + 41-Tool Stdio MCP Server</span>
+      <span class="badge">Pure Rust CLI + 45-Tool Stdio MCP Server Milestone</span>
       <span class="badge">1,050x&ndash;2,680x Faster QR-Core SVD</span>
       <span class="badge">52 OASIS SARIF Rules (LS001&ndash;LS052)</span>
       <span class="badge">PEFT &bull; Kohya &bull; ComfyUI &bull; FLUX &bull; Diffusers</span>
@@ -419,9 +419,9 @@
 
     <div class="hero-top">
       <div>
-        <h1>loraspectra <span class="ver-pill">v1.57.0</span></h1>
+        <h1>loraspectra <span class="ver-pill">v1.58.0</span></h1>
         <p class="lead">
-          Spectral SVD Auditor, <strong>41-Tool Stdio MCP Server (<code>loraspectra mcp</code>)</strong>, Executive Doctor (A&ndash;F + HTML/SARIF/Badge), 5-Runtime Serving Compat Matrix, Multi-Checkpoint Batch Leaderboard (<code>batch-audit</code>), LoRA+ Variational Factor Balancer, AdaLoRA Water-Filling Rank Scheduler, FP8 &amp; VeRA Auditors, Diff/Drift/Merge-Check/Align HTML &amp; Badge Suite, Knots/TSV Aligner, LoRA-GA Initializer, O-LoRA Projector, and TIES/DARE Merger
+          Spectral SVD Auditor, <strong>45-Tool Stdio MCP Server Milestone (<code>loraspectra mcp</code>)</strong>, Executive Doctor (A&ndash;F + HTML/SARIF/Badge), 5-Runtime Serving Compat Matrix, Multi-Checkpoint Batch Leaderboard (<code>batch-audit</code>), LoRA+ Variational Factor Balancer, AdaLoRA Water-Filling Rank Scheduler, FP8 &amp; VeRA Auditors, Diff/Drift/Merge-Check/Align/Trajectory HTML &amp; Badge Suite, Knots/TSV Aligner, LoRA-GA Initializer, O-LoRA Projector, and TIES/DARE Merger
           &mdash; powered by exact QR-Core SVD (<code>O(r&sup2;d + r&sup3;)</code>) with zero dependencies.
         </p>
         <div class="cta-row">
@@ -793,7 +793,7 @@ loraspectra knots ./code_lora.safetensors ./math_lora.safetensors -o merged_knot
     <div class="card" id="v1140-doctor-card">
       <div class="card-header">
         <h2 class="card-title">Interactive Executive Adapter Doctor (A–F) &amp; Forgetting Risk Simulator (<code>v1.14.0</code>)</h2>
-        <span class="privacy-tag">41-Tool MCP · SARIF LS001–LS052</span>
+        <span class="privacy-tag">45-Tool MCP · SARIF LS001–LS052</span>
       </div>
       <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 16px;">
         Preview the exact composite A–F scoring model used by <code>loraspectra doctor</code> &amp; <code>loraspectra_doctor</code> MCP tool across dead layers, LoRA+ gauge imbalance, SVD utilization, and <code>LS051</code>/<code>LS052</code> catastrophic forgetting spikes.
@@ -948,7 +948,7 @@ loraspectra doctor ./ckpt-300.safetensors --html doctor.html --sarif doctor.sari
     <!-- 1-Click 15-Tool MCP Server Config (v1.25.0) -->
     <div class="card" id="mcp-15-card">
       <div class="card-header">
-        <h2 class="card-title">1-Click 41-Tool Stdio MCP Server Config (<code>loraspectra mcp</code>)</h2>
+        <h2 class="card-title">1-Click 45-Tool Stdio MCP Server Config (<code>loraspectra mcp</code>)</h2>
         <span class="privacy-tag">Claude Code · Cursor · Windsurf · Codex</span>
       </div>
       <p style="font-size: 13.5px; color: var(--muted); margin: 0 0 12px;">

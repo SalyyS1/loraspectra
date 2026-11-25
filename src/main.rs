@@ -3217,6 +3217,7 @@ fn main() {
         "trajectory" => {
             let mut use_json = false;
             let mut html_out: Option<String> = None;
+            let mut badge_out: Option<String> = None;
             let mut sources: Vec<String> = Vec::new();
             let mut i = 2;
             while i < args.len() {
@@ -3227,13 +3228,18 @@ fn main() {
                     if i < args.len() {
                         html_out = Some(args[i].clone());
                     }
+                } else if args[i] == "--badge-json" {
+                    i += 1;
+                    if i < args.len() {
+                        badge_out = Some(args[i].clone());
+                    }
                 } else if !args[i].starts_with('-') {
                     sources.push(args[i].clone());
                 }
                 i += 1;
             }
             if sources.len() < 2 {
-                eprintln!("Usage: loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json] [--html <traj.html>]");
+                eprintln!("Usage: loraspectra trajectory <ckpt_1> <ckpt_2> [ckpt_3 ...] [--json] [--html <traj.html>] [--badge-json <traj-badge.json>]");
                 process::exit(1);
             }
             match loraspectra::trajectory::analyze_trajectory(&sources) {
@@ -3242,6 +3248,13 @@ fn main() {
                         let html = loraspectra::trajectory::render_trajectory_html(&rep);
                         if let Err(e) = std::fs::write(path, html) {
                             eprintln!("Failed to write trajectory HTML report to {}: {}", path, e);
+                            process::exit(1);
+                        }
+                    }
+                    if let Some(ref path) = badge_out {
+                        let badge = loraspectra::trajectory::render_trajectory_badge_json(&rep);
+                        if let Err(e) = std::fs::write(path, badge) {
+                            eprintln!("Failed to write trajectory badge JSON to {}: {}", path, e);
                             process::exit(1);
                         }
                     }
